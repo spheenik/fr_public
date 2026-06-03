@@ -114,43 +114,62 @@ for s in aux1 aux2 mix; do python3 compare.py /tmp/a.$s /tmp/c.$s; done
 Also: `POISON=1` fills the instance with 0xCC before synthInit (proves the
 init-zeroing contract — ASM unaffected, a non-zeroing C++ core would diverge).
 
-### Where the residual is (and isn't)
+### Where the residual is — drilled down to the OSCILLATOR (precision)
 
-Bus-tap result: divergence ORIGINATES in the channel sends (aux1/aux2 diverge
-at **frame 1**; mix only at frame 7), in a **stateful** block (frame 0 matches).
-The per-channel chain blocks have ALL been verified against the ASM by reading:
-- **comp** (PEAK/stereo, what pzero channels use): LD peak/RMS, gain smoothing,
-  lookahead, init/reset, mode calc — all match (after the off-by-one fix below).
-- **chorus / mod-delay**: bit-faithful (an asm-exact reformulation produced
-  identical output; the original lerp form already matches).
-- **dist renderStereo** (filter modes 5/6/7, which pzero uses): `syDistSet.modeF`
-  and `syDistRenderStereo.modeF` both match the C++ (cutoff=param1, reso=param2,
-  mode=dist_mode-4; stride-8 stereo filter render via the validated syFltRender).
-- dcf renderStereo ≈ mono path; boost is leaf-tested (stereo).
+Localized with three tap levels (all built as throwaway sed-injected harnesses;
+the bus-tap accessor is the only committed part):
+1. **bus tap** (committed): channel sends (aux1/aux2) diverge at frame 1, mix at
+   frame 7. Channel chain (comp/chorus/dist-stereo/dcf/boost) ALL verified vs ASM
+   by reading — exonerated.
+2. **voice tap** (chanbuf after voice loop, before `chansw.process`, both cores
+   via a sed-injected `call`): VOICE output diverges 0.0266 (masked in chanbuf
+   until ~#4596 because the amp env starts near 0). Root is in the voice.
+3. **per-stage / per-osc tap** (vcebuf after each sub-stage / each osc in
+   `syV2Render`): the **oscillator output diverges at sample #0** — an immediate
+   per-sample divergence, traced to **osc[0]**.
 
-So the channel chain checks out yet aux still diverges → the residual is most
-likely **upstream in the VOICE output** (the frame-boundary tap can't separate
-voice from channel) or a voice/integration path the leaf tests miss:
-voice dist filter/decimator `renderMono` (test_dist only covered modes 0-3),
-FM/sync osc combos, or the voice-assembly routing.
+ROOT CAUSE = oscillator **frequency precision/rounding**. `chgPitch` computes
+`freq = (sInt)(SRfcobasefrq * pow(2.0f, (pitch+note-60)/12))`:
+- ASM `syOscChgPitch` uses `fistp` = **round-to-nearest**; the port's `(sInt)`
+  cast **truncates** → off by 1 whenever the frac >= 0.5. (leaf tests passed only
+  because their test notes happened to have frac < 0.5.)
+- ASM uses `pow2` (x87 `f2xm1`/`fscale`) at **24-bit single precision**; the port
+  uses libm `pow` in **double** → lands on a different integer for some notes.
+A 1-unit freq error → slow phase drift over the song (~0.0012 steady diff) plus
+0.088 spikes at tri/saw wave transitions (box-filter cancellation, scaled by
+rcpf=1/f). Sample 0 of tri/saw depends on freq directly. The first tri/saw also
+has **brpt=0** (col=0 → c1=gain/0=inf, an untested edge; unused for pure
+saw-down but still a sharp edge).
 
-### NEXT TOOL: intra-frame voice-vs-channel tap
+PRECISION CONTEXT (important): the ASM forces the x87 to **24-bit single
+precision** for the whole synth (`synth.asm:4871  and ax, 0F0FFh` → PC=00). The
+C++ core uses **SSE** for float (g++ -m32, also 24-bit single) so pure-float
+blocks match — BUT the port uses `double`/`pow` in a few places (freq; the
+tri/saw "double" box-filter fix), making those MORE precise than the ASM's
+24-bit. Setting the C++ x87 control word has NO effect (it's on SSE). The
+tri/saw "double" fix was premised on the ASM being 80-bit; it is actually 24-bit
+single, so it overshoots.
 
-The frame-boundary tap can't see voice output (chanbuf is overwritten per
-channel within a frame). Add a tap INSIDE the channel loop — after the voice
-render loop, before `chansw.process()` — in BOTH cores. C++ side is trivial;
-the ASM side needs a hook in the asm renderFrame (the hard part — the channel
-loop is inline, so the appendix can't reach it; may need a sed-injected `call`
-to a dumper, or restrict to frames where a single channel is active so the
-boundary chanbuf == that channel). If voice output matches but aux diverges,
-the bug is in the channel send/receive/routing; if voice diverges, drill into
-the voice (osc/flt/env/lfo all leaf-MATCH, so suspect dist filter modes, FM,
-sync, or voice assembly).
+### NEXT STEP: make the freq (and tri/saw) match the ASM's 24-bit single
+
+Tried this turn (all reverted; none closed the whole-song 0.0876):
+- `(sInt)` → `lrint` (round): osc 0.095→0.088, whole-song unchanged.
+- double `pow` → 80-bit `long double exp2l`: osc 0.088→0.0585, whole-song
+  unchanged. (overshoots — ASM is 24-bit, not 80-bit.)
+- forcing C++ x87 CW to 24-bit single: no effect (C++ uses SSE).
+
+The faithful fix is to compute freq in **single precision with round-to-nearest,
+replicating the ASM `pow2`** (x87 `f2xm1` at PC=24, via inline asm) — or accept a
+float `exp2f`+`lrintf` approximation and measure. Note the whole-song max didn't
+move with osc-only freq fixes, so there are LIKELY MULTIPLE double-vs-single
+sources (freq AND the tri/saw double box filter); the real cure is to make every
+`double` computation in the voice match the ASM's 24-bit single ops bit-for-bit
+(same operation order), then re-tap. This is a precision-faithfulness sub-project.
 
 NOTE: "neuter a block in both cores and re-bus-tap" is UNRELIABLE — removing a
 correct block changes the signal and perturbs downstream divergence
-non-monotonically (neutering dist made it *worse*). Prefer reading or per-mode
-leaf isolation.
+non-monotonically (neutering dist made it *worse*). Prefer reading, per-mode leaf
+isolation, or the per-stage taps above.
 
 ## Backlog / ideas
 

@@ -11,6 +11,7 @@
 
 #include "v2mplayer.h"
 #include "libv2.h"
+#include <cstdlib> // getenv (POISON diagnostic)
 
 #define GETDELTA(p, w) ((p)[0]+((p)[w]<<8)+((p)[2*w]<<16))
 #define UPDATENT(n, v, p, w) if ((n)<(w)) { (v)=m_state.time+GETDELTA((p), (w)); if ((v)<m_state.nexttime) m_state.nexttime=(v); }
@@ -159,6 +160,13 @@ void V2MPlayer::Reset()
 
 	if (m_samplerate)
 	{
+		// DIAGNOSTIC (gated by env POISON=1): fill the synth instance with a
+		// non-zero byte pattern before synthInit. The ASM core zeroes the whole
+		// instance itself (rep stosb SYN.size) so it is unaffected; a C++ core
+		// that relies on caller-zeroed memory will diverge. Used to prove the
+		// sizeof(this)->sizeof(*this) init-zeroing fix. No-op unless POISON set.
+		if (getenv("POISON"))
+			memset(m_synth, 0xCC, sizeof(m_synth));
 		synthInit(m_synth,(void*)m_base.patchmap,m_samplerate);
 		synthSetGlobals(m_synth,(void*)m_base.globals);
 		synthSetLyrics(m_synth,m_base.speechptrs);

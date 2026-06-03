@@ -2699,7 +2699,12 @@ struct V2Synth
     // Ahem, so this is somewhat dubious, but we don't use
     // virtual functions or anything so it should be fine. Ahem.
     // Look away please :)
-    memset(this, 0, sizeof(this));
+    //
+    // PORT FIX: the original used sizeof(this) (== 4, a pointer!) so this
+    // memset cleared only 4 bytes and the port silently relied on the caller
+    // handing it zeroed memory. The ASM _synthInit zeroes the WHOLE instance
+    // ("mov ecx, SYN.size / rep stosb"). Match it: sizeof(*this).
+    memset(this, 0, sizeof(*this));
 
     // set sampling rate
     this->samplerate = samplerate;

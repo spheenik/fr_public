@@ -49,6 +49,29 @@ global syBoostRender
 ; --- fastatan (used by distortion overdrive) ---
 global fastatan
 
+; --- bus-tap accessor: returns live aux1/aux2/mix buffer ptrs + frame size ---
+; Mirrors synthDebugGetBus in synth_core.cpp. stdcall(pthis,**a1,**a2,**mix,*fs).
+; The redef step renames _synthDebugGetBus@20 -> synthDebugGetBus for the harness.
+global _synthDebugGetBus@20
+_synthDebugGetBus@20:
+    push  ebp
+    mov   ebp, esp
+    mov   edx, [ebp+8]              ; edx = SYN base (pthis)
+    mov   eax, [ebp+12]            ; **a1
+    lea   ecx, [edx + SYN.aux1buf]
+    mov   [eax], ecx
+    mov   eax, [ebp+16]           ; **a2
+    lea   ecx, [edx + SYN.aux2buf]
+    mov   [eax], ecx
+    mov   eax, [ebp+20]          ; **mix
+    lea   ecx, [edx + SYN.mixbuf]
+    mov   [eax], ecx
+    mov   eax, [ebp+24]         ; *framesize
+    mov   ecx, [SRcFrameSize]
+    mov   [eax], ecx
+    pop   ebp
+    ret   20
+
 ; --- struct sizes / field offsets the harness needs (as data) ---
 section .data
 global v2x_size_syWOsc

@@ -2066,7 +2066,7 @@ private:
     sF32 *delaybuf = db[ch];
     sF32 x = utof23((sU32)(offs32_32 & 0xffffffffu));
     sF32 delayed = lerp(delaybuf[(index - 0) & dbufmask], delaybuf[(index - 1) & dbufmask], x);
-    
+
     // mix and output
     delaybuf[dbptr] = in + delayed*fbval;
     return in*dry + delayed*wetout;
@@ -2255,7 +2255,11 @@ struct V2Comp
         // lookahead delay line
         sF32 v = outvol * dbuf[dbind].ch[ch];
         dbuf[dbind].ch[ch] = invol * buf[i].ch[ch];
-        if (++dbind >= dblen)
+        // PORT FIX: ASM (syCompProcChannel) wraps with "inc/cmp dblen/jbe" i.e.
+        // resets only when the index EXCEEDS dblen -> ring length dblen+1. The
+        // port used ">= dblen" (ring length dblen), making the lookahead one
+        // sample short. Match the ASM.
+        if (++dbind > dblen)
           dbind = 0;
 
         // determine dest gain
@@ -3352,6 +3356,22 @@ long __stdcall synthGetFrameSize(void *pthis)
 {
   return ((V2Synth *)pthis)->instance.SRcFrameSize;
 }
+
+#ifdef V2_VALIDATE
+// Validation-only: expose the live per-frame "bus" buffers (channel sends to
+// the global FX, and the final mix) so the A/B harness can bus-tap and bisect
+// where the whole-song divergence first appears. Read-only; never affects DSP.
+// Mirrored in v2/validate/asm_appendix.asm for the ASM core.
+extern "C" void __stdcall synthDebugGetBus(void *pthis, float **a1, float **a2,
+                                           float **mix, int *framesize)
+{
+  V2Synth *s = (V2Synth *)pthis;
+  *a1        = s->instance.aux1buf;
+  *a2        = s->instance.aux2buf;
+  *mix       = &s->instance.mixbuf[0].l;
+  *framesize = s->instance.SRcFrameSize;
+}
+#endif
 
 extern "C" void * __stdcall synthGetSpeechMem(void *pthis)
 {

@@ -12,6 +12,35 @@
 #include "v2mplayer.h"
 #include "libv2.h"
 #include <cstdlib> // getenv (POISON diagnostic)
+#include <cstdio>  // bus-tap dump (BUSTAP diagnostic)
+
+// Bus-tap (gated by env BUSTAP=<prefix>): after each synthRender call, append
+// the live per-frame bus buffers to <prefix>.aux1/.aux2/.mix. Both cores get
+// the identical chunk sequence, so the dumps are call-for-call comparable;
+// diffing them bisects channel-chain (aux*) vs global-FX (mix) divergence.
+// synthDebugGetBus is provided by whichever synth core is linked (C++ or ASM).
+extern "C" void __stdcall synthDebugGetBus(void *, float **, float **, float **, int *);
+static void bustap_dump(void *synth)
+{
+  static FILE *fa1 = 0, *fa2 = 0, *fmx = 0;
+  static int armed = -1;
+  if (armed < 0) {
+    const char *pfx = getenv("BUSTAP");
+    armed = pfx ? 1 : 0;
+    if (armed) {
+      char p[600];
+      snprintf(p, sizeof p, "%s.aux1", pfx); fa1 = fopen(p, "wb");
+      snprintf(p, sizeof p, "%s.aux2", pfx); fa2 = fopen(p, "wb");
+      snprintf(p, sizeof p, "%s.mix",  pfx); fmx = fopen(p, "wb");
+    }
+  }
+  if (!armed) return;
+  float *a1, *a2, *mx; int n = 0;
+  synthDebugGetBus(synth, &a1, &a2, &mx, &n);
+  if (fa1) fwrite(a1, sizeof(float), n,   fa1);
+  if (fa2) fwrite(a2, sizeof(float), n,   fa2);
+  if (fmx) fwrite(mx, sizeof(float), 2*n, fmx);
+}
 
 #define GETDELTA(p, w) ((p)[0]+((p)[w]<<8)+((p)[2*w]<<16))
 #define UPDATENT(n, v, p, w) if ((n)<(w)) { (v)=m_state.time+GETDELTA((p), (w)); if ((v)<m_state.nexttime) m_state.nexttime=(v); }
@@ -376,6 +405,7 @@ void V2MPlayer::Render(sF32 *a_buffer, sU32 a_len, sBool a_add)
 			if (torender)
 			{
 				synthRender(m_synth,a_buffer,torender,0,a_add);
+				bustap_dump(m_synth);
 				a_buffer+=2*torender;
 				todo-=torender;
 				m_state.smpldelta-=torender;

@@ -30,7 +30,9 @@ nm synth_asm.o | grep ' T _synth' \
 objcopy --redefine-syms=redef.map synth_asm.o synth_asm_undec.o
 
 echo "[2/5] compile core under test (synth_core.cpp)"
-$CXX $CXXFLAGS -c ../synth_core.cpp -o synth_cpp.o
+# -DV2_VALIDATE exposes synthDebugGetBus (read-only bus-tap accessor) for the
+# A/B harness; it does not affect any DSP path.
+$CXX $CXXFLAGS -DV2_VALIDATE -c ../synth_core.cpp -o synth_cpp.o
 
 echo "[3/5] compile shared player + harness + asm-only stubs"
 $CXX $CXXFLAGS -c v2mplayer_port.cpp -o v2mplayer_port.o

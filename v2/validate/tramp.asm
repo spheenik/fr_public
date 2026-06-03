@@ -8,6 +8,26 @@
 bits 32
 section .text
 
+; No-op stub for the chorus-integer dump callback referenced by chorusdbg_snap
+; in the appendix. The comp_* tests link this (tramp.o) but not asm_stubs.o, so
+; they need the symbol resolved; they never exercise syModDelSet so it's unused.
+; harness_asm links the real chorusdbg_c (asm_stubs.o) instead and not tramp.o.
+global chorusdbg_c
+chorusdbg_c:
+    ret
+global compdbg_c
+compdbg_c:
+    ret
+global boostdbg_c
+boostdbg_c:
+    ret
+global envdbg_c
+envdbg_c:
+    ret
+global allocdbg_c
+allocdbg_c:
+    ret
+
 extern calcNewSampleRate
 extern syOscInit
 extern syOscSet
@@ -31,6 +51,9 @@ extern syBoostInit
 extern syBoostSet
 extern syBoostRender
 extern fastatan
+extern fastsin
+extern fastsinrc
+extern pow2
 
 ; --- helper macros: wrap a register-ABI routine as a cdecl function ---
 ; W1: routine taking ebp=arg0
@@ -108,6 +131,24 @@ v2x_boostRender:
     pop edi
     pop esi
     pop ebp
+    ret
+
+; float v2x_fastsin(float x)  / float v2x_fastsinrc(float x)
+; st0 in -> st0 out (cdecl float arg at [esp+4], float return in st0).
+global v2x_fastsin
+v2x_fastsin:
+    fld  dword [esp+4]
+    call fastsin
+    ret
+global v2x_fastsinrc
+v2x_fastsinrc:
+    fld  dword [esp+4]
+    call fastsinrc
+    ret
+global v2x_pow2
+v2x_pow2:
+    fld  dword [esp+4]
+    call pow2
     ret
 
 ; void v2x_calcSR(int samplerate)   -- eax = sr

@@ -43,9 +43,12 @@
       transcendentals + osc frequency + tri/saw box filter all match the asm
       (component-verified). It is necessary infrastructure for whole-song zero
       but not sufficient.
-- [ ] 7.2 NEXT CHANGE: localize the global-mix-chain divergence (tap between
-      reverb/delay/dcf/lc-hc/compr stages on `mixbuf`).
+- [x] 7.2 NEXT CHANGE: localize the global-mix-chain divergence (tap between
+      reverb/delay/dcf/lc-hc/compr stages on `mixbuf`). Documented as the next
+      step in `v2/validate/HANDOVER.md` ("What's OPEN" status update).
 
 ## 6. Docs
-- [ ] 6.1 Update `v2/validate/HANDOVER.md` "Current results" with the new number
-- [ ] 6.2 Note the faithful-vs-portable split decision in the handover/spec
+- [x] 6.1 Update `v2/validate/HANDOVER.md` "Current results" with the new number
+      (0.0876298994; faithful freq path + bus-tap re-localization to mix=0.08116).
+- [x] 6.2 Note the faithful-vs-portable split decision in the handover/spec
+      (HANDOVER.md "What's OPEN"; delta spec "Bit-faithful validation build" req).

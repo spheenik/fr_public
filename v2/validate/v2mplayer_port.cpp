@@ -20,9 +20,23 @@
 // diffing them bisects channel-chain (aux*) vs global-FX (mix) divergence.
 // synthDebugGetBus is provided by whichever synth core is linked (C++ or ASM).
 extern "C" void __stdcall synthDebugGetBus(void *, float **, float **, float **, int *);
+// Per-stage mix-chain tap: snapshots of mixbuf after each global FX stage
+// (reverb, mod-delay, dcf, low-cut/high-cut, sum compressor). Lets the A/B
+// harness bisect WHICH global stage introduces the divergence. Provided by both
+// cores (C++ under V2_VALIDATE; asm via asm_appendix.asm + redef step).
+extern "C" void __stdcall synthDebugGetMixTap(void *, float **, float **, float **,
+                                              float **, float **, int *);
+// Per-voice-substage tap (mono vcebuf snapshots after osc/filter/dist/dcf): one
+// level deeper than the mix tap, to localize which voice block first diverges.
+extern "C" void __stdcall synthDebugGetVceTap(void *, float **, float **, float **,
+                                              float **, int *);
+extern "C" void __stdcall synthDebugGetChanTap(void *, float **, int *);
 static void bustap_dump(void *synth)
 {
   static FILE *fa1 = 0, *fa2 = 0, *fmx = 0;
+  static FILE *fpr = 0, *fpd = 0, *fpf = 0, *fpl = 0, *fpc = 0; // per-stage taps
+  static FILE *fvo = 0, *fvf = 0, *fvd = 0, *fvc = 0;           // per-voice taps
+  static FILE *fch = 0;                                         // channel sum tap
   static int armed = -1;
   if (armed < 0) {
     const char *pfx = getenv("BUSTAP");
@@ -32,6 +46,16 @@ static void bustap_dump(void *synth)
       snprintf(p, sizeof p, "%s.aux1", pfx); fa1 = fopen(p, "wb");
       snprintf(p, sizeof p, "%s.aux2", pfx); fa2 = fopen(p, "wb");
       snprintf(p, sizeof p, "%s.mix",  pfx); fmx = fopen(p, "wb");
+      snprintf(p, sizeof p, "%s.post_reverb", pfx); fpr = fopen(p, "wb");
+      snprintf(p, sizeof p, "%s.post_delay",  pfx); fpd = fopen(p, "wb");
+      snprintf(p, sizeof p, "%s.post_dcf",    pfx); fpf = fopen(p, "wb");
+      snprintf(p, sizeof p, "%s.post_lchc",   pfx); fpl = fopen(p, "wb");
+      snprintf(p, sizeof p, "%s.post_compr",  pfx); fpc = fopen(p, "wb");
+      snprintf(p, sizeof p, "%s.vce_osc",  pfx); fvo = fopen(p, "wb");
+      snprintf(p, sizeof p, "%s.vce_flt",  pfx); fvf = fopen(p, "wb");
+      snprintf(p, sizeof p, "%s.vce_dist", pfx); fvd = fopen(p, "wb");
+      snprintf(p, sizeof p, "%s.vce_dcf",  pfx); fvc = fopen(p, "wb");
+      snprintf(p, sizeof p, "%s.chan",     pfx); fch = fopen(p, "wb");
     }
   }
   if (!armed) return;
@@ -40,6 +64,45 @@ static void bustap_dump(void *synth)
   if (fa1) fwrite(a1, sizeof(float), n,   fa1);
   if (fa2) fwrite(a2, sizeof(float), n,   fa2);
   if (fmx) fwrite(mx, sizeof(float), 2*n, fmx);
+  float *pr, *pd, *pf, *pl, *pc; int n2 = 0;
+  synthDebugGetMixTap(synth, &pr, &pd, &pf, &pl, &pc, &n2);
+  if (fpr) fwrite(pr, sizeof(float), 2*n2, fpr);
+  if (fpd) fwrite(pd, sizeof(float), 2*n2, fpd);
+  if (fpf) fwrite(pf, sizeof(float), 2*n2, fpf);
+  if (fpl) fwrite(pl, sizeof(float), 2*n2, fpl);
+  if (fpc) fwrite(pc, sizeof(float), 2*n2, fpc);
+  float *vo, *vf, *vd, *vc; int n3 = 0;
+  synthDebugGetVceTap(synth, &vo, &vf, &vd, &vc, &n3); // mono streams
+  if (fvo) fwrite(vo, sizeof(float), n3, fvo);
+  if (fvf) fwrite(vf, sizeof(float), n3, fvf);
+  if (fvd) fwrite(vd, sizeof(float), n3, fvd);
+  if (fvc) fwrite(vc, sizeof(float), n3, fvc);
+  float *cb; int n4 = 0;
+  synthDebugGetChanTap(synth, &cb, &n4);   // stereo
+  if (fch) fwrite(cb, sizeof(float), 2*n4, fch);
+}
+
+// Event trace (gated by env EVTRACE=1): decode the per-Tick MIDI buffer and print
+// the current sample position + note/CC/PB/PC events to stderr. Lets us correlate
+// a divergence sample (e.g. ~4563) with the musical event that triggers it.
+static void evtrace(unsigned cursmpl, unsigned ticktime, const unsigned char *buf)
+{
+  static int armed = -1;
+  if (armed < 0) armed = getenv("EVTRACE") ? 1 : 0;
+  if (!armed) return;
+  char line[1024]; int o = 0;
+  o += snprintf(line+o, sizeof line-o, "smpl=%-7u tick=%-6u |", cursmpl, ticktime);
+  const unsigned char *p = buf; unsigned char st = 0; int any = 0;
+  while (*p != 0xfd && o < (int)sizeof line - 64) {
+    if (*p >= 0x80) st = *p++;
+    unsigned ch = st & 0x0f, cmd = st & 0xf0;
+    if (cmd == 0x90)      { int n=p[0],v=p[1]; p+=2; o+=snprintf(line+o,sizeof line-o," ch%u %s n%d v%d", ch, v?"NOTEON":"noteoff", n, v); any=1; }
+    else if (cmd == 0xb0) { int c=p[0],v=p[1]; p+=2; o+=snprintf(line+o,sizeof line-o," ch%u CC%d=%d", ch, c, v); any=1; }
+    else if (cmd == 0xc0) { int v=p[0]; p+=1;       o+=snprintf(line+o,sizeof line-o," ch%u PGM=%d", ch, v); any=1; }
+    else if (cmd == 0xe0) { int a=p[0],b=p[1]; p+=2; o+=snprintf(line+o,sizeof line-o," ch%u PB=%d,%d", ch, a, b); any=1; }
+    else break;
+  }
+  if (any) fprintf(stderr, "%s\n", line);
 }
 
 #define GETDELTA(p, w) ((p)[0]+((p)[w]<<8)+((p)[2*w]<<16))
@@ -301,6 +364,7 @@ void V2MPlayer::Tick()
 
 	*mptr++=0xfd;
 
+	evtrace(m_state.cursmpl, m_state.time, m_midibuf);
 	synthProcessMIDI(m_synth,m_midibuf);
 	
 	if (m_state.nexttime==(sU32)-1) m_state.state=PlayerState::STOPPED;

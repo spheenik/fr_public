@@ -25,6 +25,77 @@ CXXFLAGS="-m32 -std=c++03 -O2 -w -include compat.h -I.. -mpc32 -mno-sse -DV2_X87
 echo "[1/5] assemble oracle (synth.asm, RONAN off) + validation appendix"
 sed 's/^%define\([[:space:]]*\)RONAN[[:space:]]*$/; RONAN disabled for validation: &/' \
     ../synth.asm > synth_noronan.asm
+# Inject per-stage mix-chain snapshot calls into the render frame (validation
+# localization tap). Splices `call mixtap_snap_<stage>` after each global FX stage
+# so the asm core snapshots mixbuf at the same five points as synth_core.cpp's
+# MIXTAP_SNAP. Routines/buffers are defined in asm_appendix.asm (appended below);
+# anchored on render-frame-unique tokens. The ORIGINAL synth.asm is untouched.
+sed -i \
+  -e 's/\(call[[:space:]][[:space:]]*syReverbProcess\)/\1\n\tcall mixtap_snap_reverb/' \
+  -e 's/\(call[[:space:]][[:space:]]*syModDelRenderAux2Main\)/\1\n\tcall mixtap_snap_delay/' \
+  -e 's/\(;[[:space:]]*lowcut\/highcut\)/\tcall mixtap_snap_dcf\n\1/' \
+  -e 's/\(;[[:space:]]*Kompressor\)/\tcall mixtap_snap_lchc\n\1/' \
+  -e 's/\(lea[[:space:]][[:space:]]*ebp,[[:space:]]*\[ebp[[:space:]]*-[[:space:]]*SYN\.compr\]\)/\tcall mixtap_snap_compr\n\1/' \
+  synth_noronan.asm
+# Sanity: each of the five snapshot calls must have been injected exactly once.
+n=$(grep -c 'call mixtap_snap_' synth_noronan.asm)
+[ "$n" -eq 5 ] || { echo "ERROR: mixtap injection count $n != 5" >&2; exit 1; }
+# Inject per-voice-substage snapshot calls into syV2Render (localization level 2).
+# Snapshots mono vcebuf after osc/filter/dist/dcf; anchored on unique section
+# comments. Routines/buffers defined in asm_appendix.asm.
+sed -i \
+  -e 's/\(;[[:space:]]*Filter + Routing\)/\tcall vcetap_snap_osc\n\1/' \
+  -e 's/\(;[[:space:]]*distortion\)/\tcall vcetap_snap_flt\n\1/' \
+  -e 's/\(;[[:space:]]*dc filter\)/\tcall vcetap_snap_dist\n\1/' \
+  -e 's/\(;[[:space:]]*vcebuf (mono) nach chanbuf\)/\tcall vcetap_snap_dcf\n\1/' \
+  synth_noronan.asm
+n=$(grep -c 'call vcetap_snap_' synth_noronan.asm)
+[ "$n" -eq 4 ] || { echo "ERROR: vcetap injection count $n != 4" >&2; exit 1; }
+# Inject the channel voice-sum snapshot (post-curvol) before syChanProcess in the
+# render block. Captures chanbuf after the voice loop, before the channel chain.
+sed -i \
+  -e 's/\(call[[:space:]][[:space:]]*syChanProcess\)/\tcall chantap_snap\n\1/' \
+  -e 's/\(;[[:space:]]*process all channels\)/\tcall chantap_reset\n\1/' \
+  synth_noronan.asm
+n=$(grep -c 'call chantap_snap' synth_noronan.asm)
+[ "$n" -eq 1 ] || { echo "ERROR: chantap injection count $n != 1" >&2; exit 1; }
+n=$(grep -c 'call chantap_reset' synth_noronan.asm)
+[ "$n" -eq 1 ] || { echo "ERROR: chantap_reset injection count $n != 1" >&2; exit 1; }
+# Inject the asm-side chorus-integer dump at the end of syModDelSet (ebp = the
+# syWModDel base, FPU stack empty). Anchored on the unique mphase shift.
+sed -i \
+  -e 's/\(shl[[:space:]][[:space:]]*dword \[ebp + syWModDel\.mphase\], 1\)/\1\n\tcall chorusdbg_snap/' \
+  synth_noronan.asm
+n=$(grep -c 'call chorusdbg_snap' synth_noronan.asm)
+[ "$n" -eq 1 ] || { echo "ERROR: chorusdbg_snap injection count $n != 1" >&2; exit 1; }
+# Inject the asm-side compressor-integer dump at the end of syCompSet (ebp =
+# syWComp base, FPU stack empty). Anchored on the unique release store.
+sed -i \
+  -e 's/\(fstp[[:space:]][[:space:]]*dword \[ebp + syWComp\.release\]\)/\1\n\tcall comptrace_snap/' \
+  synth_noronan.asm
+n=$(grep -c 'call comptrace_snap' synth_noronan.asm)
+[ "$n" -eq 1 ] || { echo "ERROR: comptrace_snap injection count $n != 1" >&2; exit 1; }
+# Inject the asm-side boost-coeff dump at the end of syBoostSet's enabled path
+# (ebp = syWBoost base, FPU stack empty). Anchored on the unique b2 store.
+sed -i \
+  -e 's/\(fstp[[:space:]][[:space:]]*dword \[ebp + syWBoost\.b2\]\)/\1\n\tcall boostdbg_snap/' \
+  synth_noronan.asm
+n=$(grep -c 'call boostdbg_snap' synth_noronan.asm)
+[ "$n" -eq 1 ] || { echo "ERROR: boostdbg_snap injection count $n != 1" >&2; exit 1; }
+# Inject the asm-side env-coeff dump at the end of syEnvSet (ebp = syWEnv base,
+# FPU stack empty). Anchored on the unique gain store.
+sed -i \
+  -e 's/\(fstp[[:space:]][[:space:]]*dword \[ebp + syWEnv\.gain\]\)/\1\n\tcall envdbg_snap/' \
+  synth_noronan.asm
+n=$(grep -c 'call envdbg_snap' synth_noronan.asm)
+[ "$n" -eq 1 ] || { echo "ERROR: envdbg_snap injection count $n != 1" >&2; exit 1; }
+# Inject the asm-side voice-allocation dump at ProcessNoteOn.donoteon (ecx=chan,
+# edx=slot). Anchored on the unique chanmap store right after the .donoteon label.
+sed -i \
+  -e 's/\(mov \[ebp + SYN\.chanmap  + 4\*edx\], ecx  ; channel\)/\tcall allocdbg_snap\n\t\1/' \
+  synth_noronan.asm
+n=$(grep -c 'call allocdbg_snap' synth_noronan.asm)
+[ "$n" -eq 1 ] || { echo "ERROR: allocdbg_snap injection count $n != 1" >&2; exit 1; }
 # Append the validation appendix (exposes block routines / SR globals / offsets).
 # Concatenated onto the generated copy so the original synth.asm stays untouched.
 cat asm_appendix.asm >> synth_noronan.asm
@@ -65,7 +136,7 @@ echo "[+] component equivalence tests"
 nasm -f elf32 tramp.asm -o tramp.o
 # comp_osc.cpp #includes ../synth_core.cpp (for V2Osc) and links the RAW asm
 # object (decorated _synth*@N coexists with undecorated synthInit -> no clash).
-for t in comp_osc comp_flt comp_leaves comp_fastatan comp_trisaw; do
+for t in comp_osc comp_flt comp_leaves comp_fastatan comp_trisaw comp_lfo comp_osc_exact; do
   $CXX $CXXFLAGS -c $t.cpp -o $t.o
   $CXX $LDFLAGS $t.o synth_asm.o tramp.o -o $t
 done

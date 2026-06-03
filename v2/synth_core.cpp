@@ -156,7 +156,15 @@ static sF32 fastatan(sF32 x)
 static sF32 fastsin(sF32 x)
 {
   sF32 x2 = x*x;
+#ifdef V2_X87_FAITHFUL
+  // asm fastsin loads the polynomial coeffs as qword DOUBLES (fcsinx3/5/7 = `dq`)
+  // and evaluates on the x87. A `float` literal of e.g. -0.16666 is a DIFFERENT
+  // value than the double, even at PC=24, so the whole sine (and thus every
+  // SIN-mode LFO / sin / FM-sin osc) diverges. Use double constants to match.
+  return (sF32)((((-0.00018542*x2 + 0.0083143)*x2 - 0.16666)*x2 + 1.0) * x);
+#else
   return (((-0.00018542f*x2 + 0.0083143f)*x2 - 0.16666f)*x2 + 1.0f) * x;
+#endif
 }
 
 // Fast sine with range check (for x >= 0)
@@ -182,8 +190,19 @@ static sF32 fastsinrc(sF32 x)
   if (x > fc1p5pi) // x in (3pi/2,2pi]
     x -= fc2pi; // sin(x) = sin(x-2pi)
   else if (x > fcpi_2) // x in (pi/2,3pi/2]
+  {
+#ifdef V2_X87_FAITHFUL
+    // asm fastsinrc reflects about `fldpi` -- the x87's 80-bit pi -- NOT a 32-bit
+    // float `fcpi`. At PC=24 the float-pi result rounds to a different 24-bit
+    // value (1 ULP), and that ULP, via SIN-LFO -> osc pitch -> freq fistp
+    // boundary, accumulates into audible osc phase drift over the song. Use the
+    // x87 pi to match. (long double is 80-bit x87 under -mno-sse.)
+    x = (sF32)((long double)3.14159265358979323846264L - (long double)x);
+#else
     x = fcpi - x; // sin(x) = -sin(x-pi) = sin(-(x-pi)) = sin(pi-x)
-  
+#endif
+  }
+
   return fastsin(x);
 }
 
@@ -223,6 +242,35 @@ static inline sInt v2_fistp(sF32 v)
 {
   sInt r;
   __asm__ ("fistpl %0" : "=m"(r) : "t"(v) : "st");
+  return r;
+}
+// freq = round_to_nearest(pow2(arg) * base), computed as ONE x87 sequence exactly
+// like the asm syOscChgPitch (pow2 / fmul [SRfcobasefrq] / fistp). Doing the mul
+// and store while pow2's result is still live in the register -- rather than
+// returning it as an sF32 first -- matters on exact-tie products where the early
+// 24-bit round flips the fistp (and thus the integer osc freq) by 1.
+// fci12 = rounded 1/12 as a 24-bit float (asm `fci12 dd 0.083333333333` = 0x3daaaaab).
+// MUST be a real in-memory float so the asm below loads it with `fmul dword` (24-bit)
+// like the asm core. Writing the bare literal `0.083333333333f` inline makes GCC
+// load it via `fldt` at 80-bit excess precision (~exact 1/12), which is a DIFFERENT
+// value -> the freq arg differs by 1 ULP -> the freq fistp flips on tie products.
+static const sF32 v2_fci12 = 0.083333333333f;
+// freq = round( pow2( (pitch+note-60) * fci12 ) * base ), the whole syOscChgPitch
+// freq tail as ONE x87 sequence with a 24-bit fci12 -- bit-exact with the asm.
+static inline sInt v2_oscfreq(sF32 pno, sF32 base) // pno = pitch+note-60
+{
+  sInt r;
+  __asm__ ("fmul %3\n\t"            // pno * fci12 (24-bit memory float)
+           "fld1\n\t"
+           "fld %%st(1)\n\t"
+           "fprem\n\t"
+           "f2xm1\n\t"
+           "faddp %%st,%%st(1)\n\t"
+           "fscale\n\t"
+           "fstp %%st(1)\n\t"       // pow2(pno*fci12)
+           "fmul %2\n\t"            // * base
+           "fistpl %0\n\t"          // round-to-nearest -> int
+           : "=m"(r) : "t"(pno), "m"(base), "m"(v2_fci12) : "st");
   return r;
 }
 #endif
@@ -314,7 +362,15 @@ static inline sF32 utof23(sU32 x)
 // this loses a bit, but that's what V2 does.
 static inline sU32 ftou32(sF32 v)
 {
+  // asm computes these as `fistp; shl x,1` = 2*round_to_nearest(v*fc32bit). The
+  // port truncated via (sInt); that off-by-one (when frac>=0.5) desyncs every
+  // ftou32-derived integer phase/breakpoint (osc brpt, lfo cphase, dist dfreq,
+  // moddel mphase). Match the asm round in the faithful build.
+#ifdef V2_X87_FAITHFUL
+  return 2u * (sU32)v2_fistp(v * fc32bit);
+#else
   return 2u * (sInt)(v * fc32bit);
+#endif
 }
 
 // linear interpolation between a and b using t.
@@ -442,7 +498,12 @@ struct V2DCF
   sF32 step(sF32 in, sF32 R)
   {
     // y(n) = x(n) - x(n-1) + R*y(n-1)
-    sF32 y = (fcdcoffset + R*ym1 - xm1 + in) - fcdcoffset;
+    // asm syDCFRenderStereo order: ((R*ym1 - xm1 + in) + dc) - dc -- the denormal-
+    // avoidance bias `dc` is added AFTER the main sum, not before. Writing it as
+    // `(dc + R*ym1 - xm1 + in) - dc` rounds the recurrence differently each sample;
+    // with the pole R~0.997 that ~1 ULP error integrates (1/(1-R)~333x) into audible
+    // channel drift. Match the asm operand order exactly.
+    sF32 y = (R*ym1 - xm1 + in + fcdcoffset) - fcdcoffset;
     xm1 = in;
     ym1 = y;
     return y;
@@ -538,10 +599,16 @@ struct V2Instance
   {
     sF32 sr = (sF32)samplerate;
 
-    SRfcsamplesperms = sr / 1000.0f;
-    SRfcobasefrq = (fcoscbase * fc32bit) / sr;
-    SRfclinfreq = fcsrbase / sr;
-    SRfcdcfilter = 1.0f - fcdcflt / sr;
+    // asm calcNewSampleRate computes the reciprocal 1/sr ONCE (fld1/fdiv) and
+    // MULTIPLIES by it; `a/sr` and `a*(1/sr)` round differently (1 ULP). That ULP
+    // in SRfcobasefrq flips the osc freq fistp on some notes -> phase drift. Match
+    // the asm: a single reciprocal, multiply, in the asm's operand order.
+    sF32 recip = 1.0f / sr;
+
+    SRfcsamplesperms = sr / 1000.0f; // (not computed by the asm; sr/1000 is fine)
+    SRfcobasefrq = (fcoscbase * fc32bit) * recip;
+    SRfclinfreq = fcsrbase * recip;
+    SRfcdcfilter = 1.0f - fcdcflt * recip;
 
     // frame size
     SRcFrameSize = (sInt)(fcframebase * sr / fcsrbase + 0.5f);
@@ -549,10 +616,19 @@ struct V2Instance
 
     assert(SRcFrameSize <= MAX_FRAME_SIZE);
 
-    // low shelving EQ
-    sF32 boost = (fcboostfreq * fc2pi) / sr;
+    // low shelving EQ (asm order: (1/sr)*fc2pi*fcboostfreq)
+    sF32 boost = recip * fc2pi * fcboostfreq;
     SRfcBoostCos = cos(boost);
     SRfcBoostSin = sin(boost);
+#ifdef V2_VALIDATE
+    if (getenv("SRTRACE")) {
+      union { sF32 f; sU32 u; } a,b,c,d,e,g;
+      a.f=SRfcsamplesperms; b.f=SRfcobasefrq; c.f=SRfclinfreq;
+      d.f=SRfcdcfilter; e.f=SRfcBoostCos; g.f=SRfcBoostSin;
+      fprintf(stderr, "[C++ SR] samplesperms=%08x obasefrq=%08x linfreq=%08x dcfilter=%08x BoostCos=%08x BoostSin=%08x\n",
+              a.u, b.u, c.u, d.u, e.u, g.u);
+    }
+#endif
   }
 };
 
@@ -621,7 +697,9 @@ struct V2Osc
     // (=1/128, exact), fci12=0.083333333333 (rounded 1/12, a MULTIPLY not a
     // divide), pow2 via f2xm1, freq stored with fistp (round-to-nearest).
     nffrq = inst->SRfclinfreq * calcfreq((pitch + 64.0f) * 0.0078125f);
-    freq = v2_fistp(inst->SRfcobasefrq * v2_pow2((pitch + note - 60.0f) * 0.083333333333f));
+    // whole freq tail (·fci12, pow2, ·base, fistp) as one x87 sequence with a
+    // 24-bit fci12 -- bit-exact with the asm (no 80-bit constant / excess precision).
+    freq = v2_oscfreq(pitch + note - 60.0f, inst->SRfcobasefrq);
 #else
     nffrq = inst->SRfclinfreq * calcfreq((pitch + 64.0f) / 128.0f);
     freq = (sInt)(inst->SRfcobasefrq * pow(2.0f, (pitch + note - 60.0f) / 12.0f));
@@ -631,7 +709,12 @@ struct V2Osc
   void set(const syVOsc *para)
   {
     mode = (sInt)para->mode;
-    ring = (((sInt)para->ring) & 1) != 0; 
+    ring = (((sInt)para->ring) & 1) != 0;
+#ifdef V2_VALIDATE
+    if (getenv("OSCDUMP")) { static int n=0; if(n++<24)
+      fprintf(stderr,"[OSCDUMP] mode=%d ring=%d pitch=%.3f detune=%.1f color=%.1f gain=%.1f\n",
+              mode,(int)ring,pitch,para->detune,para->color,para->gain); }
+#endif
 
     pitch = (para->pitch - 64.0f) + (para->detune - 64.0f) / 128.0f;
     chgPitch();
@@ -828,15 +911,25 @@ private:
         break;
 
       case OSMTC_DOWN_UP: // case d)
-        y = -rcpf * (gain + c2*((p+omf)*(p+omf)) - c1*(p*p)); // trisaw_flt, not float sqr()
+        // asm m0c21: y = -((c2*(p+1-f)^2 - c1*p^2) + g) * (1/f). The asm forms
+        // the square base as (p+1)-f INLINE (fld1/fadd/fsub), not p+(1-f); at
+        // PC=24 those round differently. Also the 3-term sum is (c2.. - c1..)+g,
+        // not g + c2.. - c1.. . Match the asm op order exactly (1-ULP fidelity).
+        {
+          trisaw_flt t = p + (trisaw_flt)1.0 - f; // (p+1) - f, in the asm association
+          y = -((c2*(t*t) - c1*(p*p)) + gain) * rcpf;
+        }
         break;
 
       case OSMTC_UP_DOWN_UP: // case e)
-        y = -rcpf * (gain + c1*omf*(p + p + omf));
+        // asm m0c121: y = -((c1*(omf*(2p+omf))) + g) * (1/f). The asm multiplies
+        // omf*(2p+omf) FIRST, then by c1 (c1*(omf*X)), not (c1*omf)*X.
+        y = -((c1*(omf*(p + p + omf))) + gain) * rcpf;
         break;
 
       case OSMTC_DOWN_UP_DOWN: // case f)
-        y = -rcpf * (gain + c2*omf*(p + p + omf));
+        // asm m0c212: same as case e with c2: y = -((c2*(omf*(2p+omf))) + g)*(1/f).
+        y = -((c2*(omf*(p + p + omf))) + gain) * rcpf;
         break;
 
       // INVALID CASES
@@ -1060,6 +1153,14 @@ struct V2Env
     // ref: 0 (5ms thanks to volramping) up to almost 1
     ref = 1.0f - calcfreq2(1.0f - para->rr / 128.0f);
     gain = para->vol / 128.0f;
+#ifdef V2_VALIDATE
+    if (getenv("ENVTRACE")) {
+      union { sF32 f; sU32 u; } A,D,S,U,R,G;
+      A.f=atd; D.f=dcf; S.f=sul; U.f=suf; R.f=ref; G.f=gain;
+      fprintf(stderr, "[env.set] atd=%08x dcf=%08x sul=%08x suf=%08x ref=%08x gain=%08x\n",
+              A.u, D.u, S.u, U.u, R.u, G.u);
+    }
+#endif
   }
 
   void tick(bool gate)
@@ -1181,12 +1282,20 @@ struct V2Flt
       COVER("VCF set moog");
 
       // @@@BUG? V2 code for this part looks suspicious.
+      // Match syFltSet's moog operand order EXACTLY: the moog is a 4-pole
+      // recursive filter, so a 1-ULP coeff error drifts/amplifies over the song.
+      // 0.8/5.6 as static const sF32 -> loaded 32-bit like the asm fc0p8/fc5p6
+      // (a bare literal in this live x87 expression promotes to 80-bit, != asm).
+      static const sF32 fc0p8 = 0.8f, fc5p6 = 5.6f;
       f *= 0.25f;
       sF32 t = 1.0f - f;
 
-      moogp = f + 0.8f * f * t;
-      moogf = 1.0f - moogp - moogp;
-      moogq = 4.0f * r * (1.0f + 0.5f * t * (1.0f - t + 5.6f * t * t));
+      moogp = f + fc0p8 * (f * t);              // asm: f + 0.8*(t*f)
+      moogf = 1.0f - (moogp + moogp);           // asm: 1 - (p+p), not (1-p)-p
+      sF32 qx = fc5p6 * (t * t) + (1.0f - t);   // asm: 5.6*t^2 + (1-t)
+      sF32 qb = r * (1.0f + 0.5f * (t * qx));   // asm: r' * (1 + 0.5*(t*qx))
+      sF32 q2 = qb + qb;                        // asm: *2
+      moogq = q2 + q2;                          // asm: *2 again (= *4)
     }
   }
 
@@ -1339,7 +1448,21 @@ struct V2LFO
     mode = (sInt)para->mode;
     sync = (sInt)para->sync != 0;
     eg = (sInt)para->egmode != 0;
+#ifdef V2_VALIDATE
+    if (getenv("LFODUMP")) { static int n=0; if(n++<12)
+      fprintf(stderr,"[LFODUMP] mode=%d sync=%d eg=%d rate=%.1f pol=%.0f amp=%.1f phase=%.1f\n",
+              mode,(int)sync,(int)eg,para->rate,para->pol,para->amp,para->phase); }
+#endif
+#ifdef V2_X87_FAITHFUL
+    // asm syLFOSet (synth.asm): freq stored with fistp (round-to-nearest), NOT a
+    // truncating cast. fci128=0.0078125 (=1/128, exact), order matches the asm
+    // (calcfreq * fc32bit * 0.5). The truncating (sInt) below is off-by-one
+    // whenever the frac >= 0.5, which slowly desyncs the integer phase counter
+    // and (via LFO->amp-env modulation) drifts curvol over the whole song.
+    freq = v2_fistp(calcfreq(para->rate * 0.0078125f) * fc32bit * 0.5f);
+#else
     freq = (sInt)(0.5f * fc32bit * calcfreq(para->rate / 128.0f));
+#endif
     cphase = ftou32(para->phase / 128.0f);
 
     switch ((sInt)para->pol)
@@ -1483,6 +1606,11 @@ struct V2Dist
 
     mode = (sInt)para->mode;
     gain1 = v2_exp2((para->ingain - 32.0f) / 16.0f);
+#ifdef V2_VALIDATE
+    if (getenv("DISTTRACE")) { static int n=0; if (n++<40)
+      fprintf(stderr, "[dist.set] mode=%d ingain=%.1f p1=%.1f p2=%.1f\n",
+              mode, para->ingain, para->param1, para->param2); }
+#endif
 
     switch (mode)
     {
@@ -1702,6 +1830,25 @@ struct syVV2
   sF32 oscsync; // 0: none 1: osc 2: full
 };
 
+#ifdef V2_VALIDATE
+// Voice-chain sub-stage snapshots (validation localization, level 2). V2Voice::
+// render copies the mono vcebuf after each sub-stage so the A/B harness can find
+// which voice block first diverges. vcebuf is per-voice; the per-frame snapshot
+// holds the last voice rendered that frame -- valid in the early single-voice
+// region where the first divergence lives. Mirrored in asm_appendix.asm
+// (vcetap_* / vcetap_snap_*). Exposed via synthDebugGetVceTap.
+static sF32 g_vcetap_osc [V2Instance::MAX_FRAME_SIZE]; // after oscillators
+static sF32 g_vcetap_flt [V2Instance::MAX_FRAME_SIZE]; // after filters
+static sF32 g_vcetap_dist[V2Instance::MAX_FRAME_SIZE]; // after distortion
+static sF32 g_vcetap_dcf [V2Instance::MAX_FRAME_SIZE]; // after voice dc filter
+// Accumulate across ALL voices (reset per frame in renderFrame), so the tap is
+// unmasked -- the per-voice last-writer snapshot hid divergence in non-last voices.
+#define VCETAP_SNAP(stage, buf, n) \
+    do { for (sInt _i=0; _i<(n); _i++) g_vcetap_##stage[_i] += (buf)[_i]; } while(0)
+#else
+#define VCETAP_SNAP(stage, buf, n) ((void)0)
+#endif
+
 struct V2Voice
 {
   enum FilterRouting
@@ -1783,6 +1930,7 @@ struct V2Voice
     // oscillators -> voice buffer
     for (sInt i=0; i < syVV2::NOSC; i++)
       osc[i].render(voice, nsamples);
+    VCETAP_SNAP(osc, voice, nsamples);
 
     // voice buffer -> filters -> voice buffer
     switch (fmode)
@@ -1807,12 +1955,15 @@ struct V2Voice
         voice[i] = voice[i]*f1gain + voice2[i]*f2gain;
       break;
     }
+    VCETAP_SNAP(flt, voice, nsamples);
 
     // voice buffer -> distortion -> voice buffer
     dist.renderMono(voice, voice, nsamples);
+    VCETAP_SNAP(dist, voice, nsamples);
 
     // voice buffer -> dc filter -> voice buffer
     dcf.renderMono(voice, voice, nsamples);
+    VCETAP_SNAP(dcf, voice, nsamples);
 
     DEBUG_PLOT(this, voice, nsamples);
 
@@ -1993,6 +2144,14 @@ struct V2Boost
     a2 = (Ap1 + cAm1 - bs) * ia0;
     b0 = A * (Ap1 - cAm1 + bs) * ia0;
     b2 = A * (Ap1 - cAm1 - bs) * ia0;
+#ifdef V2_VALIDATE
+    if (getenv("BOOSTTRACE")) {
+      union { sF32 f; sU32 u; } B0,B1,B2,A1,A2;
+      B0.f=b0; B1.f=b1; B2.f=b2; A1.f=a1; A2.f=a2;
+      fprintf(stderr, "[boost.set] ena=%d b0=%08x b1=%08x b2=%08x a1=%08x a2=%08x\n",
+              enabled, B0.u, B1.u, B2.u, A1.u, A2.u);
+    }
+#endif
   }
 
   void render(StereoSample *buf, sInt nsamples)
@@ -2011,8 +2170,11 @@ struct V2Boost
       {
         sF32 x = buf[i].ch[ch] + fcdcoffset;
 
-        // Second-order IIR filter
-        sF32 y = b0*x + b1*xm1 + b2*xm2 - a1*ym1 - a2*ym2;
+        // Second-order IIR filter. Match syBoostProcChan's accumulation grouping
+        // EXACTLY: b0*x + ((b1*x1 - a1*y1) + (b2*x2 - a2*y2)). The biquad is
+        // recursive, so a different operand order rounds each sample differently
+        // and the poles integrate it into drift (the sequential form below drifts).
+        sF32 y = b0*x + ((b1*xm1 - a1*ym1) + (b2*xm2 - a2*ym2));
         ym2 = ym1; ym1 = y;
         xm2 = xm1; xm1 = x;
 
@@ -2085,6 +2247,27 @@ struct V2ModDel
     dryout = 1.0f - fabsf(wetout);
     fbval = (para->fb - 64.0f) / 64.0f;
 
+#ifdef V2_X87_FAITHFUL
+    // asm syModDelSet: every int conversion is fistp (round-to-nearest), NOT a
+    // truncating cast. fci128=0.0078125 (=1/128, exact); operation order matches
+    // the asm. The truncating (sInt)/ftou32 below are off-by-one when the frac
+    // >= 0.5; mfreq drives the integer mod-counter (mcnt += mfreq) so its error
+    // slowly drifts the chorus, diverging the channel output over the song.
+    sF32 lenscale = ((sF32)dbufmask - 1023.0f) * 0.0078125f;
+    dboffs[0] = v2_fistp(para->llength * lenscale);
+    dboffs[1] = v2_fistp(para->rlength * lenscale);
+
+    mfreq = v2_fistp(calcfreq(para->mrate * 0.0078125f) * fcmdlfomul * inst->SRfclinfreq);
+    mmaxoffs = v2_fistp(para->mdepth * 0.0078125f * 1023.0f);
+    mphase = 2u * (sU32)v2_fistp((para->mphase - 64.0f) * 0.0078125f * fc32bit);
+#ifdef V2_VALIDATE
+    if (getenv("CHORUSTRACE"))
+      fprintf(stderr, "[chorus.set] wetout=%.6f mfreq=%d dboffs=%d,%d mmaxoffs=%d mphase=%u "
+              "(mrate=%.1f mdepth=%.1f amount=%.1f)\n",
+              wetout, mfreq, dboffs[0], dboffs[1], mmaxoffs, mphase,
+              para->mrate, para->mdepth, para->amount);
+#endif
+#else
     sF32 lenscale = ((sF32)dbufmask - 1023.0f) / 128.0f;
     dboffs[0] = (sInt)(para->llength * lenscale);
     dboffs[1] = (sInt)(para->rlength * lenscale);
@@ -2092,6 +2275,7 @@ struct V2ModDel
     mfreq = (sInt)(inst->SRfclinfreq * fcmdlfomul * calcfreq(para->mrate / 128.0f));
     mmaxoffs = (sInt)(para->mdepth * 1023.0f / 128.0f);
     mphase = ftou32((para->mphase - 64.0f) / 128.0f);
+#endif
   }
 
   void renderAux2Main(StereoSample *dest, sInt nsamples)
@@ -2258,7 +2442,12 @@ struct V2Comp
 
     // @@@BUG: original V2 code uses "fcsamplesperms" here which is
     // hard-coded to 44.1kHz
+    // asm syCompSet stores dblen via fistp (round-to-nearest); the port truncated.
+#ifdef V2_X87_FAITHFUL
+    dblen = (sU32)v2_fistp(para->lookahead * inst->SRfcsamplesperms);
+#else
     dblen = (sInt)(para->lookahead * inst->SRfcsamplesperms);
+#endif
 
     sF32 thresh = 8.0f * calcfreq(para->threshold / 128.0f);
     invol = 1.0f / thresh;
@@ -2271,6 +2460,14 @@ struct V2Comp
     attack = v2_exp2(-para->attack * 12.0f / 128.0f);
     // release: 5ms .. 5s
     release = v2_exp2(-para->release * 16.0f / 128.0f);
+#ifdef V2_VALIDATE
+    if (getenv("COMPTRACE")) {
+      union { sF32 f; sU32 u; } iv, ov, rt, at, rl;
+      iv.f=invol; ov.f=outvol; rt.f=ratio; at.f=attack; rl.f=release;
+      fprintf(stderr, "[comp.set] mode=%d dblen=%u invol=%08x outvol=%08x ratio=%08x attack=%08x release=%08x\n",
+              mode, dblen, iv.u, ov.u, rt.u, at.u, rl.u);
+    }
+#endif
   }
 
   void render(StereoSample *buf, sInt nsamples)
@@ -2579,6 +2776,11 @@ struct V2Chan
     a1gain = chgain * fcgainh * (para->aux1 / 128.0f);
     a2gain = chgain * fcgainh * (para->aux2 / 128.0f);
     fxr = (sInt)para->fxroute;
+#ifdef V2_VALIDATE
+    if (getenv("CHANTRACE"))
+      fprintf(stderr, "[chan.set] aarcv=%.5f abrcv=%.5f aasnd=%.5f absnd=%.5f a1gain=%.5f a2gain=%.5f fxr=%d\n",
+              aarcv, abrcv, aasnd, absnd, a1gain, a2gain, fxr);
+#endif
     dist.set(&para->dist);
     chorus.set(&para->chorus);
     comp.set(&para->comp);
@@ -2723,6 +2925,29 @@ struct V2ChanInfo
 // V2Synth holds a V2Instance.
 // In the original code these are one and the same struct (SYN) but that
 // would turn out fairly awkward in this C++ version, hence the split.
+#ifdef V2_VALIDATE
+// Per-stage mix-chain snapshots (validation-only localization tap). renderFrame
+// copies `mixbuf` into one of these after each global FX stage so the A/B harness
+// can bisect which stage introduces the divergence. Read-only; no DSP effect.
+// Mirrored in v2/validate/asm_appendix.asm (mixtap_* + mixtap_snap_*) for the asm
+// core. Exposed via synthDebugGetMixTap below.
+static StereoSample g_mixtap_reverb[V2Instance::MAX_FRAME_SIZE]; // after reverb
+static StereoSample g_mixtap_delay [V2Instance::MAX_FRAME_SIZE]; // after mod-delay
+static StereoSample g_mixtap_dcf   [V2Instance::MAX_FRAME_SIZE]; // after dc filter
+static StereoSample g_mixtap_lchc  [V2Instance::MAX_FRAME_SIZE]; // after low-cut/high-cut
+static StereoSample g_mixtap_compr [V2Instance::MAX_FRAME_SIZE]; // after sum compressor
+// chanbuf snapshot: the post-curvol voice SUM for a channel, taken after the
+// voice loop (before the channel chain). Bridges the gap between the per-voice
+// SIGNAL taps (g_vcetap_*, pre amp-envelope) and the global mix. Per-channel;
+// the per-frame snapshot holds the last channel -- valid in the early
+// single-channel region where the first divergence lives.
+static StereoSample g_chantap      [V2Instance::MAX_FRAME_SIZE];
+#define MIXTAP_SNAP(stage, mix, n) \
+    memcpy(g_mixtap_##stage, (mix), (n) * sizeof(StereoSample))
+#else
+#define MIXTAP_SNAP(stage, mix, n) ((void)0)
+#endif
+
 struct V2Synth
 {
   static const sInt POLY = 64;
@@ -2997,6 +3222,11 @@ struct V2Synth
           allocpos[usevoice] = curalloc++;
 
           // and note on!
+#ifdef V2_VALIDATE
+          if (getenv("ALLOCTRACE"))
+            fprintf(stderr, "[C++ alloc] note=%d vel=%d chan=%d -> slot=%d (npoly=%d)\n",
+                    cmd[0], cmd[1], chan, usevoice, npoly);
+#endif
           storeV2Values(usevoice);
           voicesw[usevoice].noteOn(cmd[0], cmd[1]);
           cmd += 2;
@@ -3209,6 +3439,23 @@ private:
     for (sInt i=0; i < COUNTOF(patch->voice); i++)
       vparaf[i] = (sF32)patch->voice[i];
 
+#ifdef V2_VALIDATE
+    if (getenv("MODDUMP")) {
+      static int done = 0;
+      if (!done++) {
+        // env[0] (aenv) param index range, to flag amp-env-targeting mods.
+        sInt aenvbase = (sInt)((sF32*)&vpara->env[0] - (sF32*)vpara);
+        sInt aenvend  = aenvbase + (sInt)(sizeof(syVEnv)/sizeof(sF32));
+        fprintf(stderr,"[MODDUMP] voiceparams=%d aenv idx [%d..%d) modnum=%d\n",
+                (int)COUNTOF(patch->voice), aenvbase, aenvend, patch->modnum);
+        for (sInt i=0;i<patch->modnum;i++){
+          const V2Mod*m=&patch->modmatrix[i];
+          const char*tag=(m->dest>=aenvbase&&m->dest<aenvend)?"  <-- AMP ENV":"";
+          fprintf(stderr,"[MODDUMP]  src=%d val=%d dest=%d%s\n",m->source,m->val,m->dest,tag);
+        }
+      }
+    }
+#endif
     // modulation matrix
     for (sInt i=0; i < patch->modnum; i++)
     {
@@ -3309,6 +3556,16 @@ private:
     memset(instance.auxabuf, 0, nsamples * sizeof(StereoSample));
     memset(instance.auxbbuf, 0, nsamples * sizeof(StereoSample));
 
+#ifdef V2_VALIDATE
+    // chantap/vcetap are UNMASKED accumulators across all voices/channels: reset
+    // here, accumulate below.
+    memset(g_chantap, 0, nsamples * sizeof(StereoSample));
+    memset(g_vcetap_osc,  0, nsamples * sizeof(sF32));
+    memset(g_vcetap_flt,  0, nsamples * sizeof(sF32));
+    memset(g_vcetap_dist, 0, nsamples * sizeof(sF32));
+    memset(g_vcetap_dcf,  0, nsamples * sizeof(sF32));
+#endif
+
     // process all channels
     for (sInt chan=0; chan < CHANS; chan++)
     {
@@ -3331,6 +3588,12 @@ private:
 
         voicesw[voice].render(instance.chanbuf, nsamples);
       }
+#ifdef V2_VALIDATE
+      for (sInt i=0; i < nsamples; i++) {
+        g_chantap[i].l += instance.chanbuf[i].l;
+        g_chantap[i].r += instance.chanbuf[i].r;
+      }
+#endif
 
       // channel 15 -> Ronan
       if (chan == CHANS-1)
@@ -3342,8 +3605,11 @@ private:
     // global filters
     StereoSample *mix = instance.mixbuf;
     reverb.render(mix, nsamples);
+    MIXTAP_SNAP(reverb, mix, nsamples);
     delay.renderAux2Main(mix, nsamples);
+    MIXTAP_SNAP(delay, mix, nsamples);
     dcf.renderStereo(mix, mix, nsamples);
+    MIXTAP_SNAP(dcf, mix, nsamples);
 
     // low cut/high cut
     sF32 lcf = lcfreq, hcf = hcfreq;
@@ -3366,8 +3632,11 @@ private:
       }
     }
 
+    MIXTAP_SNAP(lchc, mix, nsamples);
+
     // sum compressor
     compr.render(mix, nsamples);
+    MIXTAP_SNAP(compr, mix, nsamples);
 
     DEBUG_PLOT_STEREO(mix, mix, nsamples);
   }
@@ -3444,6 +3713,45 @@ extern "C" void __stdcall synthDebugGetBus(void *pthis, float **a1, float **a2,
   *a1        = s->instance.aux1buf;
   *a2        = s->instance.aux2buf;
   *mix       = &s->instance.mixbuf[0].l;
+  *framesize = s->instance.SRcFrameSize;
+}
+
+// Validation-only: expose the five per-stage mix-chain snapshots (see
+// g_mixtap_* above) so the A/B harness can bisect WHICH global FX stage
+// introduces the divergence. Read-only. Mirrored in asm_appendix.asm.
+extern "C" void __stdcall synthDebugGetMixTap(void *pthis,
+    float **postReverb, float **postDelay, float **postDcf,
+    float **postLcHc, float **postCompr, int *framesize)
+{
+  V2Synth *s = (V2Synth *)pthis;
+  *postReverb = &g_mixtap_reverb[0].l;
+  *postDelay  = &g_mixtap_delay [0].l;
+  *postDcf    = &g_mixtap_dcf   [0].l;
+  *postLcHc   = &g_mixtap_lchc  [0].l;
+  *postCompr  = &g_mixtap_compr [0].l;
+  *framesize  = s->instance.SRcFrameSize;
+}
+
+// Validation-only: expose the four per-voice-substage snapshots (see g_vcetap_*
+// above), one level deeper than the mix tap, to find which voice block first
+// diverges. Mono (vcebuf). Read-only. Mirrored in asm_appendix.asm.
+extern "C" void __stdcall synthDebugGetVceTap(void *pthis,
+    float **postOsc, float **postFlt, float **postDist, float **postDcf,
+    int *framesize)
+{
+  V2Synth *s = (V2Synth *)pthis;
+  *postOsc  = g_vcetap_osc;
+  *postFlt  = g_vcetap_flt;
+  *postDist = g_vcetap_dist;
+  *postDcf  = g_vcetap_dcf;
+  *framesize = s->instance.SRcFrameSize;
+}
+
+// Validation-only: the post-curvol channel voice-sum snapshot (see g_chantap).
+extern "C" void __stdcall synthDebugGetChanTap(void *pthis, float **chan, int *framesize)
+{
+  V2Synth *s = (V2Synth *)pthis;
+  *chan = &g_chantap[0].l;
   *framesize = s->instance.SRcFrameSize;
 }
 #endif

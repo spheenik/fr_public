@@ -75,6 +75,11 @@ Every **isolatable DSP block bit-matches the ASM** (default build):
 | fastatan sweep | worst 0.0 |
 | fixed pair (flag=0 C++ vs fixed ASM) | worst 0.0 |
 
+Whole-song A/B on `pzero_new.v2m` (faithful build, `V2_X87_FAITHFUL`):
+**max 0.0876298994** (was 0.0876300689 before the freq-path fix). The bit-faithful
+freq + all-transcendentals path moved only the 7th significant figure — confirming
+the freq path is NOT the dominant residual (see "What's OPEN").
+
 Fixes applied (`v2/synth_core.cpp`):
 - *porting errors, no flag:* moog ladder feedback sign; moog double dc-offset;
   dist bitcrusher round (lrintf vs truncate); fastatan shared-`cxm2` coeff; tri/saw
@@ -88,14 +93,153 @@ Fixes applied (`v2/synth_core.cpp`):
   - **compressor lookahead off-by-one**: ASM `syCompProcChannel` wraps the
     lookahead ring with `inc/cmp dblen/jbe` (ring length dblen+1); port used
     `>= dblen` (length dblen). Fixed to `> dblen`. pzero 0.108534 -> 0.087630.
+- *bit-faithful freq path, gated behind `V2_X87_FAITHFUL` (this session):*
+  inline-asm x87 `v2_pow2`/`v2_calcfreq`/`v2_calcfreq2` (the asm `f2xm1` kernel)
+  + round-to-nearest `v2_fistp` store + `* fci12` reciprocal-multiply in
+  `V2Osc::chgPitch`, replacing libm `pow`/`powf`, the truncating `(sInt)` cast,
+  and `/12.0f`. Tri/saw box-filter reverted to `float` under the faithful build
+  (the asm is 24-bit single, not 80-bit; `double` overshot). Build runs x87 at
+  PC=24 / no-SSE via `-mpc32 -mno-sse -DV2_X87_FAITHFUL`. The osc now bit-matches
+  the asm at sample 0; whole-song magnitude **unchanged** (0.0876) — the freq path
+  was necessary but not sufficient. See `openspec` change `fix-v2-freq-precision`.
 - *ASM bug, flagged:* `BUG_V2_ATAN_TABLE` — fastatan picks the wrong rational table
   for |x|>=2 (cmovge vs cmovae). Build also generates a fixed-ASM variant so the
   flag=0 build validates symmetrically.
 
 ## What's OPEN (next step for "combined output")
 
-The whole-song A/B (`harness_asm` vs `harness_cpp`) diverges **~0.0876** on
-`pzero_new.v2m` (was 0.108534 — see progress below).
+The whole-song A/B (`harness_asm` vs `harness_cpp`) diverges **~0.0838** on
+`pzero_new.v2m` (current measured; was 0.108534 — see progress below).
+
+### ✅ RESOLVED / DEAD END (2026-06-03): the residual is STRUCTURAL, not precision
+
+**Stop pulling floating-point precision levers — the axis is exhausted.** Four
+independent precision interventions now leave the whole-song magnitude unmoved:
+
+| intervention | whole-song max-abs vs asm |
+|--------------|---------------------------|
+| x87 PC=24 faithful (current build) | 0.0837996621 |
+| `+ -fexcess-precision=standard`    | 0.0837996621 (codegen + binary + audio BYTE-IDENTICAL) |
+| `-mpc32 -mno-sse` (24-bit mantissa)| onset shift only, magnitude unchanged |
+| **full SSE math** (`-msse2 -mfpmath=sse`, FLT_EVAL_METHOD=0) | 0.0838358328 |
+
+**On the GCC excess-precision question (settled empirically on GCC 16.1.1):**
+- The "GCC promotes float literals to 80-bit `fldt`" bug is **REAL** but
+  **context-dependent**: a *non-exactly-representable* literal (`0.8f`, `5.6f`,
+  `1/12` …) that feeds a *live / excess-precision* subexpression is promoted to an
+  ~exact 80-bit long double (`fldt`); the SAME literal stored to a `static const
+  sF32` (or used where the result is immediately stored to float) loads as 32-bit
+  (`flds`/`fmuls`). Exactly-representable literals (integers, powers of two,
+  halves/quarters) are immune either way. Confirmed: the moog coeffs (`0.8f`,
+  `5.6f` in `V2Flt::set`) promote to `fldt`; `fci12` was the first instance found.
+- **The cure that DOES work:** `-mfpmath=sse -msse2` (sets `FLT_EVAL_METHOD=0` →
+  no x87 excess precision at all → all literals 32-bit, globally, no source edits).
+  Verified: moogA `fldt` count 2 → 0 under SSE.
+- **The cure that does NOT work:** `-fexcess-precision=standard` is **inert on x87
+  here** — leaves `FLT_EVAL_METHOD=2` and still promotes the constants, in **C and
+  C++**, at every `-std` (c++03/17/20, c99/c11). The manual implies C++ support but
+  on this target it changes nothing for constant promotion. Do not re-try it.
+- **BUT NONE OF THIS MATTERS for the residual:** killing the promotion *globally*
+  via SSE moved the whole-song by 0.00004 (0.0838 → 0.0838). So the constant bug,
+  though real, is **not** the source of the 0.084. Fixing the moog/literal
+  promotion is at most a correctness nicety, not the residual.
+
+**→ NEXT STEP IS STRUCTURAL, NOT PRECISION.** The first divergence crosses
+threshold at a *fixed sample* (~stereo 4401, ~0.1 s in) **regardless of FP mode** —
+the hallmark of a control-flow / logic difference (a note trigger, filter-mode
+switch, env/LFO phase boundary the port sequences differently), not a ULP drift.
+Investigate *what happens at that sample* in the voice path (the queued voice-chain
+tap, §8/§9) by comparing **logic**, not bits. See the change
+`localize-v2-mix-chain-divergence` (re-pointed at the voice-event investigation).
+
+### ⚠ SYSTEMIC: GCC x87 EXCESS PRECISION on float constants (REAL but NOT the residual — see RESOLVED block above)
+
+The single most important thing to fix next, because it is almost certainly
+biting in **many** places (filter cutoff, env/lfo coeffs, every non-power-of-two
+constant), not just the one we patched.
+
+**The bug:** the asm defines constants as real 32-bit floats (`fci12 dd
+0.083333333333` → `0x3daaaaab` = 0.0833333358) and loads them with `fmul dword`
+(24-bit). The C port writes the same value as `0.083333333333f` — BUT under
+`-mfpmath=387` (forced by `-mno-sse`) and WITHOUT `-fexcess-precision=standard`,
+GCC uses `FLT_EVAL_METHOD=2`: it emits the literal as an **80-bit long double**
+and loads it with `fldt`. So the C constant is ~exact 1/12, a DIFFERENT value than
+the asm's 24-bit float. `-mpc32` (PC=24) only rounds arithmetic *results*, NOT
+constant *loads* — so it does not help here. Confirmed by disassembly (`fldt` vs
+`fmuls`) + gdb (osc-freq arg differed by 1 ULP → freq `fistp` flipped on tie
+products → osc phase drift; was the dominant osc divergence, vce_osc 0.15→1.3e-6
+once fixed).
+
+**Patched so far (surgically, ONE site):** `v2_oscfreq` does the `*fci12` in inline
+asm with a `static const sF32 v2_fci12` fed as an `"m"` operand (forces a 4-byte
+`fmul dword`). See `synth_core.cpp` V2Osc::chgPitch.
+
+**WANT: the global cure** — make GCC define/load ALL float constants at 24-bit like
+the asm, so we don't whack-a-mole each site. Candidates to try (in the validation
+build only):
+  - `-fexcess-precision=standard` (the textbook fix; sets FLT_EVAL_METHOD=0,
+    rounds every op AND constant to declared type). **Tried once, did NOT change
+    the osc-freq arg in a -O0 probe — investigate why (—std interaction? needs
+    -fno-fast-math? GCC version?). This is the highest-leverage thing to get
+    working.**
+  - `-ffloat-store` (forces spills; helps live intermediates, may not fix constant
+    loads).
+  - `-fsingle-precision-constant` (forces FP constants to single — but may wrongly
+    narrow the few places that legitimately need double, e.g. the `long double` pi
+    in `fastsinrc` and the `double` tri/saw box filter; audit before using).
+If a flag works, re-verify the new bit-exact oracles stay green and the osc inline
+helpers can likely be simplified back to plain C.
+
+**New bit-exact test oracles (built this session — keep & extend):**
+  - `comp_lfo`  — LFO in pzero configs, `eps=0`. Found `fastsinrc` float-pi vs
+    `fldpi` (80-bit). Also has a direct `fastsin`/`fastsinrc`/`pow2` sweep.
+  - `comp_osc_exact` — osc swept over all notes, `eps=0`, plus a freq/brpt
+    setup-integer check. Found the tri/saw hard-case association, the
+    `calcNewSampleRate` divide-vs-reciprocal, and the `fci12` excess-precision bug.
+  Both link the asm via new `v2x_fastsin/fastsinrc/pow2` trampolines (tramp.asm)
+  and `v2x_off_syWOsc_freq/brpt` offsets (asm_appendix.asm).
+  Lesson: tolerance-based oracles (eps=1e-4) HIDE 1-ULP bugs that accumulate into
+  audible phase drift. Use EXACT comparison for anything that feeds a phase/freq.
+
+### STATUS UPDATE (2026-06-03): freq path closed, residual is the GLOBAL MIX CHAIN
+NOTE: the analysis below is SUPERSEDED in part — the dominant per-voice source was
+the OSCILLATOR (excess-precision freq drift, now fixed). After the osc fix the
+voice-level source is the **VCF filter** (vce_flt ~6.6e-3), amplified by the
+per-channel + global compressors into the whole-song ~0.082. Fixes landed this
+session: ModDel/chorus rounding (0.0876→0.0838), fastsinrc pi, tri/saw hard cases,
+calcNewSampleRate recip-multiply, fci12 excess precision (osc now bit-exact).
+
+### STATUS UPDATE (2026-06-03): freq path closed, residual is the GLOBAL MIX CHAIN
+
+The `fix-v2-freq-precision` change made the oscillator frequency path bit-faithful
+to the asm (inline `f2xm1`, `fistp` round, `fci12` multiply; build at x87 PC=24 /
+no-SSE). Result: the osc no longer diverges at sample 0, but the **whole-song
+magnitude did not move** (0.0876300689 → 0.0876298994, only the 7th sig-fig).
+
+Re-running the bus-tap on the faithful build **re-localized** the dominant source:
+
+    aux1 = 0.00267   aux2 = 0.00258   mix = 0.08116
+
+The ~0.081 is introduced in the **GLOBAL MIX CHAIN** on `mixbuf` — reverb / mod-
+delay / dc-filter / lowcut-highcut / sum-compressor (`synth_core.cpp:3321-3349`) —
+NOT in the voice / oscillator / transcendentals. A NEGATIVE RESULT confirms this:
+converting *every* transcendental in the synth (calcfreq/calcfreq2, all `powf`,
+reverb `base^e`) to the faithful x87 kernel did not move the magnitude. The
+residual is **structural**, not a precision gap — the handover's previously-noted
+"instance-entangled compressor / reverb / mod-delay" state.
+
+**FAITHFUL-vs-PORTABLE SPLIT (decided):** a single C++ binary cannot be both
+bit-faithful to the asm and portable — fidelity is fundamentally x86/x87/PC=24
+(inline `f2xm1`, control-word semantics). The faithful path is gated behind
+`V2_X87_FAITHFUL` (validation build: `-mpc32 -mno-sse -DV2_X87_FAITHFUL`); the
+portable default build is untouched (libm / `(sInt)` / `double`, SSE-ok). Goal:
+drive the *faithful* build's whole-song A/B to 0 to prove port logic is correct;
+then the portable build's small sub-audible precision differences are acceptable.
+
+**NEXT CHANGE:** localize the global-mix-chain divergence — tap `mixbuf` between
+the reverb / mod-delay / dc-filter / lowcut-highcut / sum-compressor stages
+(`synth_core.cpp:3321-3349`) in both cores and diff stage-by-stage to find which
+global effect introduces the 0.081. (The osc/voice/freq path is exonerated.)
 
 ### Bus-tap rig (built — use this to localize)
 

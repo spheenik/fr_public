@@ -51,7 +51,7 @@ echo "[+] component equivalence tests"
 nasm -f elf32 tramp.asm -o tramp.o
 # comp_osc.cpp #includes ../synth_core.cpp (for V2Osc) and links the RAW asm
 # object (decorated _synth*@N coexists with undecorated synthInit -> no clash).
-for t in comp_osc comp_flt comp_leaves comp_fastatan; do
+for t in comp_osc comp_flt comp_leaves comp_fastatan comp_trisaw; do
   $CXX $CXXFLAGS -c $t.cpp -o $t.o
   $CXX $LDFLAGS $t.o synth_asm.o tramp.o -o $t
 done

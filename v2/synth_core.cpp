@@ -711,25 +711,29 @@ private:
     // "easy" cases a) and c) almost all the time.
     COVER("Osc tri/saw");
 
-    // calc helper values
-    sF32 f = utof23(freq);
-    sF32 omf = 1.0f - f;
-    sF32 rcpf = 1.0f / f;
-    sF32 col = utof23(brpt);
+    // calc helper values.
+    // PORTING FIX: these are computed in double precision to match the ASM's
+    // 80-bit x87 FPU. The "hard" cases below (b/d/e/f) have a catastrophic
+    // cancellation amplified by rcpf=1/f; doing it in float (the original port,
+    // via the sF32 sqr()) diverges from the ASM at very low frequencies.
+    double f = utof23(freq);
+    double omf = 1.0 - f;
+    double rcpf = 1.0 / f;
+    double col = utof23(brpt);
 
     // m1 = 2/col = slope of saw-up wave
     // m2 = -2/(1-col) = slope of saw-down wave
     // c1 = gain/2*m1 = gain/col = scaled integration constant
     // c2 = gain/2*m2 = -gain/(1-col) = scaled integration constant
-    sF32 c1 = gain / col;
-    sF32 c2 = -gain / (1.0f - col);
+    double c1 = gain / col;
+    double c2 = -gain / (1.0 - col);
 
     sU32 state = osm_init();
 
     for (sInt i=0; i < nsamples; i++)
     {
-      sF32 p = utof23(cnt) - col;
-      sF32 y = 0.0f;
+      double p = utof23(cnt) - col;
+      double y = 0.0;
 
       // state machine action
       switch (osm_tick(state))
@@ -745,11 +749,11 @@ private:
         break;
         
       case OSMTC_UP_DOWN: // case b)
-        y = rcpf * (c2 * sqr(p) - c1 * sqr(p-f));
+        y = rcpf * (c2 * (p*p) - c1 * ((p-f)*(p-f))); // double, not float sqr()
         break;
 
       case OSMTC_DOWN_UP: // case d)
-        y = -rcpf * (gain + c2*sqr(p + omf) - c1*sqr(p));
+        y = -rcpf * (gain + c2*((p+omf)*(p+omf)) - c1*(p*p)); // double, not float sqr()
         break;
 
       case OSMTC_UP_DOWN_UP: // case e)

@@ -187,15 +187,81 @@ static sF32 fastsinrc(sF32 x)
   return fastsin(x);
 }
 
-static sF32 calcfreq(sF32 x)
+#ifdef V2_X87_FAITHFUL
+// Bit-faithful x87 transcendentals for the validation build (x86 only).
+// These replicate the asm pow2/pow kernel (synth.asm:355-408) instruction for
+// instruction: 2^y via f2xm1/fscale (and base^e via fyl2x). Built with -mpc32
+// the ambient x87 control word is PC=24 (24-bit single) / RC=00 (round-nearest),
+// matching the asm's per-render `and ax,0F0FFh` setup, so results match
+// bit-for-bit. libm pow/powf cannot be used here: they use a different
+// polynomial and ignore the caller's control word.
+static inline sF32 v2_pow2(sF32 y)              // 2^y   (asm pow2, synth.asm:388)
 {
-  return powf(2.0f, (x - 1.0f)*10.0f);
+  sF32 r;
+  __asm__ ("fld1\n\t"               // 1 y
+           "fld %%st(1)\n\t"        // y 1 y
+           "fprem\n\t"              // frac 1 y   (frac = y mod 1, |frac|<1)
+           "f2xm1\n\t"              // (2^frac-1) 1 y
+           "faddp %%st,%%st(1)\n\t" // 2^frac y
+           "fscale\n\t"             // 2^frac*2^trunc(y)=2^y , y
+           "fstp %%st(1)\n\t"       // 2^y
+           : "=t"(r) : "0"(y));
+  return r;
+}
+static inline sF32 v2_pow(sF32 base, sF32 e)    // base^e (asm pow, synth.asm:399)
+{
+  sF32 r;
+  __asm__ ("fyl2x\n\t"              // e*log2(base)  (consumes base=st0, e=st1)
+           "fld1\n\t fld %%st(1)\n\t fprem\n\t f2xm1\n\t"
+           "faddp %%st,%%st(1)\n\t fscale\n\t fstp %%st(1)\n\t"
+           : "=t"(r) : "0"(base), "u"(e) : "st(1)");
+  return r;
+}
+// store st0 as 32-bit int at the ambient rounding mode (round-to-nearest),
+// mirroring the asm `fistp` — not the C `(sInt)` cast, which truncates.
+static inline sInt v2_fistp(sF32 v)
+{
+  sInt r;
+  __asm__ ("fistpl %0" : "=m"(r) : "t"(v) : "st");
+  return r;
+}
+#endif
+
+// 2^x and base^e: faithful x87 kernels in the validation build, libm otherwise.
+// Routing ALL transcendentals through these makes every coefficient (env, lfo,
+// filter, distortion, reverb, mod-delay, compressor) match the asm in the
+// faithful build, not just the oscillator frequency.
+static inline sF32 v2_exp2(sF32 x)
+{
+#ifdef V2_X87_FAITHFUL
+  return v2_pow2(x);
+#else
+  return powf(2.0f, x);
+#endif
+}
+static inline sF32 v2_powf(sF32 base, sF32 e)
+{
+#ifdef V2_X87_FAITHFUL
+  return v2_pow(base, e);
+#else
+  return powf(base, e);
+#endif
 }
 
-static sF32 calcfreq2(sF32 x)
-{
-  return powf(2.0f, (x - 1.0f)*fccfframe);
-}
+static sF32 calcfreq(sF32 x)  { return v2_exp2((x - 1.0f) * 10.0f); }
+static sF32 calcfreq2(sF32 x) { return v2_exp2((x - 1.0f) * fccfframe); }
+
+// tri/saw box-filter working type. The "hard" cases (b/d/e/f) have a
+// catastrophic cancellation amplified by rcpf=1/f. The asm computes this on the
+// x87 at 24-bit mantissa / 15-bit exponent. The faithful build runs x87 at
+// PC=24 (-mpc32) so plain `float` reproduces that exactly. The portable build
+// uses SSE single (8-bit exponent), which would overflow the cancellation at
+// low frequencies, so it uses `double` as an approximation of the asm.
+#ifdef V2_X87_FAITHFUL
+typedef sF32 trisaw_flt;
+#else
+typedef double trisaw_flt;
+#endif
 
 // square
 static inline sF32 sqr(sF32 x)
@@ -550,8 +616,16 @@ struct V2Osc
 
   void chgPitch()
   {
+#ifdef V2_X87_FAITHFUL
+    // asm syOscChgPitch (synth.asm:488-502): x87 at PC=24. fci128=0.0078125
+    // (=1/128, exact), fci12=0.083333333333 (rounded 1/12, a MULTIPLY not a
+    // divide), pow2 via f2xm1, freq stored with fistp (round-to-nearest).
+    nffrq = inst->SRfclinfreq * calcfreq((pitch + 64.0f) * 0.0078125f);
+    freq = v2_fistp(inst->SRfcobasefrq * v2_pow2((pitch + note - 60.0f) * 0.083333333333f));
+#else
     nffrq = inst->SRfclinfreq * calcfreq((pitch + 64.0f) / 128.0f);
     freq = (sInt)(inst->SRfcobasefrq * pow(2.0f, (pitch + note - 60.0f) / 12.0f));
+#endif
   }
 
   void set(const syVOsc *para)
@@ -712,28 +786,29 @@ private:
     COVER("Osc tri/saw");
 
     // calc helper values.
-    // PORTING FIX: these are computed in double precision to match the ASM's
-    // 80-bit x87 FPU. The "hard" cases below (b/d/e/f) have a catastrophic
-    // cancellation amplified by rcpf=1/f; doing it in float (the original port,
-    // via the sF32 sqr()) diverges from the ASM at very low frequencies.
-    double f = utof23(freq);
-    double omf = 1.0 - f;
-    double rcpf = 1.0 / f;
-    double col = utof23(brpt);
+    // PORTING NOTE: the "hard" cases below (b/d/e/f) have a catastrophic
+    // cancellation amplified by rcpf=1/f. The asm computes this on the x87 at
+    // 24-bit mantissa / 15-bit exponent. `trisaw_flt` is `float` in the faithful
+    // build (x87 PC=24 reproduces the asm exactly) and `double` in the portable
+    // build (SSE single's 8-bit exponent would overflow at low frequencies).
+    trisaw_flt f = utof23(freq);
+    trisaw_flt omf = 1.0 - f;
+    trisaw_flt rcpf = 1.0 / f;
+    trisaw_flt col = utof23(brpt);
 
     // m1 = 2/col = slope of saw-up wave
     // m2 = -2/(1-col) = slope of saw-down wave
     // c1 = gain/2*m1 = gain/col = scaled integration constant
     // c2 = gain/2*m2 = -gain/(1-col) = scaled integration constant
-    double c1 = gain / col;
-    double c2 = -gain / (1.0 - col);
+    trisaw_flt c1 = gain / col;
+    trisaw_flt c2 = -gain / (1.0 - col);
 
     sU32 state = osm_init();
 
     for (sInt i=0; i < nsamples; i++)
     {
-      double p = utof23(cnt) - col;
-      double y = 0.0;
+      trisaw_flt p = utof23(cnt) - col;
+      trisaw_flt y = 0.0;
 
       // state machine action
       switch (osm_tick(state))
@@ -749,11 +824,11 @@ private:
         break;
         
       case OSMTC_UP_DOWN: // case b)
-        y = rcpf * (c2 * (p*p) - c1 * ((p-f)*(p-f))); // double, not float sqr()
+        y = rcpf * (c2 * (p*p) - c1 * ((p-f)*(p-f))); // trisaw_flt, not float sqr()
         break;
 
       case OSMTC_DOWN_UP: // case d)
-        y = -rcpf * (gain + c2*((p+omf)*(p+omf)) - c1*(p*p)); // double, not float sqr()
+        y = -rcpf * (gain + c2*((p+omf)*(p+omf)) - c1*(p*p)); // trisaw_flt, not float sqr()
         break;
 
       case OSMTC_UP_DOWN_UP: // case e)
@@ -971,7 +1046,7 @@ struct V2Env
   void set(const syVEnv *para)
   {
     // ar: 2^7 (128) to 2^-4 (0.03, ca. 10 secs at 344frames/sec)
-    atd = powf(2.0f, para->ar * fcattackmul + fcattackadd);
+    atd = v2_exp2(para->ar * fcattackmul + fcattackadd);
 
     // dcf: 0 (5msecs thanks to volramping) up to almost 1
     dcf = 1.0f - calcfreq2(1.0f - para->dr / 128.0f);
@@ -980,7 +1055,7 @@ struct V2Env
     sul = para->sl;
 
     // suf: 1/128 (15ms till it's gone) up to 128 (15ms till it's fully there)
-    suf = powf(2.0f, fcsusmul * (para->sr - 64.0f));
+    suf = v2_exp2(fcsusmul * (para->sr - 64.0f));
 
     // ref: 0 (5ms thanks to volramping) up to almost 1
     ref = 1.0f - calcfreq2(1.0f - para->rr / 128.0f);
@@ -1407,7 +1482,7 @@ struct V2Dist
     sF32 x;
 
     mode = (sInt)para->mode;
-    gain1 = powf(2.0f, (para->ingain - 32.0f) / 16.0f);
+    gain1 = v2_exp2((para->ingain - 32.0f) / 16.0f);
 
     switch (mode)
     {
@@ -1897,7 +1972,7 @@ struct V2Boost
     COVER("BOOST set");
 
     // A = 10^(dBgain/40), or a rough approximation anyway
-    sF32 A = powf(2.0f, para->amount / 128.0f);
+    sF32 A = v2_exp2(para->amount / 128.0f);
 
     // V2 code computes beta = sqrt((A^2 + 1) - (A-1)^2) for some reason
     // but applying the binomial formula just gives sqrt(2A)
@@ -2189,13 +2264,13 @@ struct V2Comp
     invol = 1.0f / thresh;
     if (para->autogain != 0.0f)
       thresh = 1.0f;
-    outvol = thresh * powf(2.0f, (para->outgain - 64.0f) / 16.0f);
+    outvol = thresh * v2_exp2((para->outgain - 64.0f) / 16.0f);
     ratio = para->ratio / 128.0f;
     
     // attack: 0 (!) ... 200ms (5Hz)
-    attack = powf(2.0f, -para->attack * 12.0f / 128.0f);
+    attack = v2_exp2(-para->attack * 12.0f / 128.0f);
     // release: 5ms .. 5s
-    release = powf(2.0f, -para->release * 16.0f / 128.0f);
+    release = v2_exp2(-para->release * 16.0f / 128.0f);
   }
 
   void render(StereoSample *buf, sInt nsamples)
@@ -2388,10 +2463,10 @@ struct V2Reverb
 
     sF32 e = inst->SRfclinfreq * sqr(64.0f / (para->revtime + 1.0f));
     for (sInt i=0; i < 4; i++)
-      gainc[i] = powf(gaincdef[i], e);
+      gainc[i] = v2_powf(gaincdef[i], e);
 
     for (sInt i=0; i < 2; i++)
-      gaina[i] = powf(gainadef[i], e);
+      gaina[i] = v2_powf(gainadef[i], e);
 
     damp = inst->SRfclinfreq * (para->highcut / 128.0f);
     gainin = para->vol / 128.0f;

@@ -8,7 +8,19 @@ set -e
 cd "$(dirname "$0")"
 
 CXX="g++"
-CXXFLAGS="-m32 -std=c++03 -O2 -w -include compat.h -I.."
+# Bit-faithful precision: mirror the asm's per-render x87 setup (synth.asm:4868,
+# `and ax,0F0FFh` -> PC=24 single, round-nearest) for the WHOLE validation build.
+#   -mpc32   : startup x87 control word = PC=24 (24-bit single). Pulls crtprec32.o
+#              at LINK time, so it must also be in LDFLAGS below.
+#   -mno-sse : keep every float op AND conversion on the x87 (no detour through an
+#              8-bit-exponent xmm register), so intermediates keep the asm's
+#              24-bit mantissa / 15-bit exponent.
+#   -DV2_X87_FAITHFUL : enable the inline-asm f2xm1 transcendentals + fistp-round
+#              freq path + float tri/saw box filter in synth_core.cpp.
+# The asm oracle (harness_asm) is unaffected: the asm core sets/restores its own
+# control word per render, and the shared player/harness objects are byte-identical
+# in both binaries, so the A/B comparison stays fair.
+CXXFLAGS="-m32 -std=c++03 -O2 -w -include compat.h -I.. -mpc32 -mno-sse -DV2_X87_FAITHFUL"
 
 echo "[1/5] assemble oracle (synth.asm, RONAN off) + validation appendix"
 sed 's/^%define\([[:space:]]*\)RONAN[[:space:]]*$/; RONAN disabled for validation: &/' \
@@ -41,7 +53,7 @@ $CXX $CXXFLAGS -c asm_stubs.cpp -o asm_stubs.o
 
 # -no-pie: the asm core is non-PIC 32-bit and uses absolute relocations in .text;
 # a PIE link rejects those. Non-PIE executable is fine for a local test rig.
-LDFLAGS="-m32 -no-pie"
+LDFLAGS="-m32 -no-pie -mpc32"  # -mpc32 on the link pulls crtprec32.o (sets PC=24 at startup)
 
 echo "[4/5] link harness_asm"
 $CXX $LDFLAGS harness.o v2mplayer_port.o synth_asm_undec.o asm_stubs.o -o harness_asm

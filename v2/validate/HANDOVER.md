@@ -141,30 +141,133 @@ rcpf=1/f). Sample 0 of tri/saw depends on freq directly. The first tri/saw also
 has **brpt=0** (col=0 → c1=gain/0=inf, an untested edge; unused for pure
 saw-down but still a sharp edge).
 
-PRECISION CONTEXT (important): the ASM forces the x87 to **24-bit single
-precision** for the whole synth (`synth.asm:4871  and ax, 0F0FFh` → PC=00). The
-C++ core uses **SSE** for float (g++ -m32, also 24-bit single) so pure-float
-blocks match — BUT the port uses `double`/`pow` in a few places (freq; the
-tri/saw "double" box-filter fix), making those MORE precise than the ASM's
-24-bit. Setting the C++ x87 control word has NO effect (it's on SSE). The
-tri/saw "double" fix was premised on the ASM being 80-bit; it is actually 24-bit
-single, so it overshoots.
+PRECISION CONTEXT (important — CORRECTED 2026-06-03, prior note was wrong):
 
-### NEXT STEP: make the freq (and tri/saw) match the ASM's 24-bit single
+The ASM forces the x87 to **24-bit single precision** for the whole render
+(`synth.asm:4868  and ax, 0F0FFh` → PC=00, RC=00 round-to-nearest, exceptions
+masked; preceded by `finit`, set on every `_synthRender` entry and restored from
+`oldfpcw` at exit).
 
-Tried this turn (all reverted; none closed the whole-song 0.0876):
-- `(sInt)` → `lrint` (round): osc 0.095→0.088, whole-song unchanged.
+The earlier claim that "the C++ core uses SSE" is **FALSE on this toolchain.**
+`g++ -m32` here defaults to `-mfpmath=387` (verified: `g++ -m32 -Q --help=target`
+shows `-mfpmath= 387`; a probe TU compiles `a*b+a/b` to `fmul/fdivp/faddp`). So
+the C++ core runs its float math on the **same x87 unit as the ASM** — but at the
+**glibc default control word 0x037F = PC=11 = 64-bit significand**, never touched.
+
+So the real difference is NOT "SSE vs x87" and NOT confined to `double`/`pow`. It
+is **pervasive**: every multi-op float expression kept live in an x87 register
+runs at 64-bit mantissa in the C++ core vs 24-bit in the ASM. The C++ core is
+*more* precise than the ASM almost everywhere; faithfulness means deliberately
+rounding to 24-bit like the ASM does. Both already share the **15-bit exponent**
+range (x87 regardless of PC), so the tri/saw "double" box-filter fix was a
+mis-diagnosis: the cancellation needed x87's wide exponent (which plain `float`
+on x87 already has), NOT `double`'s 53-bit mantissa. The ASM is 24-bit single,
+never 80-bit, so that fix *overshoots* and should revert to `float`.
+
+Why the per-block leaf tests still read 0.0: values that get spilled to `float`
+storage between ops are truncated to 24-bit anyway and happen to match; the
+divergence lives in expressions kept live in 80-bit registers across several ops
+(an `-O2` register-allocation decision — see probe notes below).
+
+Why "setting the C++ CW had no effect" in the prior session: it was measured on
+the **osc freq**, which is dominated by **libm `powf`** — and libm transcendentals
+run their own internal precision and ignore the caller's control word. The CW
+change was real but invisible on that particular test; the conclusion "C++ is SSE"
+was wrong.
+
+### NEXT STEP: unified theory — run the C++ core as x87 at PC=24
+
+One dominant lever was never actually pulled (it was dismissed as a no-op under
+the false SSE premise):
+
+1. **Set x87 CW to PC=24 in the C++ core**, mirroring `synth.asm:4868`
+   (`fstcw`/`and 0F0FFh`/`or 3Fh`/`finit`/`fldcw` on render entry, restore on
+   exit). Makes every compiler-emitted float op round to 24-bit bit-for-bit with
+   the ASM, across the entire synth. The CW can't reach the two point sources
+   below, so all three are needed:
+2. **Replace libm `powf`/`pow`/`calcfreq`/`calcfreq2` with inline-asm x87** that
+   replicates the ASM `pow2` kernel exactly (`synth.asm:388` —
+   `fld1/fld/fprem/f2xm1/faddp/fscale/fstp`; `calcfreq`/`calcfreq2` are the same
+   kernel with a different pre-scale `fc10`/`fccfframe`). libm won't honor PC=24
+   and uses a different polynomial than `f2xm1`.
+3. **Round the freq cast like `fistp`**: `freq = (sInt)(...)` truncates; ASM uses
+   round-to-nearest. Do the store as `fistp` (or `lrintf` with x87 round-nearest).
+4. **Revert the tri/saw `double` box-filter fix to `float`** — at PC=24 on x87,
+   `float` has the 24-bit mantissa AND 15-bit exponent the ASM has; `double`
+   (53-bit) overshoots.
+
+Tried in a prior session (all reverted; none closed the whole-song 0.0876 — now
+understood as each touching only one minor source while the pervasive 64-vs-24-bit
+arithmetic row stayed untouched because it was believed already-matched via SSE):
+- `(sInt)` → `lrint` (round): osc 0.095→0.088, whole-song unchanged. (= point
+  source #3 only)
 - double `pow` → 80-bit `long double exp2l`: osc 0.088→0.0585, whole-song
-  unchanged. (overshoots — ASM is 24-bit, not 80-bit.)
-- forcing C++ x87 CW to 24-bit single: no effect (C++ uses SSE).
+  unchanged. (wrong direction — ASM is 24-bit, not 80-bit)
+- "forcing C++ x87 CW to 24-bit single: no effect" — measured on libm-dominated
+  freq; see above.
 
-The faithful fix is to compute freq in **single precision with round-to-nearest,
-replicating the ASM `pow2`** (x87 `f2xm1` at PC=24, via inline asm) — or accept a
-float `exp2f`+`lrintf` approximation and measure. Note the whole-song max didn't
-move with osc-only freq fixes, so there are LIKELY MULTIPLE double-vs-single
-sources (freq AND the tri/saw double box filter); the real cure is to make every
-`double` computation in the voice match the ASM's 24-bit single ops bit-for-bit
-(same operation order), then re-tap. This is a precision-faithfulness sub-project.
+EXPERIMENT RUN (2026-06-03): lever #1 can be applied with ZERO source edits via
+compiler flags — `-mpc32` (sets startup x87 CW to PC=24, must be on the LINK line
+too: it pulls `crtprec32.o`/`set_precision`) plus `-mno-sse` (forces every float
+op AND conversion onto x87, so no intermediate detours through an 8-bit-exponent
+xmm). Rebuilt a throwaway `harness_cpp` with both and ran the whole-song A/B:
+
+    baseline (PC=64, SSE convs):  max 0.0876300689  first divergence #8764
+    -mpc32 -mno-sse (all x87/24): max 0.087630054   first divergence #8810
+
+→ The divergence ONSET moves ~46 samples later, but the MAGNITUDE is unchanged.
+  So the pervasive 64→24 arithmetic is a REAL but MINOR contributor — NOT the
+  dominant source. (Why minor: the synth stores almost every value to an `sF32`
+  member between ops, so 64-bit intermediates rarely survive to affect output;
+  both cores are already truncated to 32-bit at every store.)
+
+→ The DOMINANT 0.0876 is the freq point-sources (#2 libm powf ≠ f2xm1, #3 cast
+  truncate ≠ fistp round) — neither touched by flags. REORDERED PRIORITY:
+    HEAVY HITTERS:  #2 inline-asm f2xm1, #3 fistp-round the freq cast.
+    CLEANUP TAIL:   #1 -mpc32 / -mno-sse (closes the residual to true 0 after
+                    the freq path matches; cheap, no source edits).
+  Next experiment: patch the two freq lines (powf→inline f2xm1 pow2; (sInt)→fistp
+  round) and re-measure — expect the magnitude to drop for the first time.
+
+### Probe findings (2026-06-03 — all empirically verified on this toolchain)
+
+- **Default runtime x87 CW = `0x037F`** (PC=11 → 64-bit significand, RC=00
+  round-nearest). Confirmed with `fstcw` at runtime.
+- **PC=24 vs PC=64 demonstrably changes register-kept float results** — e.g. a
+  cancellation expr gave `0.666666667` (PC64) vs `0.666666687` (PC24). The lever
+  is real, not a no-op.
+- **libm `powf` ignores the control word** (identical result at PC=24 and PC=64).
+  Confirms the transcendentals must be replaced with inline-asm `f2xm1` to match
+  the ASM, not just re-rounded.
+- **gcc emits a MIX of int-conversion strategies** under `-mfpmath=387`:
+  - The freq cast `(sInt)(SRfcobasefrq * powf(...))` is the truncate dance:
+    value live on x87 → `fnstcw`/`or $0xc,%ah` (RC=11 = round-toward-zero) →
+    `fistp` → restore. So it **truncates**, confirming point source #3. The
+    faithful store is `fistp` at the ambient RC=nearest (i.e. do NOT set RC=chop).
+  - Other sites use `cvttss2si` (SSE truncate) or bare `fistpl` (round). When
+    building the faithful path, verify each int store individually rather than
+    assuming a uniform rule.
+- **gcc preserves live x87 values across the `powf` call as 80-bit** (`fstpt`/
+  `fldt` spills, `fldt 0x38(%esp)` observed). So even call-surviving intermediates
+  keep 64-bit precision in the C++ core — reinforcing that the precision gap vs
+  the ASM's 24-bit is carried everywhere, not just within a single expression.
+- `SRfcobasefrq` etc. are computed at runtime in `calcNewSampleRate` (depends on
+  `sr`), so they are NOT compile-time folded away from the control word — though
+  literal-only subexpressions inside them may be folded by `-O2`/MPFR. Re-check if
+  a constant-derived value ever diverges.
+
+### STRATEGY: bit-faithful first, then split precision for portability
+
+A C++ port cannot be **both** bit-faithful to the ASM **and** portable: fidelity
+is fundamentally an x86/x87/PC=24 proposition (inline f2xm1, control-word
+twiddling). Plan:
+1. Build the **bit-faithful** validation build (x87 PC=24 + inline transcendentals,
+   `V2_VALIDATE`-gated) and drive the whole-song A/B to 0 — this *proves the port
+   logic is correct*, independent of precision.
+2. Once correctness is locked, the portable build is free to use SSE / libm /
+   whatever; the residual precision difference vs the ASM will be small and should
+   not be audibly noticeable. Keep the faithful x87 path behind `V2_VALIDATE` (or a
+   dedicated define) so the portable path stays clean.
 
 NOTE: "neuter a block in both cores and re-bus-tap" is UNRELIABLE — removing a
 correct block changes the signal and perturbs downstream divergence

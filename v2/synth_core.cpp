@@ -9,7 +9,15 @@
 // - VU meters?
 
 // Ye olde original V2 bugs you can turn on and off :)
-#define BUG_V2_FM_RANGE 1     // Broken sine range reduction for FM oscis
+// Each is 1 = ASM-faithful (reproduces the shipping demo audio), 0 = fixed.
+//   BUG_V2_FM_RANGE   - broken sine range reduction for FM oscis
+//   BUG_V2_ATAN_TABLE - fastatan picks the wrong rational table for |x|>=2
+//                       (cmovge vs cmovae on the exponent byte); affects the
+//                       distortion "overdrive" mode
+#define BUG_V2_FM_RANGE   1
+#ifndef BUG_V2_ATAN_TABLE     // overridable from the build (-DBUG_V2_ATAN_TABLE=0)
+#define BUG_V2_ATAN_TABLE 1
+#endif
 
 // Debugging tools
 #define DEBUGSCOPES 0
@@ -122,12 +130,21 @@ static sF32 fastatan(sF32 x)
   //   r(x) = (cx1*x + cx3*x^3) / (cxm0 + cxm2*x^2 + cxm4*x^4) + bias
   // original V2 code uses doubles here but frankly the coefficients
   // just aren't accurate enough to warrant it :)
+  // PORTING FIX (not an ASM bug): cxm2 (x^2 denom coeff) is SHARED across both
+  // tables in the ASM (0.76443945); only cxm0/cxm4 are per-table. The original
+  // C++ port made cxm2 per-table and swapped it with cxm4. Corrected here.
   static const sF32 coeffs[2][6] = {
     //          cx1          cx3         cxm0         cxm2         cxm4         bias
-    {          1.0f, 0.43157974f,        1.0f, 0.05831938f, 0.76443945f,        0.0f },
-    { -0.431597974f,       -1.0f, 0.05831938f,        1.0f, 0.76443945f, 1.57079633f },
+    {          1.0f, 0.43157974f,        1.0f, 0.76443945f, 0.05831938f,        0.0f },
+    { -0.431597974f,       -1.0f, 0.05831938f, 0.76443945f,        1.0f, 1.57079633f },
   };
-  const sF32 *c = coeffs[x >= 1.0f]; // interestingly enough, V2 code does this test wrong (cmovge instead of cmovae)
+#if BUG_V2_ATAN_TABLE
+  // ASM bug: the |x|>=1 table is selected only when the biased exponent == 0x7f
+  // (cmovge vs cmovae), i.e. x in [1,2); for x >= 2 it uses the |x|<1 table.
+  const sF32 *c = coeffs[x >= 1.0f && x < 2.0f];
+#else
+  const sF32 *c = coeffs[x >= 1.0f]; // corrected: |x|>=1 table for all x >= 1
+#endif
   sF32 x2 = x*x;
   sF32 r = (c[1]*x2 + c[0])*x / ((c[4]*x2 + c[3])*x2 + c[2]) + c[5];
   return r * sign;
@@ -330,14 +347,14 @@ struct V2Moog
     sF32 t1, t2, t3, b4;
 
     in -= q * b[4]; // feedback
-    t1 = b[1]; b[1] = (in + b[0]) * p - b[1] * f;
-    t2 = b[2]; b[2] = (t1 + b[1]) * p - b[2] * f;
-    t3 = b[3]; b[3] = (t2 + b[2]) * p - b[3] * f;
-               b4   = (t3 + b[3]) * p - b[4] * f; 
+    t1 = b[1]; b[1] = (in + b[0]) * p + b[1] * f;
+    t2 = b[2]; b[2] = (t1 + b[1]) * p + b[2] * f;
+    t3 = b[3]; b[3] = (t2 + b[2]) * p + b[3] * f;
+               b4   = (t3 + b[3]) * p + b[4] * f;
 
     b4 -= b4*b4*b4 * (1.0f/6.0f); // clipping
     b4 -= fcdcoffset; // un-bias
-    b[4] = b4 - fcdcoffset;
+    b[4] = b4; // feedback state keeps the once-unbiased value (matches ASM)
     b[0] = realin;
 
     return b4;
@@ -1520,7 +1537,7 @@ private:
 
   inline sF32 bitcrusher(sF32 in)
   {
-    sInt t = (sInt)(in * crush1);
+    sInt t = (sInt)lrintf(in * crush1); // ASM uses fistp (round-to-nearest), not truncation
     t = clamp(t * crush2, -0x7fff, 0x7fff) ^ crxor;
     return (sF32)t / 32768.0f;
   }

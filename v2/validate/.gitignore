@@ -1,0 +1,16 @@
+# build artifacts / generated files — sources are tracked, outputs are not
+*.o
+*.f32
+*.err
+synth_noronan.asm
+synth_noronan_fixed.asm
+redef.map
+# linked executables (no extension)
+harness_asm
+harness_cpp
+comp_osc
+comp_flt
+comp_leaves
+comp_leaves_fixed
+comp_fastatan
+comp_fastatan_fixed

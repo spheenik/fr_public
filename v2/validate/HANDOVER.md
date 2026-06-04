@@ -10,6 +10,16 @@ Whole-song A/B on `pzero_new.v2m` (faithful build, `auto` = 235.3s):
 to prove the port logic correct — is met. Every BUSTAP stage is clean
 whole-song; all comp_* oracles green; probe_atan (new) 0 mismatches.
 
+**Second song: `v2_zeitmaschine_new.v2m` is ALSO BIT-EXACT** (185.2s,
+16,336,384 floats, max-abs 0; was 0.58 on first contact). One additional
+flagged ASM bug found via its PEAK|MONO channel comps (a path pzero never
+hits): `BUG_V2_COMP_OLDMODE` (commit `933572a`) — syCompInit leaves oldmode=0
+(zeroed instance) and PEAK|MONO|ON also encodes to 0, so a comp that is
+peak/mono/on from its first set() never takes the mode-change reset and
+starts at curgain 0.0 (the channel's first note fades in over ~25ms); the
+port had init'd curgain=1. Default = faithful; `-DBUG_V2_COMP_OLDMODE=0`
+restores the always-initialized behavior.
+
 ### Fixes landed in session 5 (all porting errors, no flags)
 
 1. **fastatan coefficients are DOUBLES in the asm** (`fmul/fadd qword

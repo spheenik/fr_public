@@ -89,6 +89,7 @@ static const sF32 fcsusmul    = 0.0019375f;
 static const sF32 fcgain      = 0.6f;
 static const sF32 fcgainh     = 0.6f;
 static const sF32 fcmdlfomul  = 1973915.49f;
+static const sF32 fcrms8192 = 0.0110485434560398050687631931578883f; // asm fci8192 = 1/sqrt(8192), 24-bit
 static const sF32 fccpdfalloff = 0.9998f; // @@@BUG this should probably depend on sampling rate.
 
 static const sF32 fcdcoffset  = 3.814697265625e-6f; // 2^-18
@@ -128,25 +129,29 @@ static sF32 fastatan(sF32 x)
   // we have two rational approximations: one for |x| < 1.0 and one for
   // |x| >= 1.0, both of the general form
   //   r(x) = (cx1*x + cx3*x^3) / (cxm0 + cxm2*x^2 + cxm4*x^4) + bias
-  // original V2 code uses doubles here but frankly the coefficients
-  // just aren't accurate enough to warrant it :)
+  // PORTING FIX (not an ASM bug): the ASM loads these coefficients as DOUBLES
+  // (fmul/fadd qword [fcatan*], synth.asm:108-113) — narrowing them to sF32
+  // flips the 24-bit rounding of the products/sums for ~28% of inputs (1 ULP).
+  // In particular the |x|>=1 bias is the full double pi/2, not 1.57079633f.
+  // Values copied verbatim from synth.asm.
   // PORTING FIX (not an ASM bug): cxm2 (x^2 denom coeff) is SHARED across both
   // tables in the ASM (0.76443945); only cxm0/cxm4 are per-table. The original
   // C++ port made cxm2 per-table and swapped it with cxm4. Corrected here.
-  static const sF32 coeffs[2][6] = {
-    //          cx1          cx3         cxm0         cxm2         cxm4         bias
-    {          1.0f, 0.43157974f,        1.0f, 0.76443945f, 0.05831938f,        0.0f },
-    { -0.431597974f,       -1.0f, 0.05831938f, 0.76443945f,        1.0f, 1.57079633f },
+  static const sF64 coeffs[2][6] = {
+    //         cx1          cx3        cxm0        cxm2        cxm4   bias
+    {          1.0, 0.43157974,        1.0, 0.76443945, 0.05831938,   0.0 },
+    { -0.431597974,       -1.0, 0.05831938, 0.76443945,        1.0,
+      1.5707963267948966192313216916398 },
   };
 #if BUG_V2_ATAN_TABLE
   // ASM bug: the |x|>=1 table is selected only when the biased exponent == 0x7f
   // (cmovge vs cmovae), i.e. x in [1,2); for x >= 2 it uses the |x|<1 table.
-  const sF32 *c = coeffs[x >= 1.0f && x < 2.0f];
+  const sF64 *c = coeffs[x >= 1.0f && x < 2.0f];
 #else
-  const sF32 *c = coeffs[x >= 1.0f]; // corrected: |x|>=1 table for all x >= 1
+  const sF64 *c = coeffs[x >= 1.0f]; // corrected: |x|>=1 table for all x >= 1
 #endif
   sF32 x2 = x*x;
-  sF32 r = (c[1]*x2 + c[0])*x / ((c[4]*x2 + c[3])*x2 + c[2]) + c[5];
+  sF32 r = (sF32)((c[1]*x2 + c[0])*x / ((c[4]*x2 + c[3])*x2 + c[2]) + c[5]);
   return r * sign;
 }
 
@@ -2759,7 +2764,8 @@ struct V2Comp
       COVER("COMP level rms mono");
       for (sInt i=0; i < nsamples; i++)
       {
-        levels[i].l = levels[i].r = invol * doRMS(0.5f * (buf[i].l + buf[i].r), 0);
+        // mono: dcoffset on the input (asm syCompLDMonoRMS), not the accumulator
+        levels[i].l = levels[i].r = invol * doRMS(0.5f * (buf[i].l + buf[i].r) + fcdcoffset, 0, 0.0f);
         rmscnt = (rmscnt + 1) & (RMSLEN - 1);
       }
       break;
@@ -2777,8 +2783,8 @@ struct V2Comp
       COVER("COMP level rms stereo");
       for (sInt i=0; i < nsamples; i++)
       {
-        levels[i].l = invol * doRMS(buf[i].l, 0);
-        levels[i].r = invol * doRMS(buf[i].r, 1);
+        levels[i].l = invol * doRMS(buf[i].l, 0, fcdcoffset);
+        levels[i].r = invol * doRMS(buf[i].r, 1, fcdcoffset);
         rmscnt = (rmscnt + 1) & (RMSLEN - 1);
       }
       break;
@@ -2827,12 +2833,22 @@ private:
     return peakval[ch];
   }
 
-  inline sF32 doRMS(sF32 in, sInt ch)
+  // PORTING FIX (not an ASM bug) — op-for-op port of syCompLD{Mono,Stereo}RMS:
+  // - the oldest sample is subtracted from the accumulator FIRST (its own
+  //   rounding), not fused into "+= insq - oldest";
+  // - the FIXDENORMALS dcoffset goes on the ACCUMULATOR in stereo mode but on
+  //   the INPUT in mono mode (asm inconsistency, replicated via the callers);
+  // - the output is sqrt(rv) * fci8192 (the asm's 24-bit 1/sqrt(8192)
+  //   constant), NOT sqrt(rv/8192) — a different rounding sequence (1 ULP on
+  //   most samples; was the whole-song residual driver via the sum compressor).
+  inline sF32 doRMS(sF32 in, sInt ch, sF32 accumdc)
   {
-    sF32 insq = sqr(in + fcdcoffset);
-    rmsval[ch] += insq - rmsbuf[rmscnt].ch[ch]; // add new sample, remove oldest
-    rmsbuf[rmscnt].ch[ch] = insq; // keep track of value we added
-    return sqrtf(rmsval[ch] / (sF32)RMSLEN);
+    rmsval[ch] -= rmsbuf[rmscnt].ch[ch]; // remove oldest
+    rmsval[ch] += accumdc;               // denormal fix (stereo: on accumulator)
+    sF32 insq = sqr(in);
+    rmsval[ch] += insq;                  // add new sample
+    rmsbuf[rmscnt].ch[ch] = insq;        // keep track of value we added
+    return sqrtf(rmsval[ch]) * fcrms8192;
   }
 };
 
@@ -3083,8 +3099,12 @@ struct V2Chan
     aasnd = fcgain * (para->auxasnd / 128.0f);
     absnd = fcgain * (para->auxbsnd / 128.0f);
     chgain = fcgain * (para->chanvol / 128.0f);
-    a1gain = chgain * fcgainh * (para->aux1 / 128.0f);
-    a2gain = chgain * fcgainh * (para->aux2 / 128.0f);
+    // PORTING FIX (not an ASM bug): the ASM (syChanSet, synth.asm:4198-4209)
+    // computes ((aux/128) * fcgainh) * chgain — aux first, chgain LAST.
+    // Multiplication is non-associative: grouping chgain*fcgainh first came out
+    // 1 ULP off for some volumes, seeding the aux sends (reverb input).
+    a1gain = (para->aux1 / 128.0f) * fcgainh * chgain;
+    a2gain = (para->aux2 / 128.0f) * fcgainh * chgain;
     fxr = (sInt)para->fxroute;
 #ifdef V2_VALIDATE
     if (getenv("CHANTRACE"))

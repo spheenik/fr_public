@@ -18,3 +18,4 @@ comp_trisaw
 comp_lfo
 comp_osc_exact
 probe_freq
+probe_atan

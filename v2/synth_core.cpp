@@ -14,9 +14,19 @@
 //   BUG_V2_ATAN_TABLE - fastatan picks the wrong rational table for |x|>=2
 //                       (cmovge vs cmovae on the exponent byte); affects the
 //                       distortion "overdrive" mode
+//   BUG_V2_COMP_OLDMODE - syCompInit only sets mode=2 and leaves oldmode at 0
+//                       (zeroed instance) — but PEAK|MONO|ON also encodes to
+//                       0, so a compressor that is peak/mono/on from its very
+//                       first set() never takes the mode-change reset and
+//                       starts with curgain = 0.0 instead of 1.0 (the
+//                       channel's first note fades in over ~25ms instead of
+//                       starting at full gain).
 #define BUG_V2_FM_RANGE   1
 #ifndef BUG_V2_ATAN_TABLE     // overridable from the build (-DBUG_V2_ATAN_TABLE=0)
 #define BUG_V2_ATAN_TABLE 1
+#endif
+#ifndef BUG_V2_COMP_OLDMODE   // overridable from the build (-DBUG_V2_COMP_OLDMODE=0)
+#define BUG_V2_COMP_OLDMODE 1
 #endif
 
 // Debugging tools
@@ -2655,6 +2665,7 @@ struct V2Comp
   };
 
   sInt mode;      // bit 0: Peak/RMS, bit 1: Stereo, bit 2: off
+  sInt oldmode;   // last mode set() saw (asm syWComp.oldmode; drives the reset)
 
   sF32 invol;     // input gain (1/threshold, internal threshold is always 0dB)
   sF32 ratio;
@@ -2681,7 +2692,24 @@ struct V2Comp
     memset(dbuf, 0, sizeof(dbuf));
     inst = instance;
 
+#if BUG_V2_COMP_OLDMODE
+    // ASM-faithful: syCompInit only sets mode=2; oldmode/curgain/peak/rms stay
+    // at the zeroed-instance values. curgain=1 only ever arrives via the
+    // mode-change reset in set() — which a comp whose first set() computes
+    // mode==0 (peak|mono|on) never takes, so it starts at curgain=0.
+    oldmode = 0;
+    for (sInt i=0; i < 2; i++)
+    {
+      peakval[i] = 0.0f;
+      rmsval[i] = 0.0f;
+      curgain[i] = 0.0f;
+    }
+    memset(rmsbuf, 0, sizeof(rmsbuf));
+    rmscnt = 0;
+#else
+    oldmode = mode;
     reset();
+#endif
   }
 
   void reset()
@@ -2698,7 +2726,6 @@ struct V2Comp
 
   void set(const syVComp *para)
   {
-    sInt oldmode = mode;
     switch ((sInt)para->mode)
     {
     case MODE_OFF:  mode = MODE_BIT_OFF; break;
@@ -2710,8 +2737,15 @@ struct V2Comp
     if (para->stereo != 0.0f)
       mode |= MODE_BIT_STEREO;
 
+    // asm syCompSet compares against a PERSISTENT oldmode field (not last
+    // frame's mode): the reset fires only on a transition set() itself sees.
+    // (Encoding note: asm encodes OFF as 5/7 vs our 4/6 — both injective and
+    // both map peak|mono|on to 0, so transition decisions are identical.)
     if (mode != oldmode)
+    {
+      oldmode = mode;
       reset();
+    }
 
     // @@@BUG: original V2 code uses "fcsamplesperms" here which is
     // hard-coded to 44.1kHz

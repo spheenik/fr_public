@@ -116,16 +116,20 @@
       Modern path untouched throughout; flag-unset A/B asm-vs-cpp still max-abs 0.
 - [~] 3.4 Validate per D6: matched-seed A/B (same fixed rdtsc stub both sides)
       gated core vs C1 → expect whole-signal max-abs 0, noise included.
-      → **Oscillator layer PROVEN bit-exact** (c1_osc_probe, max|d|=0). Whole-
-      song A/B (converted fr08, V2_SRCVER=0) vs C1: rms 0.0588 (modern) → 0.0483
-      (gated). NOT yet max-abs-0 — and the blocker is **NOT the synth**:
-      cross-correlation shows a **growing lag** (41 samp @0-2 s → 53 @4-6 s) =
-      a sequencer/conversion **timing desync** between the 2000 player and
-      `v2mplayer_port` (the design's separate PLAYER ⊕ conversion layers). The
-      synth-side methodology that worked for the osc — component unit-test vs
-      the 2000 binary in the image — is the template for the remaining synth
-      components (filter/channel/env) and for a player-timing probe. Speech
-      channels: RONAN off both sides (silent), not yet isolated.
+      → **Two layers PROVEN bit-exact; residual localized to the synth voice
+      chain.** (a) `c1_osc_probe`: eraV0 oscillator vs the genuine 2000
+      syOscSet/syOscRender — all 7 cases **max|d|=0**. (b) `c1_timing_probe`:
+      detours the 2000 sequencer tick, logs per-event (sample-pos, MIDI bytes)
+      vs `v2mplayer_port` EVTRACE_RAW — over 204 events both the **event sample
+      positions AND the MIDI bytes are identical (0 mismatches)**. So the PLAYER
+      and CONVERSION layers are bit-exact (the earlier "growing-lag" reading was
+      a cross-correlation artifact of phase-shifted quasi-periodic signals, NOT
+      a timing drift). Whole-song A/B vs C1: rms 0.0588 (modern) → 0.0483
+      (gated); the residual is now **100% synth-internal, downstream of the
+      bit-exact oscillator** — voice chain (filter/dist/dcf/channel-mix),
+      env/volramp, or per-note osc phase. Next: a voice-buffer tap (vcebuf
+      @0x714fc4 / chan buf @0x7153c4) with the same probe methodology. Speech:
+      RONAN off both sides (silent), not yet isolated.
 - [x] 3.5 Line-diff the fingerprint-only (F) functions. → **DONE.** Filter:
       non-moog SVF bit-identical @44100, moog modes 6/7 absent. Reverb: shared
       Freeverb topology + identical gain table. Chorus: shared modulated delay.

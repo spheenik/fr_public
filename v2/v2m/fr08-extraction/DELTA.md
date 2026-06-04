@@ -255,6 +255,32 @@ Validation plan: unit-test the C++ reimplementation against the genuine 2000
 the whole-song A/B can't localize osc vs filter vs mix because C1 is a foreign
 binary with no internal taps.
 
+## LAYER LOCALIZATION (phase D, via probes) — where the residual lives
+
+Two component-isolation probes (the methodology: call the genuine 2000 routine
+in the mapped image, byte-compare against our port) pinned the whole-song
+A/B residual to a single layer:
+
+- **`c1_osc_probe`** — calls the 2000 `syOscSet`/`syOscRender` (@0x40a4d2/
+  0x40a585) vs `synthTestOscV0`. All 7 cases (trisaw/pulse/sine/noise ×
+  colors/seeds) **max|d| = 0**. The eraV0 oscillator is bit-exact.
+- **`c1_timing_probe`** — detours the 2000 sequencer-tick call (@0x40996f) to
+  log per-event (cursmpl, songtick, MIDI bytes @0x593314); compared against
+  `v2mplayer_port` `EVTRACE_RAW`. Over fr08/12 s/204 events: **event sample
+  positions identical (0 mismatches)** AND **MIDI bytes identical (0
+  mismatches)**.
+
+⇒ The PLAYER layer (sequencer timing) and the CONVERSION layer (conv_v2m MIDI
+stream) are **bit-exact**: tempo·441 == usecs, tpc == timediv2, and conv_v2m
+preserves the note/CC/PB/PGM stream. The synth gets identical input at identical
+samples. So the remaining whole-song A/B residual (rms 0.0483, peaks track) is
+**100% synth-internal, downstream of the (bit-exact) oscillator** — i.e. the
+voice chain (filter / dist / dcf / channel-mix), env/volramp, or per-note osc
+phase. (The earlier "growing-lag" cross-correlation was spurious: phase-shifted
+quasi-periodic signals correlate at a drifting lag even when perfectly aligned
+in time.) Next probe: a voice-buffer tap (vcebuf @0x714fc4 / channel buf
+@0x7153c4) to localize within the voice chain, same methodology.
+
 ## Final delta list (era-gate surface for v0 fr08)
 
 Faithful-modern by default; gate these to period behavior when source v2m is v0:

@@ -19,7 +19,9 @@ extern "C" {
   extern unsigned int v2x_size_syWFlt;
 }
 
-static const float EPS = 1e-4f;
+// eps=0: the old 1e-4 tolerance HID 1-ULP render divergences (moog clip
+// constant promotion — the debris_ost residual). Bit-exact or bust.
+static const float EPS = 0.0f;
 
 // deterministic test input: fixed-seed white-ish noise in [-1,1]
 static void make_input(std::vector<float> &v, int N)

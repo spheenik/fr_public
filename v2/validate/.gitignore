@@ -20,3 +20,6 @@ comp_osc_exact
 probe_freq
 probe_atan
 conv_v2m
+probe_flt
+probe_noise
+probe_noise2

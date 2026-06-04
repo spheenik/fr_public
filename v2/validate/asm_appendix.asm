@@ -636,12 +636,41 @@ osclog_emit:
     mov   [edi + 12], ecx           ; voice[1]
     mov   ecx, [ebx + 8]
     mov   [edi + 16], ecx           ; voice[2]
+    ; r0..r2 TEMPORARILY repurposed (debris noise hunt): osc3 noise-filter
+    ; internals (were f1gain/f2gain/fmode, verified 0-divergence on the corpus).
     mov   ecx, [ebp + syWV2.f1gain]
     mov   [edi + 20], ecx           ; r0 = parallel combine gain 1
     mov   ecx, [ebp + syWV2.f2gain]
     mov   [edi + 24], ecx           ; r1 = parallel combine gain 2
+    ; r2 = fmode (bits 0-3) | osc modes (bits 4-15) | ring flags (bits 16-18)
+    ; (edx is free here: consumed by the lea above; eax still holds the count)
     mov   ecx, [ebp + syWV2.fmode]
-    mov   [edi + 28], ecx           ; r2 = filter routing mode
+    and   ecx, 15
+    mov   edx, [ebp + syWV2.osc1 + syWOsc.mode]
+    and   edx, 7
+    shl   edx, 4
+    or    ecx, edx
+    mov   edx, [ebp + syWV2.osc2 + syWOsc.mode]
+    and   edx, 7
+    shl   edx, 8
+    or    ecx, edx
+    mov   edx, [ebp + syWV2.osc3 + syWOsc.mode]
+    and   edx, 7
+    shl   edx, 12
+    or    ecx, edx
+    mov   edx, [ebp + syWV2.osc1 + syWOsc.ring]
+    and   edx, 1
+    shl   edx, 16
+    or    ecx, edx
+    mov   edx, [ebp + syWV2.osc2 + syWOsc.ring]
+    and   edx, 1
+    shl   edx, 17
+    or    ecx, edx
+    mov   edx, [ebp + syWV2.osc3 + syWOsc.ring]
+    and   edx, 1
+    shl   edx, 18
+    or    ecx, edx
+    mov   [edi + 28], ecx           ; r2 = packed routing+modes+rings
     inc   eax
     mov   [osclog_count], eax
 .full:

@@ -100,6 +100,10 @@ static const sF32 fcgain      = 0.6f;
 static const sF32 fcgainh     = 0.6f;
 static const sF32 fcmdlfomul  = 1973915.49f;
 static const sF32 fcrms8192 = 0.0110485434560398050687631931578883f; // asm fci8192 = 1/sqrt(8192), 24-bit
+static const sF32 fcmoogsixth = 1.0f/6.0f; // asm fci6 (24-bit float). As a BARE
+  // literal inside the moog clip expression gcc/x87 promotes it to an ~exact
+  // 80-bit fldt (FLT_EVAL_METHOD=2 constant-promotion bug) — 1 ULP off the
+  // asm's fmul dword [fci6] for ~25% of inputs. A static const sF32 loads flds.
 static const sF32 fccpdfalloff = 0.9998f; // @@@BUG this should probably depend on sampling rate.
 
 static const sF32 fcdcoffset  = 3.814697265625e-6f; // 2^-18
@@ -535,7 +539,7 @@ struct V2Moog
     t3 = b[3]; b[3] = (t2 + b[2]) * p + b[3] * f;
                b4   = (t3 + b[3]) * p + b[4] * f;
 
-    b4 -= b4*b4*b4 * (1.0f/6.0f); // clipping
+    b4 -= b4*b4*b4 * fcmoogsixth; // clipping (see fcmoogsixth: do NOT inline the literal)
     b4 -= fcdcoffset; // un-bias
     b[4] = b4; // feedback state keeps the once-unbiased value (matches ASM)
     b[0] = realin;
@@ -1275,10 +1279,15 @@ private:
   {
     COVER("Osc aux");
 
-    sF32 g = gain * fcgain;
+    // PORTING FIX (not an ASM bug): the asm (.auxa/.auxb, synth.asm) computes
+    // ((l+r) * gain) * fcgain per sample; pre-folding gain*fcgain rounds
+    // differently (1 ULP on a fraction of samples). The aux oscs read the
+    // cross-channel feedback busses, so the noise only appears in full-mix
+    // context — invisible to leaf tests and channel-solo bisection
+    // (debris_ost residual).
     for (sInt i=0; i < nsamples; i++)
     {
-      sF32 aux = g * (src[i].l + src[i].r);
+      sF32 aux = (src[i].l + src[i].r) * gain * fcgain;
       if (ring)
         aux *= dest[i];
       dest[i] = aux;
@@ -2190,7 +2199,16 @@ struct V2Voice
       r.offset = (unsigned)((char *)this - g_freqlog_synthbase);
       r.freq = f2u(voice[0]); r.pno = f2u(nsamples > 1 ? voice[1] : 0.0f);
       r.preround = f2u(nsamples > 2 ? voice[2] : 0.0f);
-      r.r0 = f2u(f1gain); r.r1 = f2u(f2gain); r.r2 = (unsigned)fmode; // parallel combine gains + routing
+      r.r0 = f2u(f1gain); r.r1 = f2u(f2gain); // parallel combine gains
+      // r2: filter routing in bits 0-3 + per-osc modes (bits 4-15) and ring
+      // flags (bits 16-18) — the osc-mode context proved decisive for the
+      // debris AUXA hunt; never infer modes from freqlog ordinals (noteOn
+      // ticks emit extra freq records and shift per-offset indexing).
+      r.r2 = (unsigned)(fmode & 15)
+           | ((unsigned)(osc[0].mode & 7) << 4) | ((unsigned)(osc[1].mode & 7) << 8)
+           | ((unsigned)(osc[2].mode & 7) << 12)
+           | ((osc[0].ring ? 1u : 0u) << 16) | ((osc[1].ring ? 1u : 0u) << 17)
+           | ((osc[2].ring ? 1u : 0u) << 18);
     }
 #endif
 

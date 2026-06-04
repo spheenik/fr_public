@@ -92,18 +92,40 @@
       envelope attackmul −11/128 + dec/rel calcfreq ×10; osc base const
       3185015.0; osc sine `fsin`; noise LCG 214013/2531011; param smoother
       1/256; drop fcdcoffset. Faithful-by-default; period behavior behind gate.
-      → **delta 1 (envelope) DONE**: `V2Env::set` branches on
-      `inst->eraEnvOld()` (srcVersion<2) → `fcattackmul_v0` (−11/128) + dec/rel
-      via `calcfreq` (×10); modern path untouched. Build clean; with the flag
-      unset, josie/kkrieger6/debris_ost 5 s A/B asm-vs-cpp still max-abs 0
-      (gated branch inert). **Deltas 2–7 + the 3.4 matched-seed validation are
-      a coupled block** (osc freq const, fsin sine, noise LCG, smoother,
-      drop-dcoffset, moog feature-gate) — paused for the validation-method
-      decision (see below): they can only be confirmed by the whole-signal
-      max-abs-0 A/B against C1, which needs seed-zeroing (osc/LFO/dist → 0 to
-      match C1's rdtsc=0) and speech-channel handling first.
-- [ ] 3.4 Validate per D6: matched-seed A/B (same fixed rdtsc stub both sides)
+      → **DONE for all SYNTH deltas; ROOT CAUSE found.** The step-B list was
+      reorganized once the deeper disasm landed (DELTA.md "CORRECTION"):
+      - **Root cause = control frame 256 (2000) vs 128 (2004)**, not two
+        separate "smoother 1/256" + "calcfreq" deltas. `synthSetSourceVersion`
+        sets `SRcFrameSize=256`/`SRfciframe=1/256` under `eraEnvOld()`; the
+        volramp coeff and env/LFO tick-rate follow for free.
+      - **delta 1 envelope**: `V2Env::set` under `eraEnvOld()` → `fcattackmul_v0`
+        (−11/128) + dec/rel via `calcfreq` (×10).
+      - **delta 2 oscillator** is a FULL reimplementation, not a constant swap
+        (2000 = 4×-oversampled numeric box filter, not the 2004 analytic
+        convolution). `renderTriSaw_v0/renderPulse_v0/renderSin_v0/
+        renderNoise_v0` + `syOscSet` coeffs + freq const `fcoscbase_v0`
+        (3185015.0) under `eraV0()`. **VERIFIED BIT-EXACT** against the genuine
+        2000 `syOscRender` in isolation — `validate/c1_osc_probe` (calls the
+        2000 syOscSet/syOscRender in the mapped image vs `synthTestOscV0`); all
+        7 cases (trisaw/pulse/sine/noise × colors/seeds) **max|d| = 0**.
+      - **delta 3 sine** = native `fsin` (`v2_sin`); **delta 4 noise** = MSVC LCG
+        214013/2531011 + exact 2000 LRC recurrence (both inside the osc, proven
+        by the probe); **delta 6 dcoffset** dropped in the SVF render under
+        `eraV0()`; **delta 7 moog** modes already unreachable in v0.
+      - Seed-zeroing (osc/LFO → 0) under `eraV0()` to match C1's rdtsc=0.
+      Modern path untouched throughout; flag-unset A/B asm-vs-cpp still max-abs 0.
+- [~] 3.4 Validate per D6: matched-seed A/B (same fixed rdtsc stub both sides)
       gated core vs C1 → expect whole-signal max-abs 0, noise included.
+      → **Oscillator layer PROVEN bit-exact** (c1_osc_probe, max|d|=0). Whole-
+      song A/B (converted fr08, V2_SRCVER=0) vs C1: rms 0.0588 (modern) → 0.0483
+      (gated). NOT yet max-abs-0 — and the blocker is **NOT the synth**:
+      cross-correlation shows a **growing lag** (41 samp @0-2 s → 53 @4-6 s) =
+      a sequencer/conversion **timing desync** between the 2000 player and
+      `v2mplayer_port` (the design's separate PLAYER ⊕ conversion layers). The
+      synth-side methodology that worked for the osc — component unit-test vs
+      the 2000 binary in the image — is the template for the remaining synth
+      components (filter/channel/env) and for a player-timing probe. Speech
+      channels: RONAN off both sides (silent), not yet isolated.
 - [x] 3.5 Line-diff the fingerprint-only (F) functions. → **DONE.** Filter:
       non-moog SVF bit-identical @44100, moog modes 6/7 absent. Reverb: shared
       Freeverb topology + identical gain table. Chorus: shared modulated delay.

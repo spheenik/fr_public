@@ -40,7 +40,12 @@ int main(int argc, char **argv)
     fprintf(stderr, "%s: REJECTED (%s)\n", argv[1], v2mconv_errors[-delta]);
     return 2;
   }
-  printf("%s: source is %d version(s) behind current\n", argv[1], delta);
+  printf("%s: source is %d version(s) behind current (format v%d)\n",
+         argv[1], delta, v2version - delta);
+  if (delta > 0)
+    printf("  era compat: render the converted file with V2_SRCVER=%d to gate "
+           "period DSP behaviors (see v2m/fr08-extraction/DELTA.md)\n",
+           v2version - delta);
 
   unsigned char *out = 0;
   int outlen = 0;

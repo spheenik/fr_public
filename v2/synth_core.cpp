@@ -95,6 +95,9 @@ static const sF32 fccfframe   = 11.0f;
 static const sF32 fcfmmax     = 2.0f;
 static const sF32 fcattackmul = -0.09375f; // -0.0859375
 static const sF32 fcattackadd = 7.0f;
+// era <v2 (fr08): the original attack multiplier -- kb's comment above IS this
+// value; the change to -12/128 came with format v2 (fr08-extraction/DELTA.md).
+static const sF32 fcattackmul_v0 = -0.0859375f;
 static const sF32 fcsusmul    = 0.0019375f;
 static const sF32 fcgain      = 0.6f;
 static const sF32 fcgainh     = 0.6f;
@@ -638,6 +641,17 @@ static void checkRange(const StereoSample *src, sInt nsamples)
 struct V2Instance
 {
   static const int MAX_FRAME_SIZE = 280; // in samples
+
+  // Era compat (fr08-extraction/DELTA.md): the v2m format version the song
+  // was ORIGINALLY authored as, before any v2mconv upgrade. SRCVER_MODERN
+  // (= the 2004 core, format v6) by default; synthSetSourceVersion() lowers it
+  // for period files, gating the confirmed period DSP behaviors. The envelope
+  // delta is dated to format v2 by kb's own transEnv (v2mconv.cpp); the other
+  // deltas have binary evidence for v0 (fr08) only.
+  static const sInt SRCVER_MODERN = 6;
+  sInt srcVersion;
+  bool eraEnvOld()  const { return srcVersion < 2; } // env attack/dec/rel scaling
+  bool eraV0()      const { return srcVersion < 1; } // all other fr08-era deltas
 
   // Stuff that depends on the sample rate
   sF32 SRfcsamplesperms;
@@ -1333,18 +1347,38 @@ struct V2Env
   sF32 ref;   // release factor (mul'd every frame in stRelease, transition ->stOff at 0.0)
   sF32 gain;
 
-  void init(V2Instance *)
+  V2Instance *inst;
+
+  void init(V2Instance *instance)
   {
     state = OFF;
+    inst = instance;
   }
 
   void set(const syVEnv *para)
   {
-    // ar: 2^7 (128) to 2^-4 (0.03, ca. 10 secs at 344frames/sec)
-    atd = v2_exp2(para->ar * fcattackmul + fcattackadd);
+    if (inst->eraEnvOld())
+    {
+      // era <v2 (fr08): attack = 2^(7 - ar*11/128), and decay/release go
+      // through calcfreq (x10 range) -- calcfreq2 (x11) didn't exist yet.
+      // This is exactly the delta kb's disabled transEnv (v2mconv.cpp:243)
+      // tries to approximate on the data side; gating the code is bit-exact.
+      // Evidence: 2000 syEnvSet @0x40a6d1 (fr08-extraction/DELTA.md).
+      atd = v2_exp2(para->ar * fcattackmul_v0 + fcattackadd);
+      dcf = 1.0f - calcfreq(1.0f - para->dr / 128.0f);
+      ref = 1.0f - calcfreq(1.0f - para->rr / 128.0f);
+    }
+    else
+    {
+      // ar: 2^7 (128) to 2^-4 (0.03, ca. 10 secs at 344frames/sec)
+      atd = v2_exp2(para->ar * fcattackmul + fcattackadd);
 
-    // dcf: 0 (5msecs thanks to volramping) up to almost 1
-    dcf = 1.0f - calcfreq2(1.0f - para->dr / 128.0f);
+      // dcf: 0 (5msecs thanks to volramping) up to almost 1
+      dcf = 1.0f - calcfreq2(1.0f - para->dr / 128.0f);
+
+      // ref: 0 (5ms thanks to volramping) up to almost 1
+      ref = 1.0f - calcfreq2(1.0f - para->rr / 128.0f);
+    }
 
     // sul: 0..127 is fine already
     sul = para->sl;
@@ -1352,8 +1386,6 @@ struct V2Env
     // suf: 1/128 (15ms till it's gone) up to 128 (15ms till it's fully there)
     suf = v2_exp2(fcsusmul * (para->sr - 64.0f));
 
-    // ref: 0 (5ms thanks to volramping) up to almost 1
-    ref = 1.0f - calcfreq2(1.0f - para->rr / 128.0f);
     gain = para->vol / 128.0f;
 #ifdef V2_VALIDATE
     if (getenv("ENVTRACE")) {
@@ -3416,6 +3448,11 @@ struct V2Synth
     // ("mov ecx, SYN.size / rep stosb"). Match it: sizeof(*this).
     memset(this, 0, sizeof(*this));
 
+    // era compat: the memset above would leave srcVersion == 0 (= fr08 era!);
+    // default to modern. A period file must opt in via synthSetSourceVersion
+    // AFTER synthInit (mirrors the synthSetGlobals call order in the player).
+    instance.srcVersion = V2Instance::SRCVER_MODERN;
+
     // set sampling rate
     this->samplerate = samplerate;
     instance.calcNewSampleRate(samplerate);
@@ -4111,6 +4148,12 @@ void __stdcall synthProcessMIDI(void *pthis, const void *ptr)
 void __stdcall synthSetGlobals(void *pthis, const void *ptr)
 {
   ((V2Synth *)pthis)->setGlobals((const sU8 *)ptr);
+}
+
+void __stdcall synthSetSourceVersion(void *pthis, int srcver)
+{
+  // era compat (see V2Instance::srcVersion). Call after synthInit.
+  ((V2Synth *)pthis)->instance.srcVersion = srcver;
 }
 
 void __stdcall synthGetPoly(void *pthis, void *dest)

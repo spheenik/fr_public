@@ -7,14 +7,26 @@
 // import stubbing is needed. The 3 rdtsc seed sites are patched to a fixed seed
 // for determinism (see fr08-extraction/DELTA.md).
 //
-// Build (32-bit, no-pie so 0x400000 is free; mpc32 = x87 24-bit single, matching
-// the synth's own control word):
+// Build (32-bit, no-pie so 0x400000 is free; the synth sets its own x87 control
+// word -- 24-bit single -- inside synthRender/ProcessMIDI):
 //   gcc -m32 -no-pie -O0 c1_fr08_harness.c -o c1_fr08_harness
 // Run:
-//   ./c1_fr08_harness /tmp/fr08/unpacked.bin
+//   ./c1_fr08_harness [image] [out.f32] [chunk_samples] [max_seconds]
+//   ./c1_fr08_harness /tmp/fr08/unpacked.bin /tmp/fr08/c1_fr08.f32 4096 800
 //
-// Milestone 1: load + patch + OpenV2M + dump the parsed v2m header (proves the
-// loader mechanics and the self-contained-image premise). Render comes next.
+// Milestone 1 (done): load + patch + OpenV2M + dump the parsed v2m header.
+// Milestone 2 (this): drive the period render path and write the whole song as
+// interleaved stereo f32 (the validate/ toolkit's native format). Entry points
+// recovered from the player glue disassembly (see fr08-extraction/DELTA.md):
+//   PlayV2M     @0x409b10  ()                    -- stop + Reset + playing=1
+//   RenderProxy @0x40990e  (f32 *buf, u32 n)     -- stdcall ret 8; the dsound
+//     fill routine: renders n stereo f32 frames via synthRender(0x40b923),
+//     running the sequencer tick (0x4095a5 -> ProcessMIDI 0x40bbac) at event
+//     boundaries. Clears playing (byte 0x5923b0) at song end but leaves
+//     paused==0, so further calls keep rendering the reverb/delay tail.
+//   Reset       @0x40940b  -- called by both Open and Play; resets stream
+//     cursors + tempo and calls synthInit(patch @[0x592df8]) (0x40b872) and
+//     synthSetGlobals([0x592dfc]) (0x40be53).
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -64,6 +76,19 @@ static const uint32_t RDTSC_SITES[] = { 0x40a494u, 0x40a93eu, 0x40aa6cu };
 #define VA_G_TPC      0x592e04u  // timediv * 10000
 #define VA_G_MAXTIME  0x592e08u
 #define VA_G_GDNUM    0x592e10u
+// render driver (player glue, see DELTA.md "C1 harness recipe"):
+#define VA_PLAY_V2M   0x409b10u  // PlayV2M(): stop + Reset + playing=1 paused=0
+#define VA_RENDER     0x40990eu  // RenderProxy(f32 *buf, u32 n) stdcall ret 8
+#define VA_F_PLAYING  0x5923b0u  // byte: sequencer running (cleared at song end)
+#define VA_F_PAUSED   0x5923b1u  // byte: 1 = fill zeroes the buffer
+#define SAMPLE_RATE   44100u     // 2000 synth is hardwired 44100 (DELTA.md)
+#define TAIL_SECONDS  6u         // reverb/delay tail after the last event
+
+// Both targets keep full callee-save discipline (RenderProxy pushes/pops
+// ebp+ebx+esi+edi; PlayV2M touches only eax; synthRender is pusha/popa), so
+// plain function-pointer calls are safe -- no inline asm needed here.
+typedef void (*play_fn)(void);
+typedef void (__attribute__((stdcall)) *render_fn)(float *buf, uint32_t n);
 
 static uint32_t rd32(uint32_t va) { return *(volatile uint32_t *)(uintptr_t)va; }
 
@@ -134,5 +159,51 @@ int main(int argc, char **argv)
     fprintf(stderr, "[c1] timediv=%u tpc=%u maxtime=%u gdnum=%u\n",
             rd32(VA_G_TIMEDIV), rd32(VA_G_TPC),
             rd32(VA_G_MAXTIME), rd32(VA_G_GDNUM));
+
+    // 6) PlayV2M -- stop + Reset (synthInit/synthSetGlobals again) + unpause
+    ((play_fn)(uintptr_t)VA_PLAY_V2M)();
+    fprintf(stderr, "[c1] PlayV2M: playing=%u paused=%u\n",
+            *(volatile uint8_t *)(uintptr_t)VA_F_PLAYING,
+            *(volatile uint8_t *)(uintptr_t)VA_F_PAUSED);
+
+    // 7) drive RenderProxy chunk by chunk until song end + tail
+    const char *outpath = (argc > 2) ? argv[2] : "/tmp/fr08/c1_fr08.f32";
+    uint32_t chunk    = (argc > 3) ? (uint32_t)atoi(argv[3]) : 4096u;
+    uint64_t max_smp  = ((argc > 4) ? (uint64_t)atoi(argv[4]) : 800u) * SAMPLE_RATE;
+    if (!chunk) chunk = 4096u;
+
+    FILE *out = fopen(outpath, "wb");
+    if (!out) { fprintf(stderr, "cannot open %s for write\n", outpath); return 1; }
+    float *buf = malloc((size_t)chunk * 2 * sizeof(float));
+    if (!buf) { fprintf(stderr, "oom\n"); return 1; }
+
+    render_fn render = (render_fn)(uintptr_t)VA_RENDER;
+    volatile uint8_t *playing = (volatile uint8_t *)(uintptr_t)VA_F_PLAYING;
+    uint64_t total = 0, tail_left = ~0ull, next_log = 0;
+    while (total < max_smp) {
+        render(buf, chunk);
+        if (fwrite(buf, 2 * sizeof(float), chunk, out) != chunk) {
+            fprintf(stderr, "short write to %s\n", outpath); return 1;
+        }
+        total += chunk;
+        if (total >= next_log) {
+            fprintf(stderr, "[c1] %6.1fs rendered (playing=%u)\r",
+                    (double)total / SAMPLE_RATE, *playing);
+            next_log += 30u * SAMPLE_RATE;
+        }
+        if (!*playing && tail_left == ~0ull) {
+            fprintf(stderr, "\n[c1] song end at %.1fs -- rendering %us tail\n",
+                    (double)total / SAMPLE_RATE, TAIL_SECONDS);
+            tail_left = (uint64_t)TAIL_SECONDS * SAMPLE_RATE;
+        }
+        if (tail_left != ~0ull) {
+            if (tail_left <= chunk) break;
+            tail_left -= chunk;
+        }
+    }
+    fclose(out);
+    fprintf(stderr, "\n[c1] wrote %llu samples (%.1fs) -> %s%s\n",
+            (unsigned long long)total, (double)total / SAMPLE_RATE, outpath,
+            (total >= max_smp) ? " [HIT max_seconds CAP]" : "");
     return 0;
 }

@@ -10,6 +10,14 @@ extern "C"
 	extern void __stdcall synthRender(void *pthis, void *buf, int smp, void *buf2=0, int add=0);
 	extern void __stdcall synthProcessMIDI(void *pthis, const void *ptr);
 	extern void __stdcall synthSetGlobals(void *pthis, const void *ptr);
+
+	// Era compat: tells the core which v2m FORMAT VERSION the song data was
+	// originally authored as (0 = year-2000 fr08 era .. v2version = current),
+	// BEFORE any v2mconv upgrade. Gates period DSP behaviors (envelope scaling,
+	// osc sine/freq, noise LCG, ...) for faithful playback of period files; see
+	// v2/v2m/fr08-extraction/DELTA.md. Call after synthInit (init resets it to
+	// modern). Optional -- without it the core renders modern (2004) behavior.
+	extern void __stdcall synthSetSourceVersion(void *pthis, int srcver);
 //  extern void __stdcall synthSetSampler(void *pthis, const void *bankinfo, const void *samples);
 	extern void __stdcall synthGetPoly(void *pthis, void *dest);
 	extern void __stdcall synthGetPgm(void *pthis, void *dest);

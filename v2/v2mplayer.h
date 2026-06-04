@@ -60,7 +60,17 @@ public:
 
   // init
   // call this instead of a constructor
-  void Init(sU32 a_tickspersec=1000) { m_tpc=a_tickspersec; m_base.valid=0; }
+  void Init(sU32 a_tickspersec=1000) { m_tpc=a_tickspersec; m_base.valid=0; m_srcver=-1; }
+
+
+  // era compat: declare which v2m FORMAT VERSION the song was originally
+  // authored as (0 = year-2000/fr08 .. current), before any v2mconv upgrade —
+  // the conversion itself erases this, so whoever converted/loaded the file
+  // must carry it here (e.g. v2version - CheckV2MVersion(original)). The
+  // player forwards it to the synth core after every synthInit, gating period
+  // DSP behaviors (see v2/v2m/fr08-extraction/DELTA.md). Call any time before
+  // Play(); -1 (default) = modern, no period gating.
+  void SetSourceVersion(sInt a_ver) { m_srcver = a_ver; }
 
 
 
@@ -234,6 +244,7 @@ private:
 
 	// member variables
 	sU32        m_tpc;
+	sInt        m_srcver;   // era compat: source v2m format version (-1 = modern)
 	V2MBase			m_base;
 	PlayerState m_state;
 	sU32        m_samplerate;

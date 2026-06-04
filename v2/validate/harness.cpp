@@ -73,6 +73,14 @@ int main(int argc, char **argv)
   // seam internally — no soundsys.cpp / DirectSound involvement.
   static V2MPlayer player; // static: 3MB instance, keep off the stack
   player.Init();
+  // Era compat (env V2_SRCVER=<n>): declare the song's ORIGINAL v2m format
+  // version (0 = year-2000/fr08) when rendering a v2mconv-upgraded file, so
+  // the core gates the period DSP behaviors (fr08-extraction/DELTA.md).
+  // conv_v2m prints the right value. Unset = modern rendering (default).
+  if (const char *sv = getenv("V2_SRCVER")) {
+    player.SetSourceVersion(atoi(sv));
+    fprintf(stderr, "harness: era compat: source v2m version = %d\n", atoi(sv));
+  }
   if (!player.Open(song, 44100)) {
     fprintf(stderr, "harness: V2MPlayer::Open failed (song may need v2mconv upgrade)\n");
     free(song);

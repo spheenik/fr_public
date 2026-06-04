@@ -266,12 +266,27 @@ gdnum=1. Two gotchas the build pinned down:
   (both pushes + the call); nopping only the call leaves the args on the stack
   and OpenV2M's `ret 8` returns into the v2m data.
 
-**MILESTONE 2 (next)**: the sound-system init (0x409ac2/0x409bcb/0x409b36/
-0x409ade, run before OpenV2M) sets up the audio buffers + globals (output ptr
-0x726f98, nsamples 0x726f94, aux/chan buffers 0x714/715/716xxx, samplerate
-0x592e0c, channel mask 0x715c14[16]) — all zero in the pre-music dump. Set them
-up (or call the pure subset), then drive renderBlock @0x40ba10(ecx=nsamples) +
-the sequencer Tick to render f32.
+**MILESTONE 2 (DONE)** — full-song deterministic render. The player glue
+(0x4094xx–0x409bxx, outside the original objdump window) resolved the whole
+driver chain; no manual buffer setup needed (Reset does it all):
+
+| VA | function | notes |
+|----|----------|-------|
+| 0x40940b | **Reset** | resets stream cursors (0x5923f0 area) + timing (cur 0x5923b4=0, next-event 0x5923b8=-1, tempo 0x5923c8=44100·5000, sig 4/4), then `synthInit(patch=[0x592df8])` @0x40b872 (`ret 4`; zeroes 0x11388 bytes @0x715c08, inits 16 voices/channels + reverb/delay/chorus) and `synthSetGlobals([0x592dfc])` @0x40be53. Called by both OpenV2M and PlayV2M. |
+| 0x409b10 | **PlayV2M** () | stop → Reset → playing(0x5923b0)=1, paused(0x5923b1)=0 |
+| 0x409b36 | StopV2M () | playing=0, paused=1 |
+| 0x40990e | **RenderProxy(f32 \*buf, u32 n)** | stdcall `ret 8` — the dsound fill. Loops: render min(n, samples-to-next-event 0x592de8) via synthRender @0x40b923, then player tick @0x4095a5; next-event distance = (next−cur)·tempo(0x5923c8)/tpc(0x592e04) with remainder accumulation @0x592dec. Song end clears playing but leaves paused=0 → further calls render the reverb/delay tail. Full callee-save → plain stdcall fn-ptr call works. |
+| 0x4095a5 | player tick | walks the 16 chans × (note/ctl×7/pgm/pitch) streams, assembles a MIDI buffer @0x593314 (running status, 0xfd terminator), calls **ProcessMIDI @0x40bbac**; advances song position 0x5923b4, handles tempo events (0x5923c8 = v·441), clears playing when next-event stays −1. |
+| 0x409ae3/0x409ac2 | dsound position/latency helpers | not needed offline |
+
+Results (`c1_fr08_harness [image] [out.f32] [chunk] [max_s]`): whole song
+renders offline — **657.1 s + 6 s tail = 29 241 344 stereo f32 frames**, no
+NaN/Inf, peak 1.007, rms 0.123. Chunk-4096 vs chunk-333 (independent
+processes) **bit-exact over the common length** → run-to-run determinism AND
+chunk invariance proven. ProcessMIDI survives the speech events with RONAN
+init nop'd (speech silently absent — acceptable: our validation builds compile
+RONAN out anyway). Ground truth: `/tmp/fr08/c1_fr08.f32` (+`.wav` listen
+anchor), re-derivable any time by re-running the harness.
 
 ## Status
 
@@ -281,5 +296,6 @@ the sequencer Tick to render f32.
       line-diffed; player FPU + dispatch checked)
 - [x] noise generator identification (MSVC rand LCG)
 - [x] determinism hazard (3× rdtsc seeds)
-- [ ] period API surface (entry points) for the C1 harness — partially mapped
-      (ProcessMIDI @0x40bb8c; init/render chain identified); finalize in step C1
+- [x] period API surface (entry points) for the C1 harness — fully mapped
+      (PlayV2M/RenderProxy/Reset/tick, table above); whole-song deterministic
+      render verified (MILESTONE 2)

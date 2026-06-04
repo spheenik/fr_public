@@ -23,6 +23,16 @@ extern "C" void __attribute__((stdcall)) synthSetLyrics(void *, const char **)
   }
 }
 
+// Era compat no-op for harness_asm: the player calls synthSetSourceVersion()
+// after synthInit when a source format version is declared (see v2mplayer.h).
+// The 2004 ASM core has no era concept -- it IS the modern behavior the era
+// flag defaults to -- so the correct asm-side implementation is "ignore".
+// (Period gating is C++-core-only; the period A/B reference is the genuine
+// 2000 code via validate/c1_fr08_harness, not the 2004 asm.)
+extern "C" void __attribute__((stdcall)) synthSetSourceVersion(void *, int)
+{
+}
+
 // Validation: asm-side chorus-integer dump. asm_appendix.asm's chorusdbg_snap
 // (sed-injected into syModDelSet) reads the just-computed syWModDel integers and
 // calls this (cdecl). Mirrors synth_core.cpp's CHORUSTRACE so harness_asm and

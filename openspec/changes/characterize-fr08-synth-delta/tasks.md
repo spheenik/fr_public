@@ -48,7 +48,7 @@
 
 ## 2. Step C1 — ground-truth harness (run the genuine 2000 code offline)
 
-- [~] 2.1 Loader: map the depacked image at 0x400000 in a 32-bit process, stub
+- [x] 2.1 Loader: map the depacked image at 0x400000 in a 32-bit process, stub
       imports the synth path touches. **Stub `rdtsc` to a fixed constant** (the
       three seed sites @0x40a494/0x40a93e/0x40aa6c) so the render is
       deterministic AND so the seed can be matched on the gated-core side.
@@ -59,10 +59,18 @@
       via direct asm. OpenV2M returns cleanly; parsed header verified
       (timediv=480 tpc=4800000 maxtime=683530 gdnum=1). Remaining: set up audio
       buffers + drive render (2.2).
-- [ ] 2.2 Identify & call the period entry points (init/render/processMIDI/
+- [x] 2.2 Identify & call the period entry points (init/render/processMIDI/
       player tick — `0x40bb8c` is ProcessMIDI; trace its 0x4093xx imports) on
       the original v0 `fr08.v2m`; render deterministic f32 (44100, chunk
-      invariance check).
+      invariance check). → **MILESTONE 2 DONE**: glue disasm pinned
+      PlayV2M @0x409b10, RenderProxy @0x40990e (dsound fill, stdcall),
+      Reset @0x40940b (→ synthInit @0x40b872 + synthSetGlobals @0x40be53),
+      player tick @0x4095a5 (→ ProcessMIDI @0x40bbac). Harness renders the
+      whole song (657.1s + 6s tail, 29 241 344 frames → /tmp/fr08/c1_fr08.f32):
+      no NaN/Inf, peak 1.007, rms 0.123; chunk-4096 vs chunk-333 runs
+      **bit-exact** over the common length (= determinism + chunk invariance);
+      Ronan-gated ProcessMIDI survives the speech events. Listen anchor:
+      /tmp/fr08/c1_fr08.wav.
 - [ ] 2.3 (optional) dsound-proxy capture from the live demo under Wine — only
       as a coarse "sounds the same" anchor; NOT a bit reference (historical
       seed is unrecoverable, by design — non-goal).
@@ -71,13 +79,29 @@
 
 - [x] 3.1 Side-check: Balance=64 is a true no-op — `f1gain/f2gain` apply only in
       FLTR_PARALLEL (`synth_core.cpp:2230-2236`), both 1.0 at 64. Conv default OK.
-- [ ] 3.2 Era-flag plumbing: carry the source v2m format version from
+- [x] 3.2 Era-flag plumbing: carry the source v2m format version from
       conversion → player → `synthInit`/per-voice init (conversion currently
-      erases it). One runtime flag, not per-feature.
-- [ ] 3.3 Gate the confirmed deltas behind the era flag (DELTA.md list):
+      erases it). One runtime flag, not per-feature. → `V2Instance.srcVersion`
+      (modern=6 default, predicates `eraEnvOld()` <2 / `eraV0()` <1) +
+      `synthSetSourceVersion()` C-API (synth.h, libv2.h, no-op asm stub);
+      `V2MPlayer::SetSourceVersion()` re-applied after every synthInit in
+      Reset(); harness env `V2_SRCVER=<n>`; conv_v2m prints the value
+      ("format v0 … render with V2_SRCVER=0"). Flag unset ⇒ josie 10s A/B
+      asm-vs-cpp still max-abs 0 (no regression).
+- [~] 3.3 Gate the confirmed deltas behind the era flag (DELTA.md list):
       envelope attackmul −11/128 + dec/rel calcfreq ×10; osc base const
       3185015.0; osc sine `fsin`; noise LCG 214013/2531011; param smoother
       1/256; drop fcdcoffset. Faithful-by-default; period behavior behind gate.
+      → **delta 1 (envelope) DONE**: `V2Env::set` branches on
+      `inst->eraEnvOld()` (srcVersion<2) → `fcattackmul_v0` (−11/128) + dec/rel
+      via `calcfreq` (×10); modern path untouched. Build clean; with the flag
+      unset, josie/kkrieger6/debris_ost 5 s A/B asm-vs-cpp still max-abs 0
+      (gated branch inert). **Deltas 2–7 + the 3.4 matched-seed validation are
+      a coupled block** (osc freq const, fsin sine, noise LCG, smoother,
+      drop-dcoffset, moog feature-gate) — paused for the validation-method
+      decision (see below): they can only be confirmed by the whole-signal
+      max-abs-0 A/B against C1, which needs seed-zeroing (osc/LFO/dist → 0 to
+      match C1's rdtsc=0) and speech-channel handling first.
 - [ ] 3.4 Validate per D6: matched-seed A/B (same fixed rdtsc stub both sides)
       gated core vs C1 → expect whole-signal max-abs 0, noise included.
 - [x] 3.5 Line-diff the fingerprint-only (F) functions. → **DONE.** Filter:

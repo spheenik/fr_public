@@ -361,6 +361,11 @@ void V2MPlayer::Reset()
 		synthInit(m_synth,(void*)m_base.patchmap,m_samplerate);
 		synthSetGlobals(m_synth,(void*)m_base.globals);
 		synthSetLyrics(m_synth,m_base.speechptrs);
+		// era compat: synthInit resets the core to modern; re-apply the source
+		// format version so period files keep their period DSP behaviors
+		// (fr08-extraction/DELTA.md). -1 = unset, leave the core's default.
+		if (m_srcver >= 0)
+			synthSetSourceVersion(m_synth, m_srcver);
 	}
 }
 

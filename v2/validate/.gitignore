@@ -8,6 +8,7 @@ redef.map
 # linked executables (no extension)
 harness_asm
 harness_cpp
+c1_fr08_harness
 comp_osc
 comp_flt
 comp_leaves

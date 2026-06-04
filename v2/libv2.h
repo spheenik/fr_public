@@ -82,6 +82,15 @@ extern "C"
   // ptr  : pointer to text array
   void __stdcall synthSetLyrics(void *pthis, const char **ptr);
 
+  // era compat: declares which v2m FORMAT VERSION the song data was originally
+  // authored as (0 = year-2000/fr08 era), before any v2mconv upgrade. Gates
+  // period DSP behaviors for faithful playback of period files (see
+  // v2m/fr08-extraction/DELTA.md). Optional; call after synthInit (which
+  // resets the core to modern behavior).
+  // pthis : pointer to work mem
+  // srcver: source v2m format version (0..current)
+  void __stdcall synthSetSourceVersion(void *pthis, int srcver);
+
   // renders synth output to destination buffer
   // pthis: pointer to work mem
   // buf  : pointer to interleaved float stereo out buffer

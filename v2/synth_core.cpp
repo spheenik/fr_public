@@ -328,6 +328,15 @@ static inline sF32 v2_fsin(sF32 x)
   __asm__ ("fsin" : "=t"(r) : "0"(x));
   return r;
 }
+// native x87 atan (= fpatan(x, 1)), for the year-2000 overdrive waveshaper
+// (syDistRenderMono @0x40ab88 `fld1; fpatan`). 2004 uses the fastatan
+// polynomial instead (DELTA.md: "no fastatan ... overdrive differs").
+static inline sF32 v2_atan(sF32 x)
+{
+  sF32 r;
+  __asm__ ("fld1\n\t fpatan\n\t" : "=t"(r) : "0"(x));
+  return r;
+}
 #endif
 
 // 2^x and base^e: faithful x87 kernels in the validation build, libm otherwise.
@@ -348,6 +357,14 @@ static inline sF32 v2_sin(sF32 x)
   return v2_fsin(x);
 #else
   return sinf(x);
+#endif
+}
+static inline sF32 v2_atanf(sF32 x)  // native atan for the eraV0 overdrive
+{
+#ifdef V2_X87_FAITHFUL
+  return v2_atan(x);
+#else
+  return atanf(x);
 #endif
 }
 static inline sF32 v2_powf(sF32 base, sF32 e)
@@ -2023,6 +2040,7 @@ struct V2Dist
   sF32 dvalr;     // last decimator value (mono/right)
   V2Flt fltl;     // filter mono/left
   V2Flt fltr;     // filter right
+  V2Instance *inst;
 
   void init(V2Instance *instance)
   {
@@ -2030,6 +2048,7 @@ struct V2Dist
     dvall = dvalr = 0.0f;
     fltl.init(instance);
     fltr.init(instance);
+    inst = instance;
   }
 
   void set(const syVDist *para)
@@ -2183,6 +2202,10 @@ struct V2Dist
 private:
   inline sF32 overdrive(sF32 in)
   {
+    // era <v1 (fr08): native x87 atan (fpatan), not the fastatan polynomial
+    // (syDistRenderMono @0x40ab88; DELTA.md delta -- fastatan is post-2000).
+    if (inst->eraV0())
+      return gain2 * v2_atanf(in * gain1 + offs);
     return gain2 * fastatan(in * gain1 + offs);
   }
 
@@ -2436,21 +2459,28 @@ struct V2Voice
     VCETAP_SNAP(dist, voice, nsamples);
 
     // voice buffer -> dc filter -> voice buffer
-    dcf.renderMono(voice, voice, nsamples);
-    VCETAP_SNAP(dcf, voice, nsamples);
+    // era <v1 (fr08): syV2Render @0x40ad4d has NO per-voice DC filter (osc ->
+    // flt -> dist -> volramp); the post-voice dcf is post-2000. (DELTA.md)
+    if (!inst->eraV0())
+    {
+      dcf.renderMono(voice, voice, nsamples);
+      VCETAP_SNAP(dcf, voice, nsamples);
+    }
 
     DEBUG_PLOT(this, voice, nsamples);
 
     // voice buffer (mono) -> +=output buffer (stereo)
-    // original ASM code has chan buffer hardwired as output here
+    // original ASM code has chan buffer hardwired as output here. era <v1
+    // injects no fcdcoffset in the voice->channel mix (the 2000 loop adds none).
+    const sF32 dco = inst->eraV0() ? 0.0f : fcdcoffset;
     sF32 cv = curvol;
     for (sInt i=0; i < nsamples; i++)
     {
       sF32 out = voice[i] * cv;
       cv += volramp;
 
-      dest[i].l += lvol * out + fcdcoffset;
-      dest[i].r += rvol * out + fcdcoffset;
+      dest[i].l += lvol * out + dco;
+      dest[i].r += rvol * out + dco;
     }
 
     curvol = cv;
@@ -4332,6 +4362,40 @@ extern "C" void synthTestOscV0(const float *p, unsigned cnt0, unsigned nseed0,
   osc.cnt = cnt0;
   osc.nseed = nseed0;
   osc.render(dest, nsamples);
+}
+
+// Validation: render ONE eraV0 filter in isolation, to unit-test against the
+// genuine 2000 syFltSet/syFltRender (@0x40a837/0x40a880) in c1_flt_probe.
+// p = {mode,cutoff,reso} (2000 syVFlt order). src/dst = nsamples mono floats.
+extern "C" void synthTestFltV0(const float *p, const float *src,
+                               float *dst, int nsamples)
+{
+  static V2Instance inst;
+  inst.calcNewSampleRate(44100);
+  inst.srcVersion = 0; // eraV0 (dco=0 in the SVF render)
+  static V2Flt flt;
+  flt.init(&inst);
+  syVFlt para;
+  para.mode = p[0]; para.cutoff = p[1]; para.reso = p[2];
+  flt.set(&para);
+  flt.render(dst, src, nsamples);
+}
+
+// Validation: render ONE eraV0 distortion in isolation, vs the genuine 2000
+// syDistSet/syDistRenderMono (@0x40aa93/0x40ab71) in c1_dist_probe.
+// p = {mode,ingain,param1,param2} (syVDist order). src/dst = nsamples mono.
+extern "C" void synthTestDistV0(const float *p, const float *src,
+                                float *dst, int nsamples)
+{
+  static V2Instance inst;
+  inst.calcNewSampleRate(44100);
+  inst.srcVersion = 0;
+  static V2Dist dist;
+  dist.init(&inst);
+  syVDist para;
+  para.mode = p[0]; para.ingain = p[1]; para.param1 = p[2]; para.param2 = p[3];
+  dist.set(&para);
+  dist.renderMono(dst, src, nsamples);
 }
 #endif
 

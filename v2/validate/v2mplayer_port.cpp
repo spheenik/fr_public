@@ -330,12 +330,21 @@ void V2MPlayer::Tick()
 	}
 	UPDATENT3(m_state.gnr, m_state.gnt, m_state.gptr+m_state.gnr, m_base.gdnum);
 
-	for (sInt ch=0; ch<16; ch++) 
+	// [validation] CHANSOLO=<n>: keep only channel n's MIDI (mute the rest). All
+	// event-pointer advancement and scheduling stay identical (we discard the
+	// emitted BYTES, not the bookkeeping), so timing is bit-for-bit the full song
+	// with the other channels silenced. Lets the A/B harness isolate one channel's
+	// full contribution (voice + its channel FX) in both cores.
+	static int chansolo = -2;
+	if (chansolo == -2) { const char *e = getenv("CHANSOLO"); chansolo = e ? atoi(e) : -1; }
+
+	for (sInt ch=0; ch<16; ch++)
 	{
 		V2MBase::Channel &bc=m_base.chan[ch];
 		PlayerState::Channel &sc=m_state.chan[ch];
 		if (!bc.notenum)
 			continue;
+		sU8 *solo_mptr0 = mptr; sU32 solo_laststat0 = laststat; // for CHANSOLO discard
 		// 1. process pgm change events
 		if (sc.pcnr<bc.pcnum && m_state.time==sc.pcnt)
 		{
@@ -387,6 +396,9 @@ void V2MPlayer::Tick()
 			UPDATENT2(sc.notenr,sc.notent,sc.noteptr,bc.notenum);
 		}
 		UPDATENT3(sc.notenr,sc.notent,sc.noteptr,bc.notenum);
+
+		// CHANSOLO: discard this channel's emitted MIDI bytes if it's muted.
+		if (chansolo >= 0 && ch != chansolo) { mptr = solo_mptr0; laststat = solo_laststat0; }
 	}
 
 	*mptr++=0xfd;

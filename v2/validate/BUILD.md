@@ -69,3 +69,46 @@ harness binds these directly for the cpp build, and binds the `_synth*@N`
 aliases for the asm build.
 
 - `harness_asm` / `harness_cpp` — one harness source, two link targets
+
+## Listening (playback infrastructure)
+
+The validation flow speaks raw interleaved-stereo float32 (L,R,L,R,...) at
+44.1 kHz. Two ways to turn that into something you can actually hear — both
+emit 16-bit PCM WAV (clamped to [-1,1]); the `.f32` stays the bit-exact source
+of truth for `compare.py`.
+
+**Render a song straight to WAV** — the harness checks the output extension, so
+just name the output `.wav`:
+
+```sh
+./harness_cpp ../v2m/pzero_new.v2m pzero.wav 441000   # 441000 stereo frames = 10s @ 44.1k
+./harness_asm ../v2m/pzero_new.v2m pzero_asm.wav 441000   # the asm oracle
+ffplay -autoexit pzero.wav        # or: aplay / paplay / mpv / vlc
+```
+
+Pass `auto` instead of a frame count to render the **whole song** plus its
+reverb/delay tail (the player's STOPPED state rings the tail forever, so the
+harness renders while `IsPlaying()` then trims trailing silence):
+
+```sh
+./harness_cpp ../v2m/pzero_new.v2m pzero_full.wav auto   # pzero = 230.7s song + tail = 235.3s
+```
+
+> `auto` is for *listening*: the silence-trimmed length depends on the tail and
+> can differ by a few samples between cores. For **bit-exact A/B validation pass
+> a fixed frame count** (deterministic, identical length on both cores). Caveat
+> worth knowing: prior validation only ever rendered 10s clips — over the full
+> pzero the cores agree only for the first ~17.8s, then diverge hard (see the
+> v2-residual memory).
+
+**Convert an existing `.f32` dump** (no rebuild) — handy for the dumps already
+on disk (`cpp_pzero.f32`, `asm_pzero.f32`, ...):
+
+```sh
+python3 f32towav.py cpp_pzero.f32          # -> cpp_pzero.wav
+python3 f32towav.py asm_pzero.f32 out.wav --rate 44100
+```
+
+The C path (`wav.h`, in the harness) and the Python path produce WAVs that agree
+to within 1 LSB — the only difference is the harness rounding under the reduced
+24-bit x87 precision of the fidelity build vs Python's doubles. Inaudible.

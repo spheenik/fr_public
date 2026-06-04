@@ -14,9 +14,11 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <vector>
 
 #include "types.h"
 #include "v2mplayer.h"
+#include "wav.h"
 
 // Safety stub: synth_core.cpp declares OutputDebugStringA for its (dead) debug
 // printf path. The optimizer normally drops it; provide a no-op so any build
@@ -26,7 +28,11 @@ extern "C" void __stdcall OutputDebugStringA(const char *) {}
 // Render in fixed-size blocks. Block size is identical for both core builds, so
 // it cancels out of the A/B comparison; V2MPlayer is sample-accurate w.r.t.
 // event timing, so the choice does not affect output.
-static const sU32 BLOCK = 1024; // stereo samples per Render call
+// Stereo samples per Render call. Kept <= MAX_FRAME_SIZE (280) so that each
+// Render maps to a single synth-internal frame and the BUSTAP per-frame dumps
+// capture every sample (bustap_dump snapshots only the last internal sub-frame
+// per Render call). Output is sample-accurate regardless of block size.
+static const sU32 BLOCK = 256;
 
 static sU8 *load_file(const char *path, sU32 *len_out)
 {
@@ -48,12 +54,15 @@ static sU8 *load_file(const char *path, sU32 *len_out)
 int main(int argc, char **argv)
 {
   if (argc != 4) {
-    fprintf(stderr, "usage: %s <song.v2m> <out.f32> <num_stereo_samples>\n", argv[0]);
+    fprintf(stderr, "usage: %s <song.v2m> <out.f32|.wav> <num_stereo_samples|auto>\n", argv[0]);
+    fprintf(stderr, "  num_stereo_samples : fixed render length (deterministic; use for A/B validation)\n");
+    fprintf(stderr, "  auto               : render the WHOLE song + reverb/delay tail until it decays\n");
     return 2;
   }
   const char *songpath = argv[1];
   const char *outpath  = argv[2];
-  sU32 total = (sU32)strtoul(argv[3], 0, 10);
+  const bool  auto_len = (strcmp(argv[3], "auto") == 0);
+  sU32 total = auto_len ? 0 : (sU32)strtoul(argv[3], 0, 10);
 
   // The v2m memory block must remain valid for as long as the player is open.
   sU32 songlen = 0;
@@ -71,28 +80,103 @@ int main(int argc, char **argv)
   }
   player.Play(0);
 
-  // Render into one big interleaved-stereo float buffer, block by block.
-  sF32 *out = (sF32 *)malloc((size_t)total * 2 * sizeof(sF32));
-  if (!out) { fprintf(stderr, "harness: OOM (%u samples)\n", total); free(song); return 4; }
+  sF32 *out = 0;
+  std::vector<sF32> autobuf; // backing store for auto mode
 
-  for (sU32 done = 0; done < total; ) {
-    sU32 n = total - done;
-    if (n > BLOCK) n = BLOCK;
-    player.Render(out + (size_t)done * 2, n);
-    done += n;
+  if (auto_len) {
+    // Render the whole song, then let the tail ring out.
+    //
+    // Lifecycle (see v2mplayer_port.cpp): while song events remain, state is
+    // PLAYING and IsPlaying() is true. When the last event is consumed, Tick()
+    // flips state to STOPPED and Render() then keeps producing the reverb/delay
+    // tail indefinitely — it never stops on its own. So: render blocks while
+    // playing, then keep rendering until the output decays to silence.
+    //
+    // NOTE: this is for *listening*, not A/B validation — the silence-trimmed
+    // length depends on the tail and could differ by a few samples between
+    // cores. For bit-exact comparison pass a fixed <num_stereo_samples>.
+    const sF32 SILENCE = 3.0e-5f;        // ~ -90 dBFS
+    const sU32 SILENT_BLOCKS_NEEDED = 44100 / BLOCK + 1; // ~1s of quiet to call it done
+    const sU32 SONG_CAP   = 20u * 60u * 44100u; // 20 min hard cap (runaway/looping songs)
+    const sU32 TAIL_CAP   = 60u * 44100u;        // 60s max tail after events end
+
+    sF32 block[BLOCK * 2];
+    sU32 song_samples = 0;
+
+    // 1. events
+    while (player.IsPlaying() && song_samples < SONG_CAP) {
+      player.Render(block, BLOCK);
+      autobuf.insert(autobuf.end(), block, block + BLOCK * 2);
+      song_samples += BLOCK;
+    }
+
+    // 2. tail until silence (or cap)
+    sU32 silent = 0, tail = 0;
+    while (silent < SILENT_BLOCKS_NEEDED && tail < TAIL_CAP) {
+      player.Render(block, BLOCK);
+      autobuf.insert(autobuf.end(), block, block + BLOCK * 2);
+      sF32 peak = 0.0f;
+      for (sU32 i = 0; i < BLOCK * 2; i++) {
+        sF32 a = block[i] < 0 ? -block[i] : block[i];
+        if (a > peak) peak = a;
+      }
+      if (peak < SILENCE) silent++; else silent = 0;
+      tail += BLOCK;
+    }
+    // Trim the trailing detected-silence so the file ends right as it decays.
+    if (silent >= SILENT_BLOCKS_NEEDED) {
+      size_t trim = (size_t)silent * BLOCK * 2;
+      if (trim < autobuf.size()) autobuf.resize(autobuf.size() - trim);
+    }
+
+    total = (sU32)(autobuf.size() / 2);
+    out = autobuf.empty() ? 0 : &autobuf[0];
+    fprintf(stderr, "harness: auto length — song %.2fs + tail = %.2fs total (%u frames)\n",
+            song_samples / 44100.0, total / 44100.0, total);
+  } else {
+    // Fixed length: render into one big interleaved-stereo float buffer.
+    out = (sF32 *)malloc((size_t)total * 2 * sizeof(sF32));
+    if (!out) { fprintf(stderr, "harness: OOM (%u samples)\n", total); free(song); return 4; }
+
+    for (sU32 done = 0; done < total; ) {
+      sU32 n = total - done;
+      if (n > BLOCK) n = BLOCK;
+      player.Render(out + (size_t)done * 2, n);
+      done += n;
+    }
   }
 
   player.Close();
 
-  FILE *of = fopen(outpath, "wb");
-  if (!of) { fprintf(stderr, "harness: cannot write '%s'\n", outpath); free(out); free(song); return 5; }
-  fwrite(out, sizeof(sF32), (size_t)total * 2, of);
-  fclose(of);
+  // If the output path ends in .wav, emit a playable 16-bit PCM WAV instead of
+  // the raw float32 dump. The .f32 path is unchanged so the A/B validation flow
+  // (compare.py) keeps working bit-for-bit.
+  size_t pathlen = strlen(outpath);
+  bool as_wav = pathlen >= 4 &&
+                (outpath[pathlen-4] == '.') &&
+                (outpath[pathlen-3] == 'w' || outpath[pathlen-3] == 'W') &&
+                (outpath[pathlen-2] == 'a' || outpath[pathlen-2] == 'A') &&
+                (outpath[pathlen-1] == 'v' || outpath[pathlen-1] == 'V');
 
-  fprintf(stderr, "harness: wrote %u stereo samples (%u floats) to %s\n",
-          total, total * 2, outpath);
+  if (as_wav) {
+    if (wav_write_pcm16(outpath, out, total, 44100)) {
+      fprintf(stderr, "harness: cannot write '%s'\n", outpath);
+      if (!auto_len) free(out);
+      free(song); return 5;
+    }
+    fprintf(stderr, "harness: wrote %u stereo frames (%.2fs) to %s\n",
+            total, total / 44100.0, outpath);
+  } else {
+    FILE *of = fopen(outpath, "wb");
+    if (!of) { fprintf(stderr, "harness: cannot write '%s'\n", outpath); if (!auto_len) free(out); free(song); return 5; }
+    fwrite(out, sizeof(sF32), (size_t)total * 2, of);
+    fclose(of);
 
-  free(out);
+    fprintf(stderr, "harness: wrote %u stereo samples (%u floats) to %s\n",
+            total, total * 2, outpath);
+  }
+
+  if (!auto_len) free(out); // auto mode: out points into autobuf (vector-owned)
   free(song);
   return 0;
 }

@@ -1048,7 +1048,12 @@ private:
       output(dest + i, gain * x);
     }
 
-    flt = nf;
+    // Persist the working filter state + seed back to the members. The asm
+    // (syOsc .mode3, synth.asm:964-968) stores nfb/nfl/nseed every block so the
+    // resonant noise filter rings continuously. The original port wrote `flt =
+    // nf` here (backwards) — nf never updated, so the LRC restarted from l=b=0
+    // each 1024-sample block, decorrelating the filtered noise from the asm.
+    nf = flt;
     nseed = seed;
   }
 
@@ -1067,7 +1072,20 @@ private:
     for (sInt i=0; i < nsamples; i++)
     {
       sF32 mod = dest[i] * fcfmmax;
+#ifdef V2_X87_FAITHFUL
+      // The asm (syOsc .mode4, synth.asm:981-986) builds the phase float as
+      // (cnt>>9)|0x3f800000 -- a value in [1,2) -- and does NOT subtract 1.0 the
+      // way utof23() does. For a real sine the extra 1.0 (= 2pi after the *fc2pi
+      // scale) would be irrelevant, but V2's fastsinrc range reduction is
+      // deliberately broken (see its @@@BUG), so fastsinrc(t) != fastsinrc(t+2pi):
+      // with a negative modulator the offset moves t across the pi/2 / 3pi/2
+      // reflection boundaries and the minimax poly is evaluated out of range.
+      // Match the asm's [1,2) phase (and its `mod + phase` operand order). This
+      // path is FM-sine only (ch7) -- never exercised before 17.8s.
+      sF32 t = (mod + bits2float((cnt >> 9) | 0x3f800000)) * fc2pi;
+#else
       sF32 t = (utof23(cnt) + mod) * fc2pi;
+#endif
       cnt += freq;
 
       sF32 out = gain * fastsinrc(t);

@@ -230,4 +230,12 @@ for t in comp_fastatan comp_leaves; do
   $CXX $LDFLAGS ${t}_fixed.o synth_asm_fixed.o tramp.o -o ${t}_fixed
 done
 
-echo "done: harness_asm harness_cpp comp_* (+ _fixed pair)"
+echo "[+] conv_v2m (old-format .v2m -> current; sources of ../v2m/converted/)"
+# Plain C++ tool (no x87-faithful flags needed). shim/ provides a portable
+# tool/file.h + windows.h so the original sounddef.cpp builds on Linux;
+# __declspec(selectany) maps onto gcc's weak attribute.
+$CXX -m32 -std=c++03 -O2 -w -include compat.h -I.. -Ishim \
+  -D'__declspec(x)=__attribute__((x))' -D'selectany=weak' \
+  conv_v2m.cpp ../sounddef.cpp ../v2defs.cpp ../v2mconv.cpp -o conv_v2m
+
+echo "done: harness_asm harness_cpp comp_* (+ _fixed pair) conv_v2m"

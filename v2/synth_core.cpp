@@ -2142,8 +2142,14 @@ struct V2Boost
     b1 = 2.0f * A * (Am1 - cAp1) * ia0;
     a1 = -2.0f * (Am1 + cAp1) * ia0;
     a2 = (Ap1 + cAm1 - bs) * ia0;
-    b0 = A * (Ap1 - cAm1 + bs) * ia0;
-    b2 = A * (Ap1 - cAm1 - bs) * ia0;
+    // PORT FIX: syBoostSet forms A*ia0 ONCE, then b0/b2 = (Ap1-cAm1 ± bs)*(A*ia0)
+    // (synth.asm:2854-2862). The port wrote A*(...)*ia0, i.e. (A*(...))* ia0 --
+    // FP multiply isn't associative, so b0/b2 came out 1 ULP off the asm, and the
+    // chorus feedback comb + sum compressor amplified that into the whole-song
+    // residual. Group to match the asm exactly.
+    sF32 Aia0 = A * ia0;
+    b0 = (Ap1 - cAm1 + bs) * Aia0;
+    b2 = (Ap1 - cAm1 - bs) * Aia0;
 #ifdef V2_VALIDATE
     if (getenv("BOOSTTRACE")) {
       union { sF32 f; sU32 u; } B0,B1,B2,A1,A2;
@@ -2319,12 +2325,21 @@ private:
     // determine effective offset
     sU64 offs32_32 = (sU64)counter * mmaxoffs; // 32.32 fixed point
     sU32 offs_int = sU32(offs32_32 >> 32) + dboffs[ch];
-    sU32 index = dbptr - offs_int;
+    // PORT FIX: asm syModDelProcessSample reads in1=db[idx], in2=db[idx+1] and
+    // interpolates in1 + (1-frac)*(in2-in1) (asm x = fc2-(1+frac) = 1-frac). The
+    // RIGHT channel (ch=1, the "rechtes dingens") has an extra `dec ebx`
+    // (synth.asm:3067) so idx = dbptr-offs-1; the LEFT channel does not. The port
+    // read {index, index-1} for BOTH channels -- correct for the right, but the
+    // LEFT channel then interpolated the wrong neighbor pair (a one-sample tap
+    // error the feedback comb amplified into the dominant chain divergence).
+    sU32 idx = dbptr - offs_int - (ch ? 1u : 0u);
 
     // linear interpolation using low-order bits of offs32_32.
     sF32 *delaybuf = db[ch];
     sF32 x = utof23((sU32)(offs32_32 & 0xffffffffu));
-    sF32 delayed = lerp(delaybuf[(index - 0) & dbufmask], delaybuf[(index - 1) & dbufmask], x);
+    sF32 in1 = delaybuf[idx & dbufmask];
+    sF32 in2 = delaybuf[(idx + 1) & dbufmask];
+    sF32 delayed = in1 + (1.0f - x) * (in2 - in1);
 
     // mix and output
     delaybuf[dbptr] = in + delayed*fbval;
@@ -2668,6 +2683,17 @@ struct V2Reverb
     damp = inst->SRfclinfreq * (para->highcut / 128.0f);
     gainin = para->vol / 128.0f;
     lowcut = inst->SRfclinfreq * sqr(sqr(para->lowcut / 128.0f));
+#ifdef V2_VALIDATE
+    if (getenv("REVERBTRACE")) {
+      union { sF32 f; sU32 u; } gc[4], ga[2], dm, gi, lc;
+      for (sInt i=0;i<4;i++) gc[i].f=gainc[i];
+      for (sInt i=0;i<2;i++) ga[i].f=gaina[i];
+      dm.f=damp; gi.f=gainin; lc.f=lowcut;
+      fprintf(stderr, "[reverb.set] gainc=%08x,%08x,%08x,%08x gaina=%08x,%08x "
+              "damp=%08x gainin=%08x lowcut=%08x\n",
+              gc[0].u,gc[1].u,gc[2].u,gc[3].u, ga[0].u,ga[1].u, dm.u, gi.u, lc.u);
+    }
+#endif
   }
 
   void render(StereoSample *dest, sInt nsamples)
@@ -2689,6 +2715,14 @@ struct V2Reverb
           sF32 dv = gainc[j] * combd[ch][j].fetch();
           sF32 nv = (j & 1) ? (dv - in) : (dv + in); // alternate phase on combs
           sF32 lp = combl[ch][j] + damp * (nv - combl[ch][j]);
+          // PORT FIX: persist the comb lowpass state. The asm stores the filtered
+          // result to BOTH the lowpass memory and the delay line (synth.asm:3883
+          // `fst lpfcl0` / `fst linecl0`); the port fed only the delay line and
+          // never wrote combl back, so it stayed 0 and the one-pole lowpass
+          // degenerated into a fixed `damp*nv` scale -- losing each comb's HF
+          // damping, which diverged through the comb feedback (reverb-only; this
+          // block is excluded from the leaf oracle, so it went uncaught).
+          combl[ch][j] = lp;
           combd[ch][j].feed(lp);
           cur += lp;
         }
@@ -2729,6 +2763,29 @@ struct syVChan
   syVModDel chorus;
   syVComp comp;
 };
+
+#ifdef V2_VALIDATE
+// Per-channel-chain SUB-STAGE taps (validation localization, one level below
+// g_chantap). renderFrame resets them; V2Chan::process ACCUMULATES chanbuf into
+// the matching buffer after each chain block (dcf1->comp->boost->dist/chorus/
+// dcf2), summed across all channels like g_chantap. Lets the A/B harness pin
+// WHICH channel-FX block first turns a bit-exact input into a divergent output.
+// Stereo, one frame each. Mirrored in v2/validate/asm_appendix.asm (chtap_* +
+// chtap_snap_*). Exposed via synthDebugGetChainTap. Read-only; no DSP effect.
+static StereoSample g_chtap_dcf1  [V2Instance::MAX_FRAME_SIZE];
+static StereoSample g_chtap_comp  [V2Instance::MAX_FRAME_SIZE];
+static StereoSample g_chtap_boost [V2Instance::MAX_FRAME_SIZE];
+static StereoSample g_chtap_dist  [V2Instance::MAX_FRAME_SIZE];
+static StereoSample g_chtap_chorus[V2Instance::MAX_FRAME_SIZE];
+static StereoSample g_chtap_dcf2  [V2Instance::MAX_FRAME_SIZE];
+static inline void chtap_acc(StereoSample *dst, const StereoSample *src, sInt n)
+{
+  for (sInt i=0; i < n; i++) { dst[i].l += src[i].l; dst[i].r += src[i].r; }
+}
+#define CHTAP_SNAP(stage, chan, n) chtap_acc(g_chtap_##stage, (chan), (n))
+#else
+#define CHTAP_SNAP(stage, chan, n) ((void)0)
+#endif
 
 struct V2Chan
 {
@@ -2797,20 +2854,29 @@ struct V2Chan
 
     // Filters
     dcf1.renderStereo(chan, chan, nsamples);
+    CHTAP_SNAP(dcf1, chan, nsamples);
     DEBUG_PLOT_STEREO(&dcf1, chan, nsamples);
     comp.render(chan, nsamples);
+    CHTAP_SNAP(comp, chan, nsamples);
     boost.render(chan, nsamples);
+    CHTAP_SNAP(boost, chan, nsamples);
     if (fxr == FXR_DIST_THEN_CHORUS)
     {
       dist.renderStereo(chan, chan, nsamples);
+      CHTAP_SNAP(dist, chan, nsamples);
       dcf2.renderStereo(chan, chan, nsamples);
+      CHTAP_SNAP(dcf2, chan, nsamples);
       chorus.renderChan(chan, nsamples);
+      CHTAP_SNAP(chorus, chan, nsamples);
     }
     else // FXR_CHORUS_THEN_DIST
     {
       chorus.renderChan(chan, nsamples);
+      CHTAP_SNAP(chorus, chan, nsamples);
       dist.renderStereo(chan, chan, nsamples);
+      CHTAP_SNAP(dist, chan, nsamples);
       dcf2.renderStereo(chan, chan, nsamples);
+      CHTAP_SNAP(dcf2, chan, nsamples);
     }
 
     // Aux1/2 send (mono)
@@ -2931,6 +2997,7 @@ struct V2ChanInfo
 // can bisect which stage introduces the divergence. Read-only; no DSP effect.
 // Mirrored in v2/validate/asm_appendix.asm (mixtap_* + mixtap_snap_*) for the asm
 // core. Exposed via synthDebugGetMixTap below.
+static StereoSample g_mixtap_premix[V2Instance::MAX_FRAME_SIZE]; // dry mix, before reverb
 static StereoSample g_mixtap_reverb[V2Instance::MAX_FRAME_SIZE]; // after reverb
 static StereoSample g_mixtap_delay [V2Instance::MAX_FRAME_SIZE]; // after mod-delay
 static StereoSample g_mixtap_dcf   [V2Instance::MAX_FRAME_SIZE]; // after dc filter
@@ -3564,6 +3631,13 @@ private:
     memset(g_vcetap_flt,  0, nsamples * sizeof(sF32));
     memset(g_vcetap_dist, 0, nsamples * sizeof(sF32));
     memset(g_vcetap_dcf,  0, nsamples * sizeof(sF32));
+    // per-channel-chain sub-stage taps (accumulated across channels below)
+    memset(g_chtap_dcf1,   0, nsamples * sizeof(StereoSample));
+    memset(g_chtap_comp,   0, nsamples * sizeof(StereoSample));
+    memset(g_chtap_boost,  0, nsamples * sizeof(StereoSample));
+    memset(g_chtap_dist,   0, nsamples * sizeof(StereoSample));
+    memset(g_chtap_chorus, 0, nsamples * sizeof(StereoSample));
+    memset(g_chtap_dcf2,   0, nsamples * sizeof(StereoSample));
 #endif
 
     // process all channels
@@ -3604,6 +3678,7 @@ private:
 
     // global filters
     StereoSample *mix = instance.mixbuf;
+    MIXTAP_SNAP(premix, mix, nsamples);   // dry channel sum, before any global FX
     reverb.render(mix, nsamples);
     MIXTAP_SNAP(reverb, mix, nsamples);
     delay.renderAux2Main(mix, nsamples);
@@ -3747,12 +3822,38 @@ extern "C" void __stdcall synthDebugGetVceTap(void *pthis,
   *framesize = s->instance.SRcFrameSize;
 }
 
+// Validation-only: the dry mix (mixbuf before any global FX) -- bridges the clean
+// channel chain and post_reverb to isolate dry-mix vs reverb as the source.
+extern "C" void __stdcall synthDebugGetPreMix(void *pthis, float **premix, int *framesize)
+{
+  V2Synth *s = (V2Synth *)pthis;
+  *premix = &g_mixtap_premix[0].l;
+  *framesize = s->instance.SRcFrameSize;
+}
+
 // Validation-only: the post-curvol channel voice-sum snapshot (see g_chantap).
 extern "C" void __stdcall synthDebugGetChanTap(void *pthis, float **chan, int *framesize)
 {
   V2Synth *s = (V2Synth *)pthis;
   *chan = &g_chantap[0].l;
   *framesize = s->instance.SRcFrameSize;
+}
+
+// Validation-only: expose the six per-channel-chain sub-stage snapshots (see
+// g_chtap_* above), one level below the chan tap, to pin WHICH channel-FX block
+// introduces the divergence. Stereo. Read-only. Mirrored in asm_appendix.asm.
+extern "C" void __stdcall synthDebugGetChainTap(void *pthis,
+    float **postDcf1, float **postComp, float **postBoost,
+    float **postDist, float **postChorus, float **postDcf2, int *framesize)
+{
+  V2Synth *s = (V2Synth *)pthis;
+  *postDcf1   = &g_chtap_dcf1  [0].l;
+  *postComp   = &g_chtap_comp  [0].l;
+  *postBoost  = &g_chtap_boost [0].l;
+  *postDist   = &g_chtap_dist  [0].l;
+  *postChorus = &g_chtap_chorus[0].l;
+  *postDcf2   = &g_chtap_dcf2  [0].l;
+  *framesize  = s->instance.SRcFrameSize;
 }
 #endif
 

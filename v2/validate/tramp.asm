@@ -24,6 +24,9 @@ boostdbg_c:
 global envdbg_c
 envdbg_c:
     ret
+global reverbdbg_c
+reverbdbg_c:
+    ret
 global allocdbg_c
 allocdbg_c:
     ret

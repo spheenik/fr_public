@@ -97,6 +97,7 @@ mixtap_snap_%1:
     popad
     ret
 %endmacro
+MIXTAP_SNAP_ROUTINE premix
 MIXTAP_SNAP_ROUTINE reverb
 MIXTAP_SNAP_ROUTINE delay
 MIXTAP_SNAP_ROUTINE dcf
@@ -207,6 +208,31 @@ chantap_reset:
     mov   edi, vcetap_dcf
     mov   ecx, [SRcFrameSize]
     rep   stosd
+    ; six per-channel-chain sub-stage accumulators (stereo)
+    mov   edi, chtap_dcf1
+    mov   ecx, [SRcFrameSize]
+    add   ecx, ecx
+    rep   stosd
+    mov   edi, chtap_comp
+    mov   ecx, [SRcFrameSize]
+    add   ecx, ecx
+    rep   stosd
+    mov   edi, chtap_boost
+    mov   ecx, [SRcFrameSize]
+    add   ecx, ecx
+    rep   stosd
+    mov   edi, chtap_dist
+    mov   ecx, [SRcFrameSize]
+    add   ecx, ecx
+    rep   stosd
+    mov   edi, chtap_chorus
+    mov   ecx, [SRcFrameSize]
+    add   ecx, ecx
+    rep   stosd
+    mov   edi, chtap_dcf2
+    mov   ecx, [SRcFrameSize]
+    add   ecx, ecx
+    rep   stosd
     popad
     ret
 chantap_snap:
@@ -227,6 +253,19 @@ chantap_snap:
     popad
     ret
 
+; pre-reverb dry-mix accessor (mirrors synthDebugGetPreMix in synth_core.cpp).
+global _synthDebugGetPreMix@12
+_synthDebugGetPreMix@12:
+    push  ebp
+    mov   ebp, esp
+    mov   eax, [ebp+12]         ; **premix
+    mov   dword [eax], mixtap_premix
+    mov   eax, [ebp+16]         ; *framesize
+    mov   ecx, [SRcFrameSize]
+    mov   [eax], ecx
+    pop   ebp
+    ret   12
+
 global _synthDebugGetChanTap@12
 _synthDebugGetChanTap@12:
     push  ebp
@@ -238,6 +277,66 @@ _synthDebugGetChanTap@12:
     mov   [eax], ecx
     pop   ebp
     ret   12
+
+; --- per-channel-chain SUB-STAGE ACCUMULATORS (after each chain block) ---
+; Mirror of synth_core.cpp's g_chtap_* / CHTAP_SNAP. build.sh sed-injects a
+; `call chtap_snap_<stage>` after each channel-chain render call in syChanProcess
+; (anchored on the unique `lea ebp,[...]` that follows each call). Each routine
+; ADDS the live chanbuf (STEREO, 2*SRcFrameSize floats) into its accumulator;
+; reset once per frame by chantap_reset. FPU add at ambient PC=24; the chain
+; render routines return with an empty x87 stack, and pushad/popad preserves all
+; GP regs (incl. ebx=chanbuf base and ebp=workspace, both live across the chain).
+%macro CHTAP_SNAP_ROUTINE 1
+chtap_snap_%1:
+    pushad
+    mov   esi, [this]
+    lea   esi, [esi + SYN.chanbuf]
+    mov   edi, chtap_%1
+    mov   ecx, [SRcFrameSize]
+    add   ecx, ecx
+%%acc:
+    fld   dword [esi]
+    fadd  dword [edi]
+    fstp  dword [edi]
+    add   esi, 4
+    add   edi, 4
+    dec   ecx
+    jnz   %%acc
+    popad
+    ret
+%endmacro
+CHTAP_SNAP_ROUTINE dcf1
+CHTAP_SNAP_ROUTINE comp
+CHTAP_SNAP_ROUTINE boost
+CHTAP_SNAP_ROUTINE dist
+CHTAP_SNAP_ROUTINE chorus
+CHTAP_SNAP_ROUTINE dcf2
+
+; --- chain sub-stage tap accessor: returns the six snapshot ptrs + frame size ---
+; Mirrors synthDebugGetChainTap in synth_core.cpp.
+; stdcall(pthis,**pd1,**pc,**pb,**pdi,**pch,**pd2,*fs) = 8 dword args = 32 bytes.
+; The redef step renames _synthDebugGetChainTap@32 -> synthDebugGetChainTap.
+global _synthDebugGetChainTap@32
+_synthDebugGetChainTap@32:
+    push  ebp
+    mov   ebp, esp
+    mov   eax, [ebp+12]         ; **postDcf1
+    mov   dword [eax], chtap_dcf1
+    mov   eax, [ebp+16]         ; **postComp
+    mov   dword [eax], chtap_comp
+    mov   eax, [ebp+20]         ; **postBoost
+    mov   dword [eax], chtap_boost
+    mov   eax, [ebp+24]         ; **postDist
+    mov   dword [eax], chtap_dist
+    mov   eax, [ebp+28]         ; **postChorus
+    mov   dword [eax], chtap_chorus
+    mov   eax, [ebp+32]         ; **postDcf2
+    mov   dword [eax], chtap_dcf2
+    mov   eax, [ebp+36]         ; *framesize
+    mov   ecx, [SRcFrameSize]
+    mov   [eax], ecx
+    pop   ebp
+    ret   32
 
 ; --- asm-side chorus-integer dump (validation; mirrors C++ CHORUSTRACE) ---
 ; sed-injected `call chorusdbg_snap` at the end of syModDelSet, where ebp = the
@@ -316,6 +415,27 @@ allocdbg_snap:
     popad
     ret
 
+; sed-injected `call reverbdbg_snap` at the end of syReverbSet (ebp = syWReverb
+; base, FPU stack empty). Forwards the 9 setup coeffs (raw bits) to reverbdbg_c.
+extern reverbdbg_c
+reverbdbg_snap:
+    pushad
+    pushfd
+    push  dword [ebp + syWReverb.setup + syCReverb.lowcut]
+    push  dword [ebp + syWReverb.setup + syCReverb.gainin]
+    push  dword [ebp + syWReverb.setup + syCReverb.damp]
+    push  dword [ebp + syWReverb.setup + syCReverb.gaina1]
+    push  dword [ebp + syWReverb.setup + syCReverb.gaina0]
+    push  dword [ebp + syWReverb.setup + syCReverb.gainc3]
+    push  dword [ebp + syWReverb.setup + syCReverb.gainc2]
+    push  dword [ebp + syWReverb.setup + syCReverb.gainc1]
+    push  dword [ebp + syWReverb.setup + syCReverb.gainc0]
+    call  reverbdbg_c
+    add   esp, 36
+    popfd
+    popad
+    ret
+
 extern envdbg_c
 envdbg_snap:
     pushad
@@ -371,6 +491,7 @@ v2x_size_syWBoost:  dd syWBoost.size
 ; One interleaved-stereo frame each (2*MAX_FRAME_SIZE dwords), filled by the
 ; mixtap_snap_* routines above and read out via _synthDebugGetMixTap@28.
 section .bss
+mixtap_premix:  resd 2*MAX_FRAME_SIZE
 mixtap_reverb:  resd 2*MAX_FRAME_SIZE
 mixtap_delay:   resd 2*MAX_FRAME_SIZE
 mixtap_dcf:     resd 2*MAX_FRAME_SIZE
@@ -383,3 +504,10 @@ vcetap_dist:    resd MAX_FRAME_SIZE
 vcetap_dcf:     resd MAX_FRAME_SIZE
 ; channel voice-sum snapshot (stereo, one frame)
 chantap:        resd 2*MAX_FRAME_SIZE
+; per-channel-chain sub-stage snapshots (stereo, one frame each)
+chtap_dcf1:     resd 2*MAX_FRAME_SIZE
+chtap_comp:     resd 2*MAX_FRAME_SIZE
+chtap_boost:    resd 2*MAX_FRAME_SIZE
+chtap_dist:     resd 2*MAX_FRAME_SIZE
+chtap_chorus:   resd 2*MAX_FRAME_SIZE
+chtap_dcf2:     resd 2*MAX_FRAME_SIZE

@@ -31,12 +31,21 @@ extern "C" void __stdcall synthDebugGetMixTap(void *, float **, float **, float 
 extern "C" void __stdcall synthDebugGetVceTap(void *, float **, float **, float **,
                                               float **, int *);
 extern "C" void __stdcall synthDebugGetChanTap(void *, float **, int *);
+// Dry mix (mixbuf before any global FX): isolates dry-mix vs reverb as the source.
+extern "C" void __stdcall synthDebugGetPreMix(void *, float **, int *);
+// Per-channel-chain sub-stage tap (stereo chanbuf snapshots after each channel-FX
+// block: dcf1/comp/boost/dist/chorus/dcf2): one level below the chan tap, to pin
+// WHICH channel-FX block first diverges. Provided by both cores.
+extern "C" void __stdcall synthDebugGetChainTap(void *, float **, float **, float **,
+                                                float **, float **, float **, int *);
 static void bustap_dump(void *synth)
 {
   static FILE *fa1 = 0, *fa2 = 0, *fmx = 0;
   static FILE *fpr = 0, *fpd = 0, *fpf = 0, *fpl = 0, *fpc = 0; // per-stage taps
   static FILE *fvo = 0, *fvf = 0, *fvd = 0, *fvc = 0;           // per-voice taps
   static FILE *fch = 0;                                         // channel sum tap
+  static FILE *fc1 = 0, *fcm = 0, *fcb = 0, *fcd = 0, *fcc = 0, *fc2 = 0; // chain sub-stage
+  static FILE *fpm = 0;                                         // dry mix (pre-reverb)
   static int armed = -1;
   if (armed < 0) {
     const char *pfx = getenv("BUSTAP");
@@ -56,6 +65,13 @@ static void bustap_dump(void *synth)
       snprintf(p, sizeof p, "%s.vce_dist", pfx); fvd = fopen(p, "wb");
       snprintf(p, sizeof p, "%s.vce_dcf",  pfx); fvc = fopen(p, "wb");
       snprintf(p, sizeof p, "%s.chan",     pfx); fch = fopen(p, "wb");
+      snprintf(p, sizeof p, "%s.ch_dcf1",  pfx); fc1 = fopen(p, "wb");
+      snprintf(p, sizeof p, "%s.ch_comp",  pfx); fcm = fopen(p, "wb");
+      snprintf(p, sizeof p, "%s.ch_boost", pfx); fcb = fopen(p, "wb");
+      snprintf(p, sizeof p, "%s.ch_dist",  pfx); fcd = fopen(p, "wb");
+      snprintf(p, sizeof p, "%s.ch_chorus",pfx); fcc = fopen(p, "wb");
+      snprintf(p, sizeof p, "%s.ch_dcf2",  pfx); fc2 = fopen(p, "wb");
+      snprintf(p, sizeof p, "%s.premix",   pfx); fpm = fopen(p, "wb");
     }
   }
   if (!armed) return;
@@ -80,6 +96,17 @@ static void bustap_dump(void *synth)
   float *cb; int n4 = 0;
   synthDebugGetChanTap(synth, &cb, &n4);   // stereo
   if (fch) fwrite(cb, sizeof(float), 2*n4, fch);
+  float *c1, *cm, *cbo, *cd, *cc, *c2; int n5 = 0;
+  synthDebugGetChainTap(synth, &c1, &cm, &cbo, &cd, &cc, &c2, &n5); // stereo
+  if (fc1) fwrite(c1,  sizeof(float), 2*n5, fc1);
+  if (fcm) fwrite(cm,  sizeof(float), 2*n5, fcm);
+  if (fcb) fwrite(cbo, sizeof(float), 2*n5, fcb);
+  if (fcd) fwrite(cd,  sizeof(float), 2*n5, fcd);
+  if (fcc) fwrite(cc,  sizeof(float), 2*n5, fcc);
+  if (fc2) fwrite(c2,  sizeof(float), 2*n5, fc2);
+  float *pm; int n6 = 0;
+  synthDebugGetPreMix(synth, &pm, &n6);    // stereo dry mix (pre-reverb)
+  if (fpm) fwrite(pm, sizeof(float), 2*n6, fpm);
 }
 
 // Event trace (gated by env EVTRACE=1): decode the per-Tick MIDI buffer and print

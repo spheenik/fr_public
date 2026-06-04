@@ -31,15 +31,16 @@ sed 's/^%define\([[:space:]]*\)RONAN[[:space:]]*$/; RONAN disabled for validatio
 # MIXTAP_SNAP. Routines/buffers are defined in asm_appendix.asm (appended below);
 # anchored on render-frame-unique tokens. The ORIGINAL synth.asm is untouched.
 sed -i \
+  -e 's/\(call[[:space:]][[:space:]]*syReverbProcess\)/\tcall mixtap_snap_premix\n\1/' \
   -e 's/\(call[[:space:]][[:space:]]*syReverbProcess\)/\1\n\tcall mixtap_snap_reverb/' \
   -e 's/\(call[[:space:]][[:space:]]*syModDelRenderAux2Main\)/\1\n\tcall mixtap_snap_delay/' \
   -e 's/\(;[[:space:]]*lowcut\/highcut\)/\tcall mixtap_snap_dcf\n\1/' \
   -e 's/\(;[[:space:]]*Kompressor\)/\tcall mixtap_snap_lchc\n\1/' \
   -e 's/\(lea[[:space:]][[:space:]]*ebp,[[:space:]]*\[ebp[[:space:]]*-[[:space:]]*SYN\.compr\]\)/\tcall mixtap_snap_compr\n\1/' \
   synth_noronan.asm
-# Sanity: each of the five snapshot calls must have been injected exactly once.
+# Sanity: premix (before reverb) + the five post-stage snapshots = 6 calls.
 n=$(grep -c 'call mixtap_snap_' synth_noronan.asm)
-[ "$n" -eq 5 ] || { echo "ERROR: mixtap injection count $n != 5" >&2; exit 1; }
+[ "$n" -eq 6 ] || { echo "ERROR: mixtap injection count $n != 6" >&2; exit 1; }
 # Inject per-voice-substage snapshot calls into syV2Render (localization level 2).
 # Snapshots mono vcebuf after osc/filter/dist/dcf; anchored on unique section
 # comments. Routines/buffers defined in asm_appendix.asm.
@@ -61,6 +62,32 @@ n=$(grep -c 'call chantap_snap' synth_noronan.asm)
 [ "$n" -eq 1 ] || { echo "ERROR: chantap injection count $n != 1" >&2; exit 1; }
 n=$(grep -c 'call chantap_reset' synth_noronan.asm)
 [ "$n" -eq 1 ] || { echo "ERROR: chantap_reset injection count $n != 1" >&2; exit 1; }
+# Inject the per-channel-chain SUB-STAGE snapshot calls into syChanProcess. Each
+# is spliced BEFORE the unique `lea ebp,[...]` that follows the matching chain
+# render call, i.e. right after that block returns (chanbuf holds its output).
+# dist/chorus/dcf2 appear in both fxr-routing branches; only the executed branch
+# fires at runtime. Scoped to the syChanProcess body (label..storeChanValues) so
+# the identical sub-struct `lea` navigation in syChanSet is NOT matched.
+# Routines/buffers defined in asm_appendix.asm.
+sed -i '/^syChanProcess/,/^storeChanValues:/{
+  s/\(lea[[:space:]][[:space:]]*ebp,[[:space:]]*\[ebp + syWChan\.compw - syWChan\.dcf1w\]\)/\tcall chtap_snap_dcf1\n\1/
+  s/\(lea[[:space:]][[:space:]]*ebp,[[:space:]]*\[ebp + syWChan\.boostw - syWChan\.compw\]\)/\tcall chtap_snap_comp\n\1/
+  s/\(lea[[:space:]][[:space:]]*ebp,[[:space:]]*\[ebp + 0 - syWChan\.boostw\]\)/\tcall chtap_snap_boost\n\1/
+  s/\(lea[[:space:]][[:space:]]*ebp,[[:space:]]*\[ebp - syWChan\.distw + syWChan\.dcf2w\]\)/\tcall chtap_snap_dist\n\1/
+  s/\(lea[[:space:]][[:space:]]*ebp,[[:space:]]*\[ebp - syWChan\.dcf2w + syWChan\.chrw\]\)/\tcall chtap_snap_dcf2\n\1/
+  s/\(lea[[:space:]][[:space:]]*ebp,[[:space:]]*\[ebp + 0 - syWChan\.dcf2w\]\)/\tcall chtap_snap_dcf2\n\1/
+  s/\(lea[[:space:]][[:space:]]*ebp,[[:space:]]*\[ebp - syWChan\.chrw + 0\]\)/\tcall chtap_snap_chorus\n\1/
+  s/\(lea[[:space:]][[:space:]]*ebp,[[:space:]]*\[ebp + syWChan\.distw - syWChan\.chrw\]\)/\tcall chtap_snap_chorus\n\1/
+}' synth_noronan.asm
+# Per-stage counts: dcf1/comp/boost once; dist twice (both branches share an
+# anchor); dcf2/chorus twice (one anchor per branch). Total = 9.
+for st in dcf1:1 comp:1 boost:1 dist:2 dcf2:2 chorus:2; do
+  s=${st%:*}; want=${st#*:}
+  got=$(grep -c "call chtap_snap_$s\b" synth_noronan.asm)
+  [ "$got" -eq "$want" ] || { echo "ERROR: chtap_snap_$s injection count $got != $want" >&2; exit 1; }
+done
+n=$(grep -c 'call chtap_snap_' synth_noronan.asm)
+[ "$n" -eq 9 ] || { echo "ERROR: chtap injection total $n != 9" >&2; exit 1; }
 # Inject the asm-side chorus-integer dump at the end of syModDelSet (ebp = the
 # syWModDel base, FPU stack empty). Anchored on the unique mphase shift.
 sed -i \
@@ -82,6 +109,13 @@ sed -i \
   synth_noronan.asm
 n=$(grep -c 'call boostdbg_snap' synth_noronan.asm)
 [ "$n" -eq 1 ] || { echo "ERROR: boostdbg_snap injection count $n != 1" >&2; exit 1; }
+# Inject the asm-side reverb-coeff dump at the end of syReverbSet (ebp = syWReverb
+# base, FPU stack empty). Anchored on the unique lowcut store (last coeff written).
+sed -i \
+  -e 's/\(fstp[[:space:]][[:space:]]*dword \[ebp + syWReverb\.setup + syCReverb\.lowcut\]\)/\1\n\tcall reverbdbg_snap/' \
+  synth_noronan.asm
+n=$(grep -c 'call reverbdbg_snap' synth_noronan.asm)
+[ "$n" -eq 1 ] || { echo "ERROR: reverbdbg_snap injection count $n != 1" >&2; exit 1; }
 # Inject the asm-side env-coeff dump at the end of syEnvSet (ebp = syWEnv base,
 # FPU stack empty). Anchored on the unique gain store.
 sed -i \

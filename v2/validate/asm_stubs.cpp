@@ -71,3 +71,15 @@ extern "C" void boostdbg_c(int ena, unsigned b0, unsigned b1, unsigned b2,
     fprintf(stderr, "[ASM boost.set] ena=%d b0=%08x b1=%08x b2=%08x a1=%08x a2=%08x\n",
             ena, b0, b1, b2, a1, a2);
 }
+
+// Validation: asm-side reverb coeff dump (mirrors synth_core.cpp REVERBTRACE).
+// Raw 32-bit patterns for bit-exact diff. Field order matches syCReverb.
+extern "C" void reverbdbg_c(unsigned g0, unsigned g1, unsigned g2, unsigned g3,
+                            unsigned a0, unsigned a1, unsigned damp,
+                            unsigned gainin, unsigned lowcut)
+{
+  if (getenv("REVERBTRACE"))
+    fprintf(stderr, "[ASM reverb.set] gainc=%08x,%08x,%08x,%08x gaina=%08x,%08x "
+            "damp=%08x gainin=%08x lowcut=%08x\n",
+            g0, g1, g2, g3, a0, a1, damp, gainin, lowcut);
+}

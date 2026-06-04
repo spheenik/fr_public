@@ -21,6 +21,23 @@ actual shipping demo, **fr-08: .the .product, final version 1.01**
 Intermediate artifacts (wine memory dumps, depacked images, rendered wavs)
 are reproducible via the scripts and are not committed.
 
+## Synth delta analysis (step B)
+
+`DELTA.md` is the behavioral diff of the year-2000 fr08 synth vs the final 2004
+`v2/synth.asm` we ported. Scripts (operate on `/tmp/fr08/unpacked.bin` = the
+depacked image, and `/tmp/fr08/fr08_objdump.txt` = an `objdump -D -b binary -m
+i386 -M intel` of the synth window):
+
+- `constscan.py` — extract 2004 `synth.asm` float constants, scan the image for
+  their bit patterns (locates the constant pool; flags 2004-only constants).
+- `refscan.py` — find code xrefs to specific pool constants.
+- `fnmap.py` — segment the synth code into functions (at call targets) and
+  fingerprint each by referenced pool constants + called subroutines.
+- `asm2004fp.py` — fingerprint 2004 `synth.asm` functions by constant usage, for
+  alignment against `fnmap.py`.
+- `slice.py LO HI` — print objdump lines in a VA range. `dump_pool2.py` — inspect
+  the Ronan data cluster.
+
 ## Results
 
 | file | md5 | what |

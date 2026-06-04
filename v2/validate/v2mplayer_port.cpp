@@ -189,6 +189,17 @@ static void evtrace(unsigned cursmpl, unsigned ticktime, const unsigned char *bu
   static int armed = -1;
   if (armed < 0) armed = getenv("EVTRACE") ? 1 : 0;
   if (!armed) return;
+  // raw MIDI hex (gated by EVTRACE_RAW=1): canonical form to byte-diff against
+  // the 2000 tick's buffer (validate/c1_timing_probe). Splits conversion vs
+  // synth: identical MIDI here => any whole-song divergence is synth-internal.
+  static int raw = -1;
+  if (raw < 0) raw = getenv("EVTRACE_RAW") ? 1 : 0;
+  if (raw) {
+    int n = 0; while (buf[n] != 0xfd && n < 1023) n++;
+    printf("RAWMIDI tick=%u ", ticktime);
+    for (int i=0;i<n;i++) printf("%02x", buf[i]);
+    printf("\n");
+  }
   char line[1024]; int o = 0;
   o += snprintf(line+o, sizeof line-o, "smpl=%-7u tick=%-6u |", cursmpl, ticktime);
   const unsigned char *p = buf; unsigned char st = 0; int any = 0;

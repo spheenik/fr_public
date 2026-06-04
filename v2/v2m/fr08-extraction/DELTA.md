@@ -204,6 +204,57 @@ design** for all noise/S&H content. Consequences:
 | 0x40b121 | ref `fcmdlfomul` — mod/LFO delay scaling |
 | 0x40b57f / 0x40b591 0x40b5a5 | refs `fcgain`/`fcgainh` — main mix gains |
 
+## CORRECTION (phase D, deeper disasm): root cause + osc is an algorithm change
+
+Implementing the gates surfaced two findings that **correct/deepen** the
+step-B list above (which under-characterized the osc and split one root cause
+into two symptoms):
+
+### ROOT CAUSE: control-frame size 256 (2000) vs 128 (2004)
+The render driver @0x40b95c resets the control-frame counter `[0x715d14]` to
+**0x100 = 256** (`mov DWORD PTR ds:0x715d14,0x100` @0x40ba01) and renders
+`min(remaining, frame_left)` samples per block; when `frame_left` hits 0 it
+ticks the per-channel control update @0x40ad06 (env/LFO tick + volramp) and
+reloads 256. The 2004 core uses `SRcFrameSize = round(128·SR/44100) = 128`.
+**This single halving is the root of TWO step-B "deltas":**
+- the volume-ramp / "param smoother" coeff: 2000 `volramp = (target/128 −
+  cur)·(1/256)` @0x40ad33 == `(Δ)·(1/frame)`; 2004 uses `·SRfciframe` = 1/128.
+  So delta 5 is **not** "1/256 vs 1/127" — it's `1/frame`, and follows for free
+  once the frame size is 256.
+- the envelope decay/release shaping: env ticks **once per 256-sample frame**
+  (half as often as 2004's 128). `calcfreq ×10` per 256-frame ≈ `calcfreq2 ×11`
+  per 128-frame — which is exactly kb's `transEnv` `sqrt`/frame-doubling
+  hypothesis, now confirmed structurally. Delta 1's constants are necessary but
+  only correct **together with** frame=256.
+
+Gate (this change): `synthSetSourceVersion` sets `SRcFrameSize=256`,
+`SRfciframe=1/256` under `eraEnvOld()` (post-init, pre-render; voices read both
+live). Measured: env+frame gate moves whole-song rms-vs-C1 from 0.0588 → 0.0561
+(12 s window) — real but small, because the oscillator dominates (below).
+
+### OSC IS A DIFFERENT ALGORITHM (delta 2 is NOT a constant swap)
+2000 `syOscRender` @0x40a585 tri/saw @0xa59a and pulse @0xa5ed are a **4×
+linearly-oversampled numeric box filter** (inner `mov cl,4` loop: 4 sub-samples
+of `cnt += freq`, piecewise-linear up/down segment, accumulate, `·0.25`). The
+2004 C++ uses the **analytic box-filter convolution** state machine
+(`osm_tick`, transition codes). Different algorithm → different output (esp.
+anti-aliasing on high notes); the step-B "saw/tri/pulse phase trick identical"
+was wrong. The per-sample phase advance matches (2000 `4·freq` with
+`freq = round(pow2((pitch+note−60)·fci12)·3185015.0)`; `3185015 ≈ fcoscbase·
+2²⁹/44100 = SRfcobasefrq/4`, modulo the baked-constant rounding), so **pitch**
+agrees but the waveform does not. Sine @0xa624 = native `fsin` (delta 3); noise
+@0xa659 = MSVC LCG `·0x343fd + 0x269ec3` (delta 4 — note the constants differ
+from step-B's "214013/2531011"; the real values are **0x343fd=214013 /
+0x269ec3=2531011**, confirmed). syOscSet @0xa4d2 computes the 4 box-segment
+coeffs ([ebp+0x10..0x1c]) the 2004 set never needs.
+
+Consequence: gating the oscillator faithfully requires **reimplementing the
+2000 osc set+render** (4 wave variants) under `eraV0()`, not pinning a constant.
+Validation plan: unit-test the C++ reimplementation against the genuine 2000
+`syOscRender` **called directly in the C1 image** (bit-exact, in isolation) —
+the whole-song A/B can't localize osc vs filter vs mix because C1 is a foreign
+binary with no internal taps.
+
 ## Final delta list (era-gate surface for v0 fr08)
 
 Faithful-modern by default; gate these to period behavior when source v2m is v0:

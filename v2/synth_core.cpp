@@ -4152,8 +4152,22 @@ void __stdcall synthSetGlobals(void *pthis, const void *ptr)
 
 void __stdcall synthSetSourceVersion(void *pthis, int srcver)
 {
-  // era compat (see V2Instance::srcVersion). Call after synthInit.
-  ((V2Synth *)pthis)->instance.srcVersion = srcver;
+  // era compat (see V2Instance::srcVersion). Call after synthInit (which sets
+  // the modern 128-sample frame); we recompute the control-frame size here.
+  V2Instance &inst = ((V2Synth *)pthis)->instance;
+  inst.srcVersion = srcver;
+  // ROOT delta (fr08-extraction/DELTA.md): the year-2000 synth ran the control
+  // rate at a 256-sample frame (driver resets the frame counter to 0x100), vs
+  // 128 in 2004. This single change is the root of the envelope decay/release
+  // shaping (calcfreq x10 over 256 == ~calcfreq2 x11 over 128, kb's transEnv
+  // sqrt relationship) AND the volume-ramp coeff (1/256 vs 1/128 = 1/frame).
+  // Voices read SRcFrameSize / SRfciframe live, so overriding here (post-init,
+  // pre-render) retimes env/LFO/volramp without touching the SR constants.
+  if (inst.eraEnvOld())
+  {
+    inst.SRcFrameSize = 256;
+    inst.SRfciframe   = 1.0f / 256.0f;
+  }
 }
 
 void __stdcall synthGetPoly(void *pthis, void *dest)

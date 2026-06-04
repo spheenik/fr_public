@@ -1557,11 +1557,17 @@ struct V2Flt
 
     case ALL:
       COVER("VCF all");
+      // PORTING FIX (not an ASM bug): the asm (.mode5, synth.asm) sums the
+      // allpass output as (h + b) + l; (l + b) + h rounds differently for ~a
+      // ULP on some samples. The allpass output never feeds the l/b state, so
+      // the filter's own ledger state stays exact — the 1-ULP output noise
+      // only surfaces in DOWNSTREAM stateful blocks (kkrieger6: voice ALL vcf
+      // -> channel dist's embedded allpass accumulated it).
       { flcalc l = lrc.l, b = lrc.b;
         for (sInt i=0; i < nsamples; i++)
         {
           flcalc h = lrc_step_2x(l, b, src[i*step], cfreq, res);
-          dest[i*step] = (sF32)(l + b + h);
+          dest[i*step] = (sF32)(h + b + l);
         }
         lrc.l = (sF32)l; lrc.b = (sF32)b; }
       break;
@@ -3532,6 +3538,12 @@ struct V2Synth
           for (sInt i=0; i < POLY; i++)
             npoly += (chanmap[i] == chan);
 
+#ifdef V2_VALIDATE
+          if (getenv("NOTETRACE"))
+            fprintf(stderr, "[noteon] chan=%d note=%d vel=%d pgm=%d npoly=%d maxpoly=%d\n",
+                    chan, cmd[0], cmd[1], chans[chan].pgm, npoly, sound->maxpoly);
+#endif
+
           // voice allocation. this is equivalent to the original V2 code,
           // but hopefully simpler to follow.
           sInt usevoice = -1;
@@ -3560,8 +3572,15 @@ struct V2Synth
             // if we're at polyphony limit, we know there's at least one voice
             // used by this channel, so we can limit ourselves to killing
             // voices from our own chan.
+            // PORTING FIX (not an ASM bug): the asm steal loops (.killvoice,
+            // synth.asm:5512/5535) compare the FULL chanmap entry against the
+            // channel. Masking with 0xf made FREE voices (chanmap == -1,
+            // -1 & 0xf == 15) eligible as "channel 15's own voices", so at the
+            // poly limit on the Ronan channel the port ALLOCATED fresh voices
+            // instead of stealing — polyphony grew unbounded (kkrieger6's
+            // velocity-ramp swells on chan 15).
             COVER("SYN find voice channel");
-            chanmask = 0xf;
+            chanmask = ~0;
             chanfind = chan;
           }
 

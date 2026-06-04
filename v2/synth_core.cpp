@@ -86,6 +86,10 @@ static const sF32 fc32bit = 2147483648.0f; // 2^31 (original code has (2^31)-1, 
 
 // Synth constants
 static const sF32 fcoscbase   = 261.6255653f; // Oscillator base freq
+// era <v1 (fr08): the 2000 osc multiplies the pitch-pow2 by this baked constant
+// (0x4a4265dc) instead of the SR-computed SRfcobasefrq. = fcoscbase·2²⁹/44100;
+// ≈ SRfcobasefrq/4 (the 2000 render advances cnt 4× per sample). DELTA.md d2.
+static const sF32 fcoscbase_v0 = 3185015.0f;
 static const sF32 fcsrbase    = 44100.0f;     // Base sampling rate
 static const sF32 fcboostfreq = 150.0f;       // Bass boost cut-off freq
 static const sF32 fcframebase = 128.0f;       // size of a frame in samples
@@ -315,6 +319,15 @@ static inline sF32 v2_overdrive_gain2(sF32 p1g, sF32 gain1) // p1g = param1/128
            : "=t"(r) : "0"(gain1), "u"(p1g) : "st(1)");
   return r;
 }
+// native x87 fsin, for the year-2000 osc sine (syOscRender @0x40a624 `fsin`).
+// The host x87 FSIN low bits are CPU-vendor-dependent; this is host-relative
+// "bit-exact" by design (DELTA.md delta 3, same stance as V2_X87_FAITHFUL).
+static inline sF32 v2_fsin(sF32 x)
+{
+  sF32 r;
+  __asm__ ("fsin" : "=t"(r) : "0"(x));
+  return r;
+}
 #endif
 
 // 2^x and base^e: faithful x87 kernels in the validation build, libm otherwise.
@@ -327,6 +340,14 @@ static inline sF32 v2_exp2(sF32 x)
   return v2_pow2(x);
 #else
   return powf(2.0f, x);
+#endif
+}
+static inline sF32 v2_sin(sF32 x)
+{
+#ifdef V2_X87_FAITHFUL
+  return v2_fsin(x);
+#else
+  return sinf(x);
 #endif
 }
 static inline sF32 v2_powf(sF32 base, sF32 e)
@@ -861,6 +882,13 @@ struct V2Osc
   sF32 note;
   sF32 pitch;
 
+  // era <v1 (fr08): the 2000 osc renders tri/saw + pulse as a 4x linearly-
+  // oversampled numeric box filter (syOscRender @0x40a585), not the 2004
+  // analytic convolution. These are the per-segment line coeffs syOscSet
+  // @0x40a4d2 precomputes; see fr08-extraction/DELTA.md.
+  sF32 v0_dn_k, v0_dn_o;  // cnt<brpt segment: val = p*dn_k + dn_o
+  sF32 v0_up_k, v0_up_o;  // cnt>=brpt segment: val = p*up_k + up_o
+
   V2Instance *inst;   // V2 instance we belong to.
 
   void init(V2Instance *instance, sInt idx)
@@ -888,10 +916,16 @@ struct V2Osc
     nffrq = inst->SRfclinfreq * calcfreq((pitch + 64.0f) * 0.0078125f);
     // whole freq tail (·fci12, pow2, ·base, fistp) as one x87 sequence with a
     // 24-bit fci12 -- bit-exact with the asm (no 80-bit constant / excess precision).
-    freq = v2_oscfreq(pitch + note - 60.0f, inst->SRfcobasefrq);
+    // era <v1 (fr08): the 2000 synth multiplies by a baked constant 3185015.0
+    // (= fcoscbase·2²⁹/44100 ≈ SRfcobasefrq/4) and advances cnt 4× per sample
+    // in the oversampled render; 2004 computes SRfcobasefrq at runtime and
+    // advances once. Same pitch, but the baked constant rounds differently.
+    freq = v2_oscfreq(pitch + note - 60.0f,
+                      inst->eraV0() ? fcoscbase_v0 : inst->SRfcobasefrq);
 #else
     nffrq = inst->SRfclinfreq * calcfreq((pitch + 64.0f) / 128.0f);
-    freq = (sInt)(inst->SRfcobasefrq * pow(2.0f, (pitch + note - 60.0f) / 12.0f));
+    freq = (sInt)((inst->eraV0() ? fcoscbase_v0 : inst->SRfcobasefrq)
+                  * pow(2.0f, (pitch + note - 60.0f) / 12.0f));
 #endif
 #ifdef V2_VALIDATE
     freqlog_emit(0 /*osc*/, this, (unsigned)freq, f2u(pitch), f2u(nffrq), cnt, (unsigned)mode, f2u(nf.b));
@@ -916,10 +950,40 @@ struct V2Osc
     sF32 col = para->color / 128.0f;
     brpt = ftou32(col);
     nfres = 1.0f - sqrtf(col);
+
+    if (inst->eraV0())
+    {
+      // 2000 syOscSet @0x40a4d2 box-segment coeffs (x87 PC=24, faithful build).
+      // down (cnt<brpt, ramp -1->+1):  val = p*(2/col) + (-1-2/col)
+      // up   (cnt>=brpt, ramp +1->-1): val = p*(-2/(1-col)) + (4/(1-col)-1)
+      v0_dn_k = 2.0f / col;
+      v0_dn_o = -1.0f - 2.0f / col;
+      v0_up_k = -2.0f / (1.0f - col);
+      v0_up_o = 4.0f / (1.0f - col) - 1.0f;
+    }
   }
 
   void render(sF32 *dest, sInt nsamples)
   {
+    if (inst->eraV0())
+    {
+      // 2000 syOscRender @0x40a585: tri/saw + pulse are 4x-oversampled box
+      // filters, sine uses native fsin, noise uses the MSVC LCG. AUXA/AUXB and
+      // ring don't exist in v0 (modes 6/7 unused; conv2m defaults them off).
+      switch (mode & 7)
+      {
+      case OSC_OFF:     break;
+      case OSC_TRI_SAW: renderTriSaw_v0(dest, nsamples); break;
+      case OSC_PULSE:   renderPulse_v0(dest, nsamples); break;
+      case OSC_SIN:     renderSin_v0(dest, nsamples); break;
+      case OSC_NOISE:   renderNoise_v0(dest, nsamples); break;
+      case OSC_FM_SIN:  renderFMSin(dest, nsamples); break;  // FM shared
+      default:          break;
+      }
+      DEBUG_PLOT(this, dest, nsamples);
+      return;
+    }
+
     switch (mode & 7)
     {
     case OSC_OFF:     break;
@@ -929,13 +993,98 @@ struct V2Osc
     case OSC_NOISE:   renderNoise(dest, nsamples); break;
     case OSC_FM_SIN:  renderFMSin(dest, nsamples); break;
     case OSC_AUXA:    renderAux(dest, inst->auxabuf, nsamples); break;
-    case OSC_AUXB:    renderAux(dest, inst->auxbbuf, nsamples); break; 
+    case OSC_AUXB:    renderAux(dest, inst->auxbbuf, nsamples); break;
     }
 
     DEBUG_PLOT(this, dest, nsamples);
   }
 
 private:
+  // ---- year-2000 (era <v1) oscillator renderers (DELTA.md delta 2-4) --------
+  // Faithful ports of syOscRender @0x40a585. The faithful build runs x87 at
+  // PC=24 (-mpc32), so plain float arithmetic reproduces the 2000 rounding;
+  // only the [1,2)-from-counter bit trick, the fistp, and fsin are special.
+
+  // counter top bits -> float in [1,2): asm `shr eax,9; or 0x3f800000`.
+  static inline sF32 v0_cnt2f(sU32 c)
+  {
+    return bits2float((c >> 9) | 0x3f800000);
+  }
+
+  void renderTriSaw_v0(sF32 *dest, sInt nsamples)
+  {
+    COVER("Osc v0 trisaw");
+    sU32 c = cnt;
+    sF32 bg = gain * 0.25f; // box gain = (gain/128)*0.25  (gain already /128)
+    for (sInt i=0; i < nsamples; i++)
+    {
+      sF32 acc = 0.0f;
+      for (sInt s=0; s < 4; s++) // 4x oversample + box average
+      {
+        sF32 p = v0_cnt2f(c);
+        acc += (c < brpt) ? (p * v0_dn_k + v0_dn_o) : (p * v0_up_k + v0_up_o);
+        c += (sU32)freq;
+      }
+      output(dest + i, acc * bg);
+    }
+    cnt = c;
+  }
+
+  void renderPulse_v0(sF32 *dest, sInt nsamples)
+  {
+    COVER("Osc v0 pulse");
+    sU32 c = cnt;
+    sF32 bg = gain * 0.25f;
+    for (sInt i=0; i < nsamples; i++)
+    {
+      sF32 acc = 0.0f;
+      for (sInt s=0; s < 4; s++)
+      {
+        if (c >= brpt) acc += 2.0f; // each high sub-sample contributes +2
+        c += (sU32)freq;
+      }
+      output(dest + i, (acc - 4.0f) * bg); // {-4..+4} * box gain
+    }
+    cnt = c;
+  }
+
+  void renderSin_v0(sF32 *dest, sInt nsamples)
+  {
+    COVER("Osc v0 sin");
+    sU32 c = cnt;
+    sU32 step = (sU32)freq << 2; // sine advances 4*freq per output sample
+    for (sInt i=0; i < nsamples; i++)
+    {
+      sF32 p = v0_cnt2f(c);
+      c += step;
+      output(dest + i, v2_sin(p * fc2pi) * gain); // native fsin, gain=gain/128
+    }
+    cnt = c;
+  }
+
+  void renderNoise_v0(sF32 *dest, sInt nsamples)
+  {
+    COVER("Osc v0 noise");
+    // Exact 2000 noise + resonant LRC, traced from syOscRender @0x40a659. Note
+    // this is a DIFFERENT recurrence/output from the 2004 V2LRC.step (and uses
+    // the MSVC LCG + a 16-bit float gen). nf.{l,b} hold the two filter states.
+    sF32 sl = nf.l, sb = nf.b, f = nffrq, r = nfres;
+    sU32 seed = nseed;
+    for (sInt i=0; i < nsamples; i++)
+    {
+      seed = seed * 214013 + 2531011;          // MSVC LCG (0x343fd/0x269ec3)
+      // 2000 float gen: (seed&0xffff)<<7 | 0x40000000 -> [2,4); n = that - 3
+      sF32 n = bits2float(((seed & 0xffff) << 7) | 0x40000000) - 3.0f;
+      sF32 bb = sb + sl * f;                    // b' = b + l*nffrq
+      sF32 h  = (n - sl) * r - bb;              // h  = (n-l)*nfres - b'
+      sF32 ll = sl + h * f;                     // l' = l + h*nffrq
+      output(dest + i, gain * (h + bb + ll));   // out = (h + b' + l') * gain
+      sl = ll; sb = bb;
+    }
+    nf.l = sl; nf.b = sb;
+    nseed = seed;
+  }
+
   inline void output(sF32 *dest, sF32 x)
   {
     if (ring)
@@ -4149,6 +4298,29 @@ void __stdcall synthSetGlobals(void *pthis, const void *ptr)
 {
   ((V2Synth *)pthis)->setGlobals((const sU8 *)ptr);
 }
+
+#ifdef V2_VALIDATE
+// Validation: render ONE year-2000 (eraV0) oscillator in isolation so it can be
+// unit-tested against the genuine 2000 syOscRender called in the C1 image
+// (validate/c1_osc_probe.c). p = {mode,pitch,detune,color,gain} in the 2000
+// syVOsc field order (NO ring). dest = nsamples mono floats (caller zeroes).
+extern "C" void synthTestOscV0(const float *p, unsigned cnt0, unsigned nseed0,
+                               float *dest, int nsamples)
+{
+  static V2Instance inst;
+  inst.calcNewSampleRate(44100);
+  inst.srcVersion = 0; // eraV0 + eraEnvOld
+  static V2Osc osc;
+  osc.init(&inst, 0);
+  syVOsc para;
+  para.mode = p[0]; para.ring = 0.0f; para.pitch = p[1];
+  para.detune = p[2]; para.color = p[3]; para.gain = p[4];
+  osc.set(&para);
+  osc.cnt = cnt0;
+  osc.nseed = nseed0;
+  osc.render(dest, nsamples);
+}
+#endif
 
 void __stdcall synthSetSourceVersion(void *pthis, int srcver)
 {

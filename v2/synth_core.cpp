@@ -273,6 +273,26 @@ static inline sInt v2_oscfreq(sF32 pno, sF32 base) // pno = pitch+note-60
            : "=m"(r) : "t"(pno), "m"(base), "m"(v2_fci12) : "st");
   return r;
 }
+// gain2 = (param1/128) / atan(gain1), the whole dist OVERDRIVE setup tail as
+// ONE x87 sequence like asm .mode1 (synth.asm:1831-1838: fld gain1 / fld1 /
+// fpatan / fdivp). fpatan computes at full internal precision regardless of
+// PC=24 (precision control does not apply to x87 transcendentals); only the
+// divide rounds. Rounding atan() to sF32 before dividing -- as a plain
+// v2_atan() wrapper would -- double-rounds and misses the asm by 1 ULP
+// (libm double atan was 1 ULP off on 102k of 107k pzero set calls).
+static inline sF32 v2_overdrive_gain2(sF32 p1g, sF32 gain1) // p1g = param1/128
+{
+  sF32 r;
+  __asm__ ("fld1\n\t"
+           "fpatan\n\t"                  // atan(gain1), full precision; pops
+           "fdivrp %%st, %%st(1)\n\t"    // p1g / atan -> st0, rounds at PC=24
+                                         // (gas swaps fdivp/fdivrp p-form
+                                         // mnemonics vs Intel; verified by the
+                                         // DISTG2TRACE oracle: fdivp gave the
+                                         // reciprocal)
+           : "=t"(r) : "0"(gain1), "u"(p1g) : "st(1)");
+  return r;
+}
 #endif
 
 // 2^x and base^e: faithful x87 kernels in the validation build, libm otherwise.
@@ -1798,7 +1818,12 @@ struct V2Dist
       break;
 
     case OVERDRIVE:
+#ifdef V2_X87_FAITHFUL
+      // /128.0f is a power of two (exact), same value as the asm's fmul fci128.
+      gain2 = v2_overdrive_gain2(para->param1 / 128.0f, gain1);
+#else
       gain2 = (para->param1 / 128.0f) / atan(gain1);
+#endif
       offs = gain1 * 2.0f * ((para->param2 / 128.0f) - 0.5f);
       break;
 
@@ -1829,6 +1854,18 @@ struct V2Dist
       }
       break;
     }
+#ifdef V2_VALIDATE
+    // Bit-dump of the OVERDRIVE/CLIP setup values (the asm stores these in the
+    // shared .mode2b tail, synth.asm:1848). Mirrored on the asm side by
+    // distg2dbg_snap (asm_appendix.asm) so the sequences diff call-for-call.
+    // gain2 is the fpatan-vs-libm-atan suspect for the vce_dist/ch_dist seeds.
+    if ((mode == OVERDRIVE || mode == CLIP) && getenv("DISTG2TRACE")) {
+      union { sF32 f; sU32 u; } g1, g2, of;
+      g1.f = gain1; g2.f = gain2; of.f = offs;
+      fprintf(stderr, "[dist.g2] mode=%d gain1=%08x gain2=%08x offs=%08x\n",
+              mode, g1.u, g2.u, of.u);
+    }
+#endif
   }
 
   void renderMono(sF32 *dest, const sF32 *src, sInt nsamples)
@@ -2332,9 +2369,13 @@ struct V2Boost
     // A = 10^(dBgain/40), or a rough approximation anyway
     sF32 A = v2_exp2(para->amount / 128.0f);
 
-    // V2 code computes beta = sqrt((A^2 + 1) - (A-1)^2) for some reason
-    // but applying the binomial formula just gives sqrt(2A)
-    sF32 beta = sqrtf(2.0f * A);
+    // V2 code computes beta = sqrt((A^2 + 1) - (A-1)^2), which is algebraically
+    // just sqrt(2A) — but NOT bit-equal: the asm (syBoostSet, synth.asm:2790-
+    // 2800) rounds A*A, A*A+1, (A-1)^2 and the difference to single precision
+    // step by step, and for 21 of the 127 possible amounts the result differs
+    // from sqrt(2A) by 1 ULP. Keep the asm's stepwise form; the "redundant"
+    // shape is load-bearing for bit-fidelity.
+    sF32 beta = sqrtf((A * A + 1.0f) - (A - 1.0f) * (A - 1.0f));
 
     // temp vars
     sF32 bs = beta * inst->SRfcBoostSin;
@@ -2343,8 +2384,13 @@ struct V2Boost
     sF32 cAm1 = Am1 * inst->SRfcBoostCos;
     sF32 cAp1 = Ap1 * inst->SRfcBoostCos;
 
-    // a0 = (A+1) + (A-1)*cos + beta*sin
-    sF32 ia0 = 1.0f / (Ap1 + cAm1 + bs);
+    // a0 = (A+1) + (A-1)*cos + beta*sin, summed in the asm's ORDER:
+    // (bs + cAm1) + Ap1 (syBoostSet, synth.asm:2818-2823 — fadd st1, fadd st3).
+    // FP addition is not associative: (Ap1 + cAm1) + bs rounds differently for
+    // some amounts (e.g. 92 — pzero's 9.677s ch7 patch), shifting ia0 and ALL
+    // FIVE coefficients by 1 ULP and shocking the biquad state. The association
+    // below is load-bearing; do not "clean it up".
+    sF32 ia0 = 1.0f / ((bs + cAm1) + Ap1);
 
     b1 = 2.0f * A * (Am1 - cAp1) * ia0;
     a1 = -2.0f * (Am1 + cAp1) * ia0;

@@ -109,6 +109,14 @@ sed -i \
   synth_noronan.asm
 n=$(grep -c 'call boostdbg_snap' synth_noronan.asm)
 [ "$n" -eq 1 ] || { echo "ERROR: boostdbg_snap injection count $n != 1" >&2; exit 1; }
+# Inject the asm-side dist OVERDRIVE/CLIP setup dump at the end of syDistSet's
+# shared .mode2b tail (ebp = syWDist base, eax = mode&15, FPU stack empty).
+# Anchored on the unique offs store. Fires for voice AND channel dist.
+sed -i \
+  -e 's/\(fstp[[:space:]][[:space:]]*dword \[ebp + syWDist\.offs\]\)/\1\n\tcall distg2dbg_snap/' \
+  synth_noronan.asm
+n=$(grep -c 'call distg2dbg_snap' synth_noronan.asm)
+[ "$n" -eq 1 ] || { echo "ERROR: distg2dbg_snap injection count $n != 1" >&2; exit 1; }
 # Inject the asm-side reverb-coeff dump at the end of syReverbSet (ebp = syWReverb
 # base, FPU stack empty). Anchored on the unique lowcut store (last coeff written).
 sed -i \

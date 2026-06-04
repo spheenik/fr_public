@@ -112,3 +112,24 @@ python3 f32towav.py asm_pzero.f32 out.wav --rate 44100
 The C path (`wav.h`, in the harness) and the Python path produce WAVs that agree
 to within 1 LSB — the only difference is the harness rounding under the reduced
 24-bit x87 precision of the fidelity build vs Python's doubles. Inaudible.
+
+## Diagnostic environment variables (validation builds)
+
+All are inert when unset (integer-gated, own buffers; verified byte-identical
+audio). Both harnesses honor the same names so streams diff call-for-call.
+
+| var | what it does |
+|-----|--------------|
+| `BUSTAP=<pfx>` | dump per-stage bus/chain taps after every `synthRender`: `<pfx>.{aux1,aux2,mix,vce_osc,vce_flt,vce_dist,vce_dcf,chan,ch_dcf1,ch_comp,ch_boost,ch_dist,ch_chorus,ch_dcf2,premix,post_reverb,post_delay,post_dcf,post_lchc,post_compr}` (raw f32; compare with `compare.py`) |
+| `CHANSOLO=<n>` | mute all channels except `n` (isolates one channel's chain) |
+| `FREQLOG=<pfx>` | per-event 32-byte ledgers: `.freqlog` (osc/lfo freq, kind 0/1), `.ctrllog` (env/lfo outs + states, kind 2 — ⚠ map env-state enums before comparing), `.fltlog` (VCF state/coeffs, kind 3 — ⚠ includes the dist's embedded filters), `.osclog` (voice osc outs, kind 4), `.freqmap` (ordinal→sample). ⚠ `offset` fields are per-core; align by ordinal (`freqdiff.py <asm-pfx> <cpp-pfx>`). GB-scale on /tmp! |
+| `FREQKNOCKOUT=<asm.freqlog>` | replay asm freq/nffrq into the C++ core by ordinal (cross-feeding knockout) |
+| `SRTRACE=1` | bit-dump the SR-derived constants (obasefrq, linfreq, dcfilter, BoostCos/Sin) at init |
+| `BOOSTTRACE=1` | bit-dump the boost biquad coeffs (b0,b1,b2,a1,a2) per `syBoostSet`/`V2Boost::set` |
+| `DISTG2TRACE=1` | bit-dump dist OVERDRIVE/CLIP `gain1/gain2/offs` per set (gain2 = the fpatan site) |
+| `CHORUSTRACE` / `COMPTRACE` / `REVERBTRACE` / `ENVTRACE` / `CHANTRACE` / `ALLOCTRACE` | analogous per-block set dumps |
+| `OSCDUMP` / `LFODUMP` / `MODDUMP` / `DISTTRACE` | first-N param dumps (C++ side) |
+| `POISON=1` | fill the instance with 0xCC before synthInit (init-zeroing contract probe) |
+
+⚠ When comparing trace streams, beware the rtk grep/diff hook deduplicating
+lines — extract and diff in python, or `rtk proxy diff a b`.

@@ -72,6 +72,16 @@ extern "C" void boostdbg_c(int ena, unsigned b0, unsigned b1, unsigned b2,
             ena, b0, b1, b2, a1, a2);
 }
 
+// Validation: asm-side dist OVERDRIVE/CLIP setup dump (mirrors synth_core.cpp
+// DISTG2TRACE). Identical line format so the two streams diff directly.
+// gain2 = (param1/128)/atan(gain1) is the fpatan-vs-libm-atan suspect.
+extern "C" void distg2dbg_c(int mode, unsigned gain1, unsigned gain2, unsigned offs)
+{
+  if (getenv("DISTG2TRACE"))
+    fprintf(stderr, "[dist.g2] mode=%d gain1=%08x gain2=%08x offs=%08x\n",
+            mode, gain1, gain2, offs);
+}
+
 // Validation: asm-side reverb coeff dump (mirrors synth_core.cpp REVERBTRACE).
 // Raw 32-bit patterns for bit-exact diff. Field order matches syCReverb.
 extern "C" void reverbdbg_c(unsigned g0, unsigned g1, unsigned g2, unsigned g3,

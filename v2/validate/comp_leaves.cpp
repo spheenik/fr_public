@@ -30,7 +30,7 @@ extern "C" {
   extern unsigned int v2x_size_syWDCF;
   void v2x_boostInit(void*); void v2x_boostSet(void*, const void*);
   void v2x_boostRender(void*, float*, int);
-  extern unsigned int v2x_size_syWBoost;
+  extern unsigned int v2x_size_syWBoost, v2x_off_syWBoost_a1; // a1,a2,b0,b1,b2
 }
 
 static const float EPS = 1e-4f;
@@ -114,26 +114,61 @@ static int test_dcf(const std::vector<float>&src,int N)
   return report("dcf", c.data(), a.data(), N);
 }
 
-// ---- BOOST: stereo in-place render ----
+// ---- BOOST: stereo in-place render — bit-exact sweep over ALL amounts ----
+// A single amount can pass by luck: the boost set-path rounding is data-
+// dependent (the a0 association bug only fired at amount 92 — pzero's 9.677s
+// patch; the sqrt(2A) beta simplification differed on 21/127 amounts). So
+// sweep the full domain of the set input at eps=0; tolerance- or single-point
+// oracles HIDE 1-ULP set-path bugs that shock the biquad state in context.
 static int test_boost(int N)
 {
   std::vector<float> src; noise(src, 2*N, 0xC0FFEEu); // interleaved L,R
-  syVBoost p; p.amount=12;
-  std::vector<float> c(src), a(src);
-  // V2Boost::init does NOT zero its IIR state (the real synth relies on the
-  // instance being zero-allocated); the asm syBoostInit zeros it. Mirror that.
-  V2Boost b; memset(&b, 0, sizeof b); b.init(&g_inst); b.set(&p);
-  b.render((StereoSample*)c.data(), N);
-  std::vector<unsigned char> W(v2x_size_syWBoost,0);
-  v2x_boostInit(W.data()); v2x_boostSet(W.data(), &p);
-  v2x_boostRender(W.data(), a.data(), N);
-  return report("boost", c.data(), a.data(), 2*N);
+  int bad=0, firstbad=-1;
+  for (int amt=1; amt<128; amt++) {
+    syVBoost p; p.amount=(float)amt;
+    std::vector<float> c(src), a(src);
+    // V2Boost::init does NOT zero its IIR state (the real synth relies on the
+    // instance being zero-allocated); the asm syBoostInit zeros it. Mirror that.
+    V2Boost b; memset(&b, 0, sizeof b); b.init(&g_inst); b.set(&p);
+    b.render((StereoSample*)c.data(), N);
+    std::vector<unsigned char> W(v2x_size_syWBoost,0);
+    v2x_boostInit(W.data()); v2x_boostSet(W.data(), &p);
+    v2x_boostRender(W.data(), a.data(), N);
+    // coeff-level check: attributes a divergence to the SET path (coeffs
+    // differ) vs the RENDER path (coeffs equal, output differs).
+    const float *acf = (const float*)(W.data()+v2x_off_syWBoost_a1); // a1,a2,b0,b1,b2
+    float ccf[5] = { b.a1, b.a2, b.b0, b.b1, b.b2 };
+    int cbad = memcmp(ccf, acf, sizeof ccf) != 0;
+    if (memcmp(c.data(), a.data(), 2*N*sizeof(float)) != 0 || cbad) {
+      bad++; if (firstbad<0) firstbad=amt;
+      int fi=-1; for (int i=0;i<2*N;i++) if (c[i]!=a[i]) { fi=i; break; }
+      union { float f; unsigned u; } uc, ua; uc.f=fi>=0?c[fi]:0; ua.f=fi>=0?a[fi]:0;
+      printf("  boost amount %3d: DIVERGES (eps=0) first@%d cpp=%08x asm=%08x coeffs=%s\n",
+             amt, fi, uc.u, ua.u, cbad?"DIFFER":"equal");
+      if (cbad) {
+        const char *cn[5]={"a1","a2","b0","b1","b2"};
+        for (int k=0;k<5;k++) if (ccf[k]!=acf[k]) {
+          union { float f; unsigned u; } x,y; x.f=ccf[k]; y.f=acf[k];
+          printf("    %s cpp=%08x asm=%08x\n", cn[k], x.u, y.u);
+        }
+      }
+    }
+  }
+  printf("  %-16s maxerr=%s  %s (127 amounts, eps=0)\n", "boost sweep",
+         bad? ">0" : "0", bad? "DIVERGE" : "MATCH");
+  return bad?1:0;
 }
 
 int main()
 {
-  g_inst.calcNewSampleRate(44100);
-  v2x_calcSR(44100);
+  // volatile: keep sr a RUNTIME value. With a literal 44100, gcc const-folds
+  // calcNewSampleRate's coefficient chain at compile time in full (MPFR)
+  // precision -- SRfcBoostSin comes out 1 ULP off the asm's runtime x87 PC=24
+  // value (3caf0f9f vs 3caf0f9e), which made the bit-exact boost sweep flag 12
+  // amounts that are fine in the real harness (where sr arrives at runtime).
+  volatile int sr = 44100;
+  g_inst.calcNewSampleRate(sr);
+  v2x_calcSR(sr);
   const int N=512, T=200;
   std::vector<float> src; noise(src, N);
 

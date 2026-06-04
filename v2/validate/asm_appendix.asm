@@ -395,6 +395,26 @@ boostdbg_snap:
     popad
     ret
 
+; sed-injected `call distg2dbg_snap` at the end of syDistSet's shared .mode2b
+; tail (after `fstp dword [ebp + syWDist.offs]`, synth.asm:1848): ebp = syWDist
+; base, eax = mode&15 (1=overdrive, 2=clip), FPU stack empty. Forwards mode +
+; gain1/gain2/offs raw bits to distg2dbg_c (cdecl, asm_stubs.cpp). gain2 is the
+; fpatan-vs-libm-atan suspect. Fires for BOTH the voice and channel dist (same
+; syDistSet routine), matching the C++ DISTG2TRACE call-for-call.
+extern distg2dbg_c
+distg2dbg_snap:
+    pushad
+    pushfd
+    push  dword [ebp + syWDist.offs]
+    push  dword [ebp + syWDist.gain2]
+    push  dword [ebp + syWDist.gain1]
+    push  eax
+    call  distg2dbg_c
+    add   esp, 16
+    popfd
+    popad
+    ret
+
 ; sed-injected `call envdbg_snap` at the end of syEnvSet (ebp = syWEnv base,
 ; FPU stack empty). Forwards the 6 env coeffs (raw bits) to envdbg_c.
 ; sed-injected `call allocdbg_snap` at ProcessNoteOn.donoteon (ecx=chan, edx=slot,
@@ -735,6 +755,8 @@ global v2x_size_syWDCF
 v2x_size_syWDCF:    dd syWDCF.size
 global v2x_size_syWBoost
 v2x_size_syWBoost:  dd syWBoost.size
+global v2x_off_syWBoost_a1
+v2x_off_syWBoost_a1: dd syWBoost.a1   ; a1,a2,b0,b1,b2 are consecutive dwords
 
 ; --- per-stage mix-chain snapshot buffers (validation localization tap) ---
 ; One interleaved-stereo frame each (2*MAX_FRAME_SIZE dwords), filled by the

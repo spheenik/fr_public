@@ -30,6 +30,9 @@ reverbdbg_c:
 global allocdbg_c
 allocdbg_c:
     ret
+global distg2dbg_c
+distg2dbg_c:
+    ret
 
 extern calcNewSampleRate
 extern syOscInit

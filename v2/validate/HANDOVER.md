@@ -2,7 +2,80 @@
 
 Start-here note for picking this up in a fresh session.
 
-## ⚡ LATEST STATE (2026-06-04, session 3) — READ THIS FIRST
+## ⚡ LATEST STATE (2026-06-04, session 4) — READ THIS FIRST
+
+Whole-song A/B on `pzero_new.v2m` (faithful build, `auto` = 235.3s):
+**max-abs 0.021984458, rms 0.000408** — magnitude UNCHANGED from session 3
+(0.0218729973) despite three real 1-ULP set-path fixes landing (below). First
+divergence float #1568074 (was #1567954), still the 17.8s ch7 onset. The fixed
+seeds were genuine but NOT the dominant whole-song driver. OpenSpec change:
+`fix-v2-boost-a0-dist-gain2`.
+
+### Fixes landed this session (all verified bit-exact at their site)
+
+1. **Boost `a0` association** (`V2Boost::set`): port summed `(Ap1+cAm1)+bs`;
+   asm sums `(bs+cAm1)+Ap1` (synth.asm:2818-2823). Non-associative: at amount
+   92 (a third boost channel activates with it at 9.677s) ia0 — and therefore
+   ALL FIVE coefficients — came out 1 ULP off, shocking the biquad state.
+   Found via BOOSTTRACE full-sequence diff + 24-bit numpy sim reproducing the
+   observed bits exactly.
+2. **Boost `beta` formula**: port's `sqrtf(2*A)` (porter's binomial
+   simplification) ≠ asm's stepwise `sqrt((A²+1)-(A-1)²)` for 21/127 amounts
+   (1 ULP). pzero's amounts (54/66/92) all coincided — latent, fixed anyway.
+3. **Dist OVERDRIVE `gain2`**: port used libm double `atan`; asm uses `fpatan`
+   (synth.asm:1833-1838). 1 ULP off on 102,638 of 107,683 set calls (one patch
+   config, present from the song's FIRST overdrive set — the vce_dist seed).
+   Fixed via `v2_overdrive_gain2` (V2_X87_FAITHFUL inline x87: the whole
+   `fld1/fpatan/fdivrp` tail in ONE sequence — fpatan ignores PC=24, so
+   rounding atan to sF32 before the divide would double-round). Portable
+   build keeps libm `atan`, unchanged.
+
+Verification: BOOSTTRACE 312,608 sets / 0 mismatches whole-song; DISTG2TRACE
+(new) 655,685 sets / 0 mismatches; comp_leaves boost sweep ALL 127 amounts
+eps=0 MATCH; all comp_* oracles green; all four ledgers (freqlog 14.6M /
+fltlog 7.2M / osclog 2.9M / ctrllog 2.9M records) still 0 divergences.
+
+### Where the residual lives NOW (next session: start here)
+
+`CHANSOLO=7` 25s chain after the fixes: `vce_dist 1.5e-7` → `ch_comp 1.6e-7` →
+**`ch_boost 2.0e-5`** → `ch_dist 1.3e-4` (was 6.1e-3). The boost STILL shocks
+at the 9.677s activation with bit-exact coeffs AND bit-exact input at the
+divergence sample — and a biquad with L1(h)≈2 cannot amplify 1.6e-7 to 2e-5,
+so it is a STATE difference at activation. **UNVERIFIED LEAD:** C++
+`renderFrame` SKIPS channels with no active voices (`if (voice == POLY)
+continue;`, synth_core.cpp ~3919) — the idle channel's chain state (boost IIR,
+chorus delay line, dcf) FREEZES. If the asm channel loop (`syChanProcess`
+call, synth.asm ~5127) processes every channel every frame, its idle states
+keep evolving (silence + dcoffset through IIRs) → states differ at every
+re-activation → shock → post_compr amplifies → the whole-song 0.0219. This
+fits every observation (shock-with-exact-inputs, same event class all song,
+magnitude unmoved by the seed fixes). VERIFY the asm loop semantics FIRST,
+then fix C++ to match (likely: process the chain for channels with state even
+when voiceless, or replicate the asm's exact active-set rule).
+
+### New tooling/gotchas this session
+
+- `DISTG2TRACE=1` — bit-dump of dist OVERDRIVE/CLIP `gain2`/`offs`/`gain1`
+  per set, both cores, identical line format (cpp: `V2Dist::set`; asm:
+  `distg2dbg_snap` injected at the `.mode2b` offs store, synth.asm:1848).
+- `comp_leaves` boost test is now a **bit-exact sweep over all 127 amounts**
+  (eps=0) with coefficient-level attribution (set-path vs render-path) on
+  failure. Self-tested: reverting the a0 fix makes it fail naming 35 amounts.
+- ⚠ **Leaf-test rig trap:** passing a LITERAL sample rate
+  (`calcNewSampleRate(44100)`) lets gcc const-fold the SR-constant chain at
+  MPFR precision — `SRfcBoostSin` comes out 1 ULP off the runtime x87 PC=24
+  value (3caf0f9f vs 3caf0f9e) and the sweep flags 12 phantom amounts. Use a
+  `volatile int sr` (comp_leaves fixed). Audit other comp_* if they ever
+  compare SR-derived coefficients bit-exactly.
+- ⚠ **gas x87 p-form swap:** `fdivp %st,%st(1)` in AT&T gas assembles to the
+  OPPOSITE quotient of Intel `fdivp st1,st0` intuition — use `fdivrp` for
+  p1g/atan (verified empirically via DISTG2TRACE: fdivp gave the reciprocal).
+- Exonerated this session (do not re-chase): `SRfcBoostCos/Sin` libm-vs-
+  fsincos (bit-identical, SRTRACE), beta for pzero's amounts, all `sqrtf`
+  sites (IEEE correctly-rounded both sides), boost render arithmetic
+  (grouping matches; in-isolation bit-exact for all amounts).
+
+## HISTORICAL: state at end of session 3 (2026-06-04)
 
 Whole-song A/B on `pzero_new.v2m` (faithful build, `auto` length = 235.3s):
 **max-abs 0.0218729973** (was 0.0491175018 at session start), rms 0.000411.
@@ -10,7 +83,7 @@ Whole-song A/B on `pzero_new.v2m` (faithful build, `auto` length = 235.3s):
 783977 — exactly the ch7 noise/FM-channel onset). Older sections below are
 historical; trust this section where they conflict.
 
-### Fixes landed this session (in working tree, UNCOMMITTED — commit these!)
+### Fixes landed in session 3 (committed: 297b66f)
 
 1. **note-off over-release** (`synth_core.cpp`, MIDI note-off loop): the asm
    (`ProcessNoteOff`, synth.asm:5398-5400) releases the FIRST voice matching

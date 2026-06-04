@@ -25,6 +25,15 @@ CXXFLAGS="-m32 -std=c++03 -O2 -w -include compat.h -I.. -mpc32 -mno-sse -DV2_X87
 echo "[1/5] assemble oracle (synth.asm, RONAN off) + validation appendix"
 sed 's/^%define\([[:space:]]*\)RONAN[[:space:]]*$/; RONAN disabled for validation: &/' \
     ../synth.asm > synth_noronan.asm
+# Pin the LFO S&H random seed (validation determinism). The original syLFOInit
+# seeds nseed with RDTSC — the shipping synth is deliberately nondeterministic
+# (josie's S&H pitch-mod voice differs run to run, even asm-vs-asm). A bit-exact
+# A/B needs both cores to start the S&H chain from the same constant; the C++
+# core uses the same value under V2_VALIDATE (V2LFO::init).
+sed -i '/^syLFOInit/,/^syLFOKeyOn/ s/^\([[:space:]]*\)rdtsc[[:space:]]*$/\1mov eax, 0x2BAD5EED ; validation: pinned S\&H seed (was rdtsc)/' \
+  synth_noronan.asm
+n=$(grep -c '0x2BAD5EED' synth_noronan.asm)
+[ "$n" -eq 1 ] || { echo "ERROR: LFO seed pin count $n != 1" >&2; exit 1; }
 # Inject per-stage mix-chain snapshot calls into the render frame (validation
 # localization tap). Splices `call mixtap_snap_<stage>` after each global FX stage
 # so the asm core snapshots mixbuf at the same five points as synth_core.cpp's

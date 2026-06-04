@@ -1657,7 +1657,15 @@ struct V2LFO
   void init(V2Instance *)
   {
     cntr = last = 0;
+#ifdef V2_VALIDATE
+    // The asm (syLFOInit, synth.asm:1595) seeds the S&H generator with RDTSC —
+    // the shipping synth is deliberately nondeterministic per run. For the
+    // bit-exact A/B the validation build pins the same constant in BOTH cores
+    // (build.sh rewrites the asm's rdtsc to this value in its assembled copy).
+    nseed = 0x2BAD5EED;
+#else
     nseed = rand(); // not really, but close enough...
+#endif
   }
 
   void set(const syVLFO *para)

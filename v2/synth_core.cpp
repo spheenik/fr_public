@@ -2834,9 +2834,14 @@ struct V2ModDel
 
     COVER("MODDEL chan");
 
+    // era <v1 (fr08): the 2000 chorus render @0x40b268 feeds the channel buffer
+    // straight in (fld [esi]/[esi+4]) with NO denormal bias; 2004 adds
+    // fcdcoffset. Through the feedback comb this accumulates, so it must be
+    // gated for the matched A/B. (DELTA.md delta 6, channel level.)
+    const sF32 dco = inst->eraV0() ? 0.0f : fcdcoffset;
     sF32 dry = dryout;
     for (sInt i=0; i < nsamples; i++)
-      processSample(&chanbuf[i], chanbuf[i].l + fcdcoffset, chanbuf[i].r + fcdcoffset, dry);
+      processSample(&chanbuf[i], chanbuf[i].l + dco, chanbuf[i].r + dco, dry);
   }
 
 private:
@@ -4396,6 +4401,25 @@ extern "C" void synthTestDistV0(const float *p, const float *src,
   para.mode = p[0]; para.ingain = p[1]; para.param1 = p[2]; para.param2 = p[3];
   dist.set(&para);
   dist.renderMono(dst, src, nsamples);
+}
+
+// Validation: render the eraV0 channel chorus (V2ModDel) in isolation vs the
+// genuine 2000 syChorusSet/render (@0x40b0c1/0x40b268) in c1_chorus_probe.
+// p = syVModDel {amount,fb,llength,rlength,mrate,mdepth,mphase}; io = n
+// interleaved-stereo frames, processed in place. Delay buffer = 2048 (= V2Chan).
+extern "C" void synthTestChorusV0(const float *p, float *io, int nsamples)
+{
+  static V2Instance inst;
+  inst.calcNewSampleRate(44100);
+  inst.srcVersion = 0;
+  static sF32 b0[2048], b1[2048];
+  static V2ModDel md;
+  md.init(&inst, b0, b1, 2048);
+  syVModDel para;
+  para.amount = p[0]; para.fb = p[1]; para.llength = p[2]; para.rlength = p[3];
+  para.mrate = p[4]; para.mdepth = p[5]; para.mphase = p[6];
+  md.set(&para);
+  md.renderChan((StereoSample *)io, nsamples);
 }
 #endif
 

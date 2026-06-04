@@ -74,7 +74,8 @@
   shocks at the 9.677 s activation (input 1.6e-7 → output 2.0e-5, coeffs
   bit-exact; physically impossible as amplification, biquad L1 ≈ 2). The spec
   scenario "In-context boost tap closes" is therefore NOT fully met — a SECOND
-  mechanism exists at the same event class.
+  mechanism exists at the same event class. (Scenario removed from this change's
+  delta at archive time; it belongs to the follow-up change's spec.)
 - Whole-song: max 0.021984458 / rms 0.000408 — magnitude UNCHANGED vs baseline
   0.0218729973 / 0.000411 (first divergence float #1567954 → #1568074). The
   fixed 1-ULP seeds were real but not the dominant whole-song driver; the

@@ -28,14 +28,6 @@ rounded to single precision, not the algebraically equal `sqrt(2A)`).
   the 21 amounts where the `sqrt(2A)` beta simplification rounds differently
   from the asm's stepwise form
 
-#### Scenario: In-context boost tap closes
-
-- **WHEN** the whole-song A/B runs with the channel-chain taps
-  (`BUSTAP`, `CHANSOLO=7`)
-- **THEN** the `ch_boost` tap no longer introduces divergence at the 9.677 s
-  patch event (the post-boost diff equals the post-comp input diff, instead of
-  jumping ~750x above it)
-
 ### Requirement: Distortion overdrive gain2 matches the assembly fpatan setup
 
 In the bit-faithful validation build (`V2_X87_FAITHFUL`), `V2Dist::set` SHALL

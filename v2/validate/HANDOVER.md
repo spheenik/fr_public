@@ -2,7 +2,61 @@
 
 Start-here note for picking this up in a fresh session.
 
-## ⚡ LATEST STATE (2026-06-04, session 4) — READ THIS FIRST
+## 🏁 LATEST STATE (2026-06-04, session 5) — GOAL ACHIEVED, READ THIS FIRST
+
+Whole-song A/B on `pzero_new.v2m` (faithful build, `auto` = 235.3s):
+**BIT-EXACT. max-abs 0, rms 0, all 20,753,920 floats identical** (commit
+`dd2cdca`). The handover goal — drive the faithful build's whole-song A/B to 0
+to prove the port logic correct — is met. Every BUSTAP stage is clean
+whole-song; all comp_* oracles green; probe_atan (new) 0 mismatches.
+
+### Fixes landed in session 5 (all porting errors, no flags)
+
+1. **fastatan coefficients are DOUBLES in the asm** (`fmul/fadd qword
+   [fcatan*]`, synth.asm:108-113, incl. the full-double pi/2 bias); the port
+   had narrowed them to sF32. 28.2% of dirty-mantissa inputs were 1 ULP off.
+   `comp_fastatan`'s 1/32-step sweep grid (clean mantissas) was a FALSE
+   NEGATIVE — `probe_atan` (LCG-dirtied bit-exact sweep) exposes it; keep
+   using dirty mantissas for any future bit-exact sweep. This was the
+   vce_dist seed (ch7 voice overdrive).
+2. **a1gain/a2gain association** (`V2Chan::set`): asm syChanSet computes
+   `((aux/128)*fcgainh)*chgain` (synth.asm:4198-4209); the port grouped
+   `(chgain*fcgainh)*(aux/128)` — 1 ULP, seeded aux1 (the reverb send).
+3. **Sum-compressor RMS** (`V2Comp::doRMS`, op-for-op port of
+   syCompLD{Mono,Stereo}RMS): subtract oldest FIRST (own rounding) instead of
+   fused `+= insq-old`; FIXDENORMALS dcoffset on the ACCUMULATOR in stereo /
+   on the INPUT in mono (asm inconsistency, replicated); output
+   `sqrt(rv)*fci8192` (24-bit 1/sqrt(8192) constant), NOT `sqrt(rv/8192)`.
+   The global comp is pzero's ONLY RMS-mode instance (mode=3 stereo; channel
+   comps are PEAK — which is why ch_comp was always clean and COMP's
+   exclusion from comp_leaves hid this for the whole project).
+
+### Session-4 mysteries resolved
+
+- **"ch_boost shocks at 9.677s with bit-exact coeffs+input" — explained, no
+  second mechanism.** The L1(h)≈2 argument bounded input→OUTPUT gain, not
+  input→STATE: a resonant biquad integrates sustained ~1.6e-7 input noise
+  into ~2e-5 internal state (~1/(1-r) gain). The "shock" was the stored
+  state-difference from the previous active window — frozen identically in
+  both cores while the channel idled — unveiled at reactivation. Killing the
+  upstream fastatan seed made boost/dist/chorus all bit-exact with NO change
+  to boost itself.
+- **The "UNVERIFIED LEAD" (idle-channel chain-state freeze) is FALSIFIED —
+  do not re-chase.** The asm channel loop (`.chanloop`/`.cchkloop`,
+  synth.asm:5063-5081) scans chanmap and SKIPS voiceless channels exactly
+  like the C++ (`synth_core.cpp` renderFrame); voice deallocation
+  (aenv==OFF → chanmap=-1, synth.asm:4905-4920) is also identical. Both
+  cores freeze idle chain state identically.
+
+### What remains open (future work, not residual-hunting)
+
+- pzero exercises one code path set. A second song through the A/B would
+  cover what pzero never hits: mono RMS comp, other dist modes, RONAN
+  (channel 16 speech), other osc/filter combinations.
+- The portable (non-x87) build's deviation is now purely precision-policy,
+  not logic — quantifying it vs the faithful build is optional polish.
+
+## HISTORICAL: state at end of session 4 (2026-06-04)
 
 Whole-song A/B on `pzero_new.v2m` (faithful build, `auto` = 235.3s):
 **max-abs 0.021984458, rms 0.000408** — magnitude UNCHANGED from session 3
@@ -181,14 +235,16 @@ Make the C++ V2 synth (`v2/synth_core.cpp`) reproduce the original assembly
 
 ## Branch / git state
 
-- Branch: **`v2-port-fidelity`**, PUSHED to `origin` (ssh remote,
-  github.com/spheenik/fr_public). 9 commits ahead of `master`; latest:
+- Branch: **`v2-port-fidelity`** (ssh remote, github.com/spheenik/fr_public).
+  Latest:
+  - `dd2cdca` session-5 fixes (fastatan double coeffs, a1gain assoc, comp
+    RMS) — **whole-song BIT-EXACT** (not yet pushed at time of writing)
   - `39d868c` openspec: archive fix-v2-boost-a0-dist-gain2 + spec sync
   - `2730c7e` session-4 fixes (boost a0/beta, dist fpatan gain2)
   - `297b66f` session-3 fixes (note-off over-release, fltbal branch)
   - earlier: noise-state/FM-phase, boost/chorus/reverb, dcf/moog/boost,
     x87-faithful freq path, harness + first fixes (see `git log`)
-- Working tree clean. Nothing committed to `master`.
+- Nothing committed to `master`.
 
 ## Build & test
 

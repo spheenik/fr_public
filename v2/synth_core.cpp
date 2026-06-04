@@ -531,10 +531,12 @@ typedef sF32 flcalc;
 
 // 2x-oversampled SVF step on register-width working state (mirrors V2LRC::step_2x /
 // the asm .process). Updates l,b in place; returns the high-pass output h.
-static inline flcalc lrc_step_2x(flcalc &l, flcalc &b, flcalc in, flcalc freq, flcalc reso)
+// dco = the denormal-prevention DC bias (fcdcoffset normally; 0 for era <v1,
+// where the 2000 syFltRender injects no bias -- DELTA.md delta 6).
+static inline flcalc lrc_step_2x(flcalc &l, flcalc &b, flcalc in, flcalc freq, flcalc reso, flcalc dco)
 {
-  in += fcdcoffset;
-  l += freq * b - fcdcoffset;
+  in += dco;
+  l += freq * b - dco;
   b += freq * (in - b*reso - l);
   l += freq * b;
   flcalc h = in - b*reso - l;
@@ -898,7 +900,12 @@ struct V2Osc
 
     cnt = 0;
     nf.init();
-    nseed = seeds[idx];
+    // era <v1 (fr08): the 2000 syOscInit seeds nseed from rdtsc; the C1 ground
+    // truth pins rdtsc=0, so the matched-seed A/B (DELTA.md D6) needs nseed=0
+    // here too. (At the first synthInit srcVersion is still MODERN; the era
+    // setter re-seeds those voices. keysync noteOns re-init and hit this path
+    // with the real srcVersion.)
+    nseed = instance->eraV0() ? 0u : seeds[idx];
     inst = instance;
   }
 
@@ -1686,6 +1693,8 @@ struct V2Flt
   {
     V2LRC flt;
     V2Moog m;
+    // era <v1 (fr08): the 2000 SVF render injects no denormal DC bias.
+    const flcalc dco = inst->eraV0() ? (flcalc)0 : (flcalc)fcdcoffset;
 
 #ifdef V2_VALIDATE
     sF32 fltlog_in = src[0]; // first input sample (before in-place overwrite)
@@ -1706,7 +1715,7 @@ struct V2Flt
       { flcalc l = lrc.l, b = lrc.b;
         for (sInt i=0; i < nsamples; i++)
         {
-          lrc_step_2x(l, b, src[i*step], cfreq, res);
+          lrc_step_2x(l, b, src[i*step], cfreq, res, dco);
           dest[i*step] = (sF32)l;
         }
         lrc.l = (sF32)l; lrc.b = (sF32)b; }
@@ -1717,7 +1726,7 @@ struct V2Flt
       { flcalc l = lrc.l, b = lrc.b;
         for (sInt i=0; i < nsamples; i++)
         {
-          lrc_step_2x(l, b, src[i*step], cfreq, res);
+          lrc_step_2x(l, b, src[i*step], cfreq, res, dco);
           dest[i*step] = (sF32)b;
         }
         lrc.l = (sF32)l; lrc.b = (sF32)b; }
@@ -1728,7 +1737,7 @@ struct V2Flt
       { flcalc l = lrc.l, b = lrc.b;
         for (sInt i=0; i < nsamples; i++)
         {
-          flcalc h = lrc_step_2x(l, b, src[i*step], cfreq, res);
+          flcalc h = lrc_step_2x(l, b, src[i*step], cfreq, res, dco);
           dest[i*step] = (sF32)h;
         }
         lrc.l = (sF32)l; lrc.b = (sF32)b; }
@@ -1739,7 +1748,7 @@ struct V2Flt
       { flcalc l = lrc.l, b = lrc.b;
         for (sInt i=0; i < nsamples; i++)
         {
-          flcalc h = lrc_step_2x(l, b, src[i*step], cfreq, res);
+          flcalc h = lrc_step_2x(l, b, src[i*step], cfreq, res, dco);
           dest[i*step] = (sF32)(l + h);
         }
         lrc.l = (sF32)l; lrc.b = (sF32)b; }
@@ -1756,7 +1765,7 @@ struct V2Flt
       { flcalc l = lrc.l, b = lrc.b;
         for (sInt i=0; i < nsamples; i++)
         {
-          flcalc h = lrc_step_2x(l, b, src[i*step], cfreq, res);
+          flcalc h = lrc_step_2x(l, b, src[i*step], cfreq, res, dco);
           dest[i*step] = (sF32)(h + b + l);
         }
         lrc.l = (sF32)l; lrc.b = (sF32)b; }
@@ -1844,14 +1853,18 @@ struct V2LFO
   sU32 nseed;   // random seed
   sU32 last;    // last counter value (for s&h transition)
 
-  void init(V2Instance *)
+  void init(V2Instance *instance)
   {
     cntr = last = 0;
+    // era <v1 (fr08): C1 pins rdtsc=0, so the S&H seed must be 0 for the
+    // matched-seed A/B (DELTA.md D6). (Re-seeded by the era setter for the
+    // synth-init-time voices, as srcVersion isn't set yet at first init.)
+    if (instance->eraV0()) { nseed = 0u; return; }
 #ifdef V2_VALIDATE
     // The asm (syLFOInit, synth.asm:1595) seeds the S&H generator with RDTSC —
     // the shipping synth is deliberately nondeterministic per run. For the
-    // bit-exact A/B the validation build pins the same constant in BOTH cores
-    // (build.sh rewrites the asm's rdtsc to this value in its assembled copy).
+    // bit-exact asm-vs-cpp A/B the validation build pins the same constant in
+    // BOTH cores (build.sh rewrites the asm's rdtsc to this value).
     nseed = 0x2BAD5EED;
 #else
     nseed = rand(); // not really, but close enough...
@@ -4340,6 +4353,17 @@ void __stdcall synthSetSourceVersion(void *pthis, int srcver)
     inst.SRcFrameSize = 256;
     inst.SRfciframe   = 1.0f / 256.0f;
   }
+  // Matched-seed A/B (DELTA.md D6): the C1 ground truth pins rdtsc=0, so all
+  // osc-noise / LFO-S&H seeds start at 0. The voices were init'd during
+  // synthInit (before srcVersion was set), so re-seed them here; keysync
+  // noteOns re-init through the eraV0() path and seed 0 on their own.
+  V2Synth *syn = (V2Synth *)pthis;
+  if (inst.eraV0())
+    for (sInt v=0; v < V2Synth::POLY; v++)
+    {
+      for (sInt o=0; o < syVV2::NOSC; o++) syn->voicesw[v].osc[o].nseed = 0u;
+      for (sInt l=0; l < syVV2::NLFO; l++) syn->voicesw[v].lfo[l].nseed = 0u;
+    }
 }
 
 void __stdcall synthGetPoly(void *pthis, void *dest)

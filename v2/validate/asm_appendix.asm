@@ -452,6 +452,255 @@ envdbg_snap:
     popad
     ret
 
+; --- freq-divergence ledger (validation; mirrors C++ freqlog_emit) -----------
+; sed-injected `call freqlog_emit_osc` after `fistp [ebp+syWOsc.freq]` in
+; syOscChgPitch, and `call freqlog_emit_lfo` after `fistp [ebp+syWLFO.freq]` in
+; syLFOSet. At each site ebp = the osc/LFO struct base, the freq is already stored,
+; and the FPU stack is empty. Each routine appends one 32-byte FreqLogRec (compat.h:
+; kind, offset, freq, pno, preround, r0,r1,r2) to freqlog_buf. Pure integer copy
+; under pushad/popad -- preserves all GP regs, touches no FPU state, writes only to
+; its own buffer, so it is inert w.r.t. the synth's DSP output. Drained per render
+; by _synthDebugGetFreqLog@8 (read-and-clear). `this` = SYN base (synth_noronan.asm).
+FREQLOG_CAP equ 16384
+
+freqlog_emit_osc:
+    pushad
+    mov   eax, [freqlog_count]
+    cmp   eax, FREQLOG_CAP
+    jae   .full
+    mov   edx, eax
+    shl   edx, 5                    ; record size = 32 bytes
+    lea   edi, [freqlog_buf + edx]
+    mov   dword [edi + 0], 0        ; kind = osc
+    mov   esi, ebp
+    sub   esi, [this]
+    mov   [edi + 4], esi            ; offset within instance
+    mov   ecx, [ebp + syWOsc.freq]
+    mov   [edi + 8], ecx            ; freq (post-fistp bits)
+    mov   ecx, [ebp + syWOsc.pitch]
+    mov   [edi + 12], ecx           ; pno = pitch bits (upstream input)
+    mov   ecx, [ebp + syWOsc.nffrq]
+    mov   [edi + 16], ecx           ; preround = noise-filter freq bits
+    mov   ecx, [ebp + syWOsc.cnt]
+    mov   [edi + 20], ecx           ; r0 = osc phase accumulator
+    mov   ecx, [ebp + syWOsc.mode]
+    mov   [edi + 24], ecx           ; r1 = osc mode
+    mov   ecx, [ebp + syWOsc.nfb]
+    mov   [edi + 28], ecx           ; r2 = noise-filter band state nf.b
+    inc   eax
+    mov   [freqlog_count], eax
+.full:
+    popad
+    ret
+
+freqlog_emit_lfo:
+    pushad
+    mov   eax, [freqlog_count]
+    cmp   eax, FREQLOG_CAP
+    jae   .full
+    mov   edx, eax
+    shl   edx, 5
+    lea   edi, [freqlog_buf + edx]
+    mov   dword [edi + 0], 1        ; kind = lfo
+    mov   esi, ebp
+    sub   esi, [this]
+    mov   [edi + 4], esi
+    mov   ecx, [ebp + syWLFO.freq]
+    mov   [edi + 8], ecx
+    xor   ecx, ecx
+    mov   [edi + 12], ecx
+    mov   [edi + 16], ecx
+    mov   [edi + 20], ecx
+    mov   [edi + 24], ecx
+    mov   [edi + 28], ecx
+    inc   eax
+    mov   [freqlog_count], eax
+.full:
+    popad
+    ret
+
+; --- control-source ledger emit (validation; mirrors C++ ctrllog_emit) ---------
+; sed-injected `call ctrllog_emit` in syV2Tick after the LFOs, where ebp = the voice
+; (syWV2) base and the FPU stack is empty. Captures the four accumulating modulation
+; sources (aenv/env2 out, lfo1/lfo2 out) for this voice this tick. kind=2. Same
+; pushad/popad integer-copy safety as freqlog_emit.
+ctrllog_emit:
+    pushad
+    mov   eax, [ctrllog_count]
+    cmp   eax, FREQLOG_CAP
+    jae   .full
+    mov   edx, eax
+    shl   edx, 5
+    lea   edi, [ctrllog_buf + edx]
+    mov   dword [edi + 0], 2        ; kind = voice control
+    mov   esi, ebp
+    sub   esi, [this]
+    mov   [edi + 4], esi            ; voice offset within instance
+    mov   ecx, [ebp + syWV2.aenv + syWEnv.out]
+    mov   [edi + 8], ecx            ; freq slot = aenv.out
+    mov   ecx, [ebp + syWV2.env2 + syWEnv.out]
+    mov   [edi + 12], ecx           ; pno slot  = env2.out
+    mov   ecx, [ebp + syWV2.lfo1 + syWLFO.out]
+    mov   [edi + 16], ecx           ; preround slot = lfo1.out
+    mov   ecx, [ebp + syWV2.lfo2 + syWLFO.out]
+    mov   [edi + 20], ecx           ; r0 slot = lfo2.out
+    mov   ecx, [ebp + syWV2.env2 + syWEnv.suf]
+    mov   [edi + 24], ecx           ; r1 slot = env2.suf bits
+    ; r2 = aenv.state | (env2.state << 8)
+    movzx ecx, byte [ebp + syWV2.aenv + syWEnv.state]
+    movzx esi, byte [ebp + syWV2.env2 + syWEnv.state]
+    shl   esi, 8
+    or    ecx, esi
+    mov   [edi + 28], ecx
+    inc   eax
+    mov   [ctrllog_count], eax
+.full:
+    popad
+    ret
+
+; --- filter ledger emit (validation; mirrors C++ V2Flt::render fltlog) ---
+; sed-injected `call fltlog_emit` in syFltRender after the regular-filter state store
+; (b then l), where ebp = the filter workspace base. Captures the post-block IIR
+; STATE (l, b) + coeffs (cfreq, res). kind=3. pushad/popad integer copy, no FPU touch
+; (the FPU still holds <f> <r> here, untouched).
+fltlog_emit:
+    pushad
+    mov   eax, [fltlog_count]
+    cmp   eax, FREQLOG_CAP
+    jae   .full
+    mov   edx, eax
+    shl   edx, 5
+    lea   edi, [fltlog_buf + edx]
+    mov   dword [edi + 0], 3        ; kind = filter
+    mov   ecx, ebp
+    sub   ecx, [this]
+    mov   [edi + 4], ecx            ; filter offset within instance
+    mov   ecx, [ebp + syWFlt.l]
+    mov   [edi + 8], ecx            ; lrc.l (post-block state)
+    mov   ecx, [ebp + syWFlt.b]
+    mov   [edi + 12], ecx           ; lrc.b
+    mov   ecx, [ebp + syWFlt.cfreq]
+    mov   [edi + 16], ecx           ; cfreq
+    mov   ecx, [ebp + syWFlt.res]
+    mov   [edi + 20], ecx           ; res
+    mov   ecx, [g_fltin]
+    mov   [edi + 24], ecx           ; r1 = first input sample (saved by fltlog_capin)
+    mov   ecx, [ebp + syWFlt.mode]
+    and   ecx, 7
+    mov   [edi + 28], ecx           ; r2 = filter mode
+    inc   eax
+    mov   [fltlog_count], eax
+.full:
+    popad
+    ret
+
+; --- osc-output ledger emit (validation; mirrors C++ V2Voice::render osclog) ---
+; sed-injected `call osclog_emit` in syV2Render after the three oscs render, where
+; ebp = the voice (syWV2) base and ebx = the voice's vcebuf. Captures the first three
+; osc-output samples (before any filter). kind=4.
+osclog_emit:
+    pushad
+    mov   eax, [osclog_count]
+    cmp   eax, FREQLOG_CAP
+    jae   .full
+    mov   edx, eax
+    shl   edx, 5
+    lea   edi, [osclog_buf + edx]
+    mov   dword [edi + 0], 4        ; kind = osc output
+    mov   ecx, ebp
+    sub   ecx, [this]
+    mov   [edi + 4], ecx            ; voice offset within instance
+    mov   ecx, [ebx]
+    mov   [edi + 8], ecx            ; voice[0]
+    mov   ecx, [ebx + 4]
+    mov   [edi + 12], ecx           ; voice[1]
+    mov   ecx, [ebx + 8]
+    mov   [edi + 16], ecx           ; voice[2]
+    mov   ecx, [ebp + syWV2.f1gain]
+    mov   [edi + 20], ecx           ; r0 = parallel combine gain 1
+    mov   ecx, [ebp + syWV2.f2gain]
+    mov   [edi + 24], ecx           ; r1 = parallel combine gain 2
+    mov   ecx, [ebp + syWV2.fmode]
+    mov   [edi + 28], ecx           ; r2 = filter routing mode
+    inc   eax
+    mov   [osclog_count], eax
+.full:
+    popad
+    ret
+
+global _synthDebugGetOscLog@8
+_synthDebugGetOscLog@8:
+    push  ebp
+    mov   ebp, esp
+    mov   eax, [ebp+8]
+    mov   dword [eax], osclog_buf
+    mov   eax, [ebp+12]
+    mov   ecx, [osclog_count]
+    mov   [eax], ecx
+    mov   dword [osclog_count], 0
+    pop   ebp
+    ret   8
+
+; sed-injected `call fltlog_capin` at the start of syFltRender's regular path, where
+; esi = the source buffer. Saves the first input sample for the end-of-block emit.
+; Preserves eax (= the mode jump index used right after) and all other regs.
+fltlog_capin:
+    push  eax
+    mov   eax, [esi]
+    mov   [g_fltin], eax
+    pop   eax
+    ret
+
+global _synthDebugGetFltLog@8
+_synthDebugGetFltLog@8:
+    push  ebp
+    mov   ebp, esp
+    mov   eax, [ebp+8]
+    mov   dword [eax], fltlog_buf
+    mov   eax, [ebp+12]
+    mov   ecx, [fltlog_count]
+    mov   [eax], ecx
+    mov   dword [fltlog_count], 0
+    pop   ebp
+    ret   8
+
+; --- control-source ledger accessor (read-and-clear) ---
+global _synthDebugGetCtrlLog@8
+_synthDebugGetCtrlLog@8:
+    push  ebp
+    mov   ebp, esp
+    mov   eax, [ebp+8]
+    mov   dword [eax], ctrllog_buf
+    mov   eax, [ebp+12]
+    mov   ecx, [ctrllog_count]
+    mov   [eax], ecx
+    mov   dword [ctrllog_count], 0
+    pop   ebp
+    ret   8
+
+; --- ledger accessor: returns buffer ptr + record count, then clears the count ---
+; Mirrors synthDebugGetFreqLog in synth_core.cpp. stdcall(recs**, count*) = 8 bytes.
+; The redef step renames _synthDebugGetFreqLog@8 -> synthDebugGetFreqLog.
+global _synthDebugGetFreqLog@8
+_synthDebugGetFreqLog@8:
+    push  ebp
+    mov   ebp, esp
+    mov   eax, [ebp+8]              ; recs**
+    mov   dword [eax], freqlog_buf
+    mov   eax, [ebp+12]            ; count*
+    mov   ecx, [freqlog_count]
+    mov   [eax], ecx
+    mov   dword [freqlog_count], 0 ; read-and-clear drain
+    pop   ebp
+    ret   8
+
+; --- knockout arm: no-op on the asm oracle (it is never overridden) -------------
+; Mirrors synthDebugArmFreqKnockout in synth_core.cpp so the shared player links
+; against harness_asm. stdcall(recs, count) = 8 bytes.
+global _synthDebugArmFreqKnockout@8
+_synthDebugArmFreqKnockout@8:
+    ret   8
+
 ; --- struct sizes / field offsets the harness needs (as data) ---
 section .data
 global v2x_size_syWOsc
@@ -511,3 +760,16 @@ chtap_boost:    resd 2*MAX_FRAME_SIZE
 chtap_dist:     resd 2*MAX_FRAME_SIZE
 chtap_chorus:   resd 2*MAX_FRAME_SIZE
 chtap_dcf2:     resd 2*MAX_FRAME_SIZE
+; freq-divergence ledger: FREQLOG_CAP records x 8 dwords (32 bytes), drained per
+; render. Mirrors g_freqlog_buf/g_freqlog_count in synth_core.cpp.
+freqlog_buf:    resd 8*FREQLOG_CAP
+freqlog_count:  resd 1
+; control-source ledger: voice modulation-source outputs, one record per voice/tick.
+ctrllog_buf:    resd 8*FREQLOG_CAP
+ctrllog_count:  resd 1
+; filter ledger: cutoff/reso/mode input per V2Flt::set call.
+fltlog_buf:     resd 8*FREQLOG_CAP
+fltlog_count:   resd 1
+g_fltin:        resd 1   ; first input sample of the current filter block
+osclog_buf:     resd 8*FREQLOG_CAP
+osclog_count:   resd 1

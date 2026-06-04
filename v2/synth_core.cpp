@@ -453,6 +453,32 @@ struct V2LRC
   }
 };
 
+// VCF block-working type. The asm (syFltRender) keeps the SVF state l,b (and coeffs
+// f,r) on the x87 stack across the WHOLE block -- 15-bit exponent, mantissa at PC=24
+// (24-bit). The port's V2LRC.l/b are 32-bit floats (8-bit exponent), stored back each
+// sample; the high-pass output h = in - b*reso - l is a cancellation, so the narrower
+// exponent of an intermediate diverges in HIGH/BAND serial chains. Mirror the asm:
+// keep the block state at register width (long double under PC=24 == the asm's
+// register), narrowing to 32-bit only on store between blocks (the asm's fstp dword).
+#ifdef V2_X87_FAITHFUL
+typedef long double flcalc;
+#else
+typedef sF32 flcalc;
+#endif
+
+// 2x-oversampled SVF step on register-width working state (mirrors V2LRC::step_2x /
+// the asm .process). Updates l,b in place; returns the high-pass output h.
+static inline flcalc lrc_step_2x(flcalc &l, flcalc &b, flcalc in, flcalc freq, flcalc reso)
+{
+  in += fcdcoffset;
+  l += freq * b - fcdcoffset;
+  b += freq * (in - b*reso - l);
+  l += freq * b;
+  flcalc h = in - b*reso - l;
+  b += freq * h;
+  return h;
+}
+
 // Moog filter state
 struct V2Moog
 {
@@ -632,6 +658,116 @@ struct V2Instance
   }
 };
 
+#ifdef V2_VALIDATE
+// --------------------------------------------------------------------------
+// Freq-divergence ledger (validation diagnostic, OpenSpec change
+// `characterize-v2-osc-freq-drift`). Osc/LFO phase are exact integer
+// accumulators; the only non-exact step is computing the integer `freq` via the
+// x87 fistp. We append one record per freq computation in BOTH cores and diff
+// them call-for-call: the diffuse whole-song residual becomes a finite list of
+// discrete ±1 tie-flip events. Mirrored in asm_appendix.asm. Drained per
+// synthRender. Pure bookkeeping into a separate buffer -- never touches a DSP
+// value or the FPU, so it is inert w.r.t. the audio output.
+static FreqLogRec g_freqlog_buf[FREQLOG_CAP];
+static unsigned   g_freqlog_count = 0;
+static char      *g_freqlog_synthbase = 0;  // set at render() entry; mirrors asm [this]
+
+// Control-source ledger: one record per voice per tick, capturing the four
+// accumulating modulation sources (aenv/env2 out, lfo1/lfo2 out) after they tick.
+// Diffing this pins WHICH source's accumulated state drifts (the linear pitch drift
+// feeds osc pitch -> washes out, and filter cutoff -> the audible residual).
+static FreqLogRec g_ctrllog_buf[FREQLOG_CAP];
+static unsigned   g_ctrllog_count = 0;
+
+// Filter ledger: one record per V2Flt::set, capturing the modulated cutoff/reso
+// INPUT and the computed coefficient OUTPUT, to localize a filter-path divergence
+// to upstream (modulated input differs) vs filter-internal (input matches, coeff/
+// state differs).
+static FreqLogRec g_fltlog_buf[FREQLOG_CAP];
+static unsigned   g_fltlog_count = 0;
+
+// Osc-output ledger: per-voice osc output (vcebuf[0..2], before any filter), to
+// settle whether a voice's osc output diverges (vs the filter/serial chain).
+static FreqLogRec g_osclog_buf[FREQLOG_CAP];
+static unsigned   g_osclog_count = 0;
+
+// Knockout: when armed, each freq computation is overridden with the asm core's
+// value, replayed in call order from a previously recorded asm ledger. If freq is
+// the sole source of the residual, the whole-song A/B then collapses to ~0.
+static const FreqLogRec *g_freqknockout    = 0;  // replay table (asm ledger), or 0
+static unsigned          g_freqknockout_n  = 0;
+static unsigned          g_freqknockout_pos = 0;
+
+static inline unsigned f2u(sF32 f) { union { sF32 f; unsigned u; } c; c.f = f; return c.u; }
+static inline sF32     u2f(unsigned u) { union { sF32 f; unsigned u; } c; c.u = u; return c.f; }
+
+// Record one freq computation. For osc, pitch_bits = the upstream pitch input and
+// nffrq_bits = the noise-filter freq computed alongside (the chgPitch output the
+// freq knockout originally ignored). For lfo, pitch_bits = the rate input, nffrq=0.
+static inline void freqlog_emit(unsigned kind, const void *obj, unsigned freq,
+                                unsigned pitch_bits, unsigned nffrq_bits,
+                                unsigned cnt, unsigned gain_bits, unsigned brpt)
+{
+  if (g_freqlog_count < FREQLOG_CAP)
+  {
+    FreqLogRec &r = g_freqlog_buf[g_freqlog_count++];
+    r.kind = kind;
+    r.offset = (unsigned)((char *)obj - g_freqlog_synthbase);
+    r.freq = freq;
+    r.pno = pitch_bits;     // upstream input (pitch for osc, rate for lfo)
+    r.preround = nffrq_bits; // noise-filter freq (osc only)
+    r.r0 = cnt;             // osc phase accumulator (block-start)
+    r.r1 = gain_bits;       // osc MODE (reused; gain confirmed exact)
+    r.r2 = brpt;            // osc noise-filter band state nf.b (reused; brpt exact)
+  }
+}
+
+// Record one voice's four modulation-source outputs (kind=2). Fields reused:
+// freq=aenv.out, pno=env2.out, preround=lfo1.out, r0=lfo2.out (all float bits).
+static inline void ctrllog_emit(const void *voiceobj, sF32 e0, sF32 e1, sF32 l0, sF32 l1,
+                                unsigned env2suf, unsigned states)
+{
+  if (g_ctrllog_count < FREQLOG_CAP)
+  {
+    FreqLogRec &r = g_ctrllog_buf[g_ctrllog_count++];
+    r.kind = 2;
+    r.offset = (unsigned)((char *)voiceobj - g_freqlog_synthbase);
+    r.freq = f2u(e0); r.pno = f2u(e1); r.preround = f2u(l0); r.r0 = f2u(l1);
+    r.r1 = env2suf;     // env2 sustain factor (suf) bits
+    r.r2 = states;      // aenv.state | (env2.state<<8)
+  }
+}
+
+// Knockout: replay the asm record for this call ordinal. Returns the asm freq, and
+// (osc only, nffrq_io != 0) also overrides *nffrq_io with the asm nffrq -- so the
+// WHOLE chgPitch float output is cross-fed, not just the integer freq. Aligned by
+// call ordinal; asserts kind only (raw offsets are not cross-core comparable).
+static inline sInt freqlog_knockout(unsigned kind, const void *obj, sInt freq, sF32 *nffrq_io)
+{
+  if (!g_freqknockout) return freq;
+  if (g_freqknockout_pos >= g_freqknockout_n)
+  {
+    // Past the recorded ledger (e.g. a slightly longer auto decay tail): fall
+    // through to the core's own values rather than aborting. Warn once.
+    static int warned = 0;
+    if (!warned) { warned = 1;
+      fprintf(stderr, "[FREQKNOCKOUT] past asm ledger at ordinal %u; using cpp values for the tail\n",
+              g_freqknockout_pos); }
+    return freq;
+  }
+  const FreqLogRec &r = g_freqknockout[g_freqknockout_pos++];
+  (void)obj;
+  if (r.kind != kind)
+  {
+    fprintf(stderr, "[FREQKNOCKOUT] kind desync at ordinal %u: asm=%u vs cpp=%u\n",
+            g_freqknockout_pos - 1, r.kind, kind);
+    abort();
+  }
+  if (nffrq_io) *nffrq_io = u2f(r.preround);
+  return (sInt)r.freq;
+}
+#endif // V2_VALIDATE
+
 // --------------------------------------------------------------------------
 // Oscillator
 // --------------------------------------------------------------------------
@@ -703,6 +839,10 @@ struct V2Osc
 #else
     nffrq = inst->SRfclinfreq * calcfreq((pitch + 64.0f) / 128.0f);
     freq = (sInt)(inst->SRfcobasefrq * pow(2.0f, (pitch + note - 60.0f) / 12.0f));
+#endif
+#ifdef V2_VALIDATE
+    freqlog_emit(0 /*osc*/, this, (unsigned)freq, f2u(pitch), f2u(nffrq), cnt, (unsigned)mode, f2u(nf.b));
+    freq = freqlog_knockout(0 /*osc*/, this, freq, &nffrq);
 #endif
   }
 
@@ -1322,6 +1462,10 @@ struct V2Flt
     V2LRC flt;
     V2Moog m;
 
+#ifdef V2_VALIDATE
+    sF32 fltlog_in = src[0]; // first input sample (before in-place overwrite)
+#endif
+
     switch (mode & 7)
     {
     case BYPASS:
@@ -1334,57 +1478,57 @@ struct V2Flt
 
     case LOW:
       COVER("VCF low");
-      flt = lrc;
-      for (sInt i=0; i < nsamples; i++)
-      {
-        flt.step_2x(src[i*step], cfreq, res);
-        dest[i*step] = flt.l;
-      }
-      lrc = flt;
+      { flcalc l = lrc.l, b = lrc.b;
+        for (sInt i=0; i < nsamples; i++)
+        {
+          lrc_step_2x(l, b, src[i*step], cfreq, res);
+          dest[i*step] = (sF32)l;
+        }
+        lrc.l = (sF32)l; lrc.b = (sF32)b; }
       break;
 
     case BAND:
       COVER("VCF band");
-      flt = lrc;
-      for (sInt i=0; i < nsamples; i++)
-      {
-        flt.step_2x(src[i*step], cfreq, res);
-        dest[i*step] = flt.b;
-      }
-      lrc = flt;
+      { flcalc l = lrc.l, b = lrc.b;
+        for (sInt i=0; i < nsamples; i++)
+        {
+          lrc_step_2x(l, b, src[i*step], cfreq, res);
+          dest[i*step] = (sF32)b;
+        }
+        lrc.l = (sF32)l; lrc.b = (sF32)b; }
       break;
 
     case HIGH:
       COVER("VCF high");
-      flt = lrc;
-      for (sInt i=0; i < nsamples; i++)
-      {
-        sF32 h = flt.step_2x(src[i*step], cfreq, res);
-        dest[i*step] = h;
-      }
-      lrc = flt;
+      { flcalc l = lrc.l, b = lrc.b;
+        for (sInt i=0; i < nsamples; i++)
+        {
+          flcalc h = lrc_step_2x(l, b, src[i*step], cfreq, res);
+          dest[i*step] = (sF32)h;
+        }
+        lrc.l = (sF32)l; lrc.b = (sF32)b; }
       break;
 
     case NOTCH:
       COVER("VCF notch");
-      flt = lrc;
-      for (sInt i=0; i < nsamples; i++)
-      {
-        sF32 h = flt.step_2x(src[i*step], cfreq, res);
-        dest[i*step] = flt.l + h;
-      }
-      lrc = flt;
+      { flcalc l = lrc.l, b = lrc.b;
+        for (sInt i=0; i < nsamples; i++)
+        {
+          flcalc h = lrc_step_2x(l, b, src[i*step], cfreq, res);
+          dest[i*step] = (sF32)(l + h);
+        }
+        lrc.l = (sF32)l; lrc.b = (sF32)b; }
       break;
 
     case ALL:
       COVER("VCF all");
-      flt = lrc;
-      for (sInt i=0; i < nsamples; i++)
-      {
-        sF32 h = flt.step_2x(src[i*step], cfreq, res);
-        dest[i*step] = flt.l + flt.b + h;
-      }
-      lrc = flt;
+      { flcalc l = lrc.l, b = lrc.b;
+        for (sInt i=0; i < nsamples; i++)
+        {
+          flcalc h = lrc_step_2x(l, b, src[i*step], cfreq, res);
+          dest[i*step] = (sF32)(l + b + h);
+        }
+        lrc.l = (sF32)l; lrc.b = (sF32)b; }
       break;
 
     case MOOGL:
@@ -1412,6 +1556,20 @@ struct V2Flt
       moog = m;
       break;
     }
+
+#ifdef V2_VALIDATE
+    // Post-block filter STATE (regular LRC modes), to localize the filter-internal
+    // divergence: freq=lrc.l, pno=lrc.b, preround=cfreq, r0=res.
+    if ((mode & 7) <= ALL && g_fltlog_count < FREQLOG_CAP) {  // bypass+LRC (asm regular path)
+      FreqLogRec &rec = g_fltlog_buf[g_fltlog_count++];
+      rec.kind = 3;
+      rec.offset = (unsigned)((char *)this - g_freqlog_synthbase);
+      rec.freq = f2u(lrc.l); rec.pno = f2u(lrc.b);
+      rec.preround = f2u(cfreq); rec.r0 = f2u(res);
+      rec.r1 = f2u(fltlog_in);          // first input sample
+      rec.r2 = (unsigned)(mode & 7);    // filter mode (0=byp,1=low,2=band,3=high,4=notch,5=all)
+    }
+#endif
 
     DEBUG_PLOT_STRIDED(this, dest, step, nsamples);
   }
@@ -1480,6 +1638,10 @@ struct V2LFO
     freq = v2_fistp(calcfreq(para->rate * 0.0078125f) * fc32bit * 0.5f);
 #else
     freq = (sInt)(0.5f * fc32bit * calcfreq(para->rate / 128.0f));
+#endif
+#ifdef V2_VALIDATE
+    freqlog_emit(1 /*lfo*/, this, (unsigned)freq, f2u(para->rate), 0, 0, 0, 0);
+    freq = freqlog_knockout(1 /*lfo*/, this, freq, 0);
 #endif
     cphase = ftou32(para->phase / 128.0f);
 
@@ -1931,6 +2093,11 @@ struct V2Voice
     for (sInt i=0; i < syVV2::NLFO; i++)
       lfo[i].tick();
 
+#ifdef V2_VALIDATE
+    ctrllog_emit(this, env[0].out, env[1].out, lfo[0].out, lfo[1].out,
+                 f2u(env[1].suf), (unsigned)env[0].state | ((unsigned)env[1].state << 8));
+#endif
+
     // volume ramping slope
     volramp = (env[0].out / 128.0f - curvol) * inst->SRfciframe;
     DEBUG_PLOT_VAL(&curvol, curvol);
@@ -1949,6 +2116,17 @@ struct V2Voice
     for (sInt i=0; i < syVV2::NOSC; i++)
       osc[i].render(voice, nsamples);
     VCETAP_SNAP(osc, voice, nsamples);
+#ifdef V2_VALIDATE
+    // Per-voice osc output (before any filter): freq=voice[0], pno=voice[1], preround=voice[2].
+    if (g_osclog_count < FREQLOG_CAP) {
+      FreqLogRec &r = g_osclog_buf[g_osclog_count++];
+      r.kind = 4;
+      r.offset = (unsigned)((char *)this - g_freqlog_synthbase);
+      r.freq = f2u(voice[0]); r.pno = f2u(nsamples > 1 ? voice[1] : 0.0f);
+      r.preround = f2u(nsamples > 2 ? voice[2] : 0.0f);
+      r.r0 = f2u(f1gain); r.r1 = f2u(f2gain); r.r2 = (unsigned)fmode; // parallel combine gains + routing
+    }
+#endif
 
     // voice buffer -> filters -> voice buffer
     switch (fmode)
@@ -2015,7 +2193,18 @@ struct V2Voice
 
     // filter balance for parallel
     sF32 x = (para->fltbal - 64.0f) / 64.0f;
-    if (x >= 0.0f)
+    // The asm (syV2Set, synth.asm:2468-2481) picks the branch on the sign of
+    // `fist(fltbal-64)` -- the ROUND-TO-NEAREST INTEGER -- not the float sign of x.
+    // For a modulated fltbal in (63.5, 64) the rounded int is 0, so the asm takes
+    // the >=0 branch and computes f1gain = 1-x > 1 (a slight BOOST of filter 1),
+    // where the float-sign test wrongly attenuated filter 2 instead. This was the
+    // last whole-song divergence source (via the parallel filter combine).
+#ifdef V2_X87_FAITHFUL
+    sInt xi = v2_fistp(para->fltbal - 64.0f);
+#else
+    sInt xi = (sInt)lrintf(para->fltbal - 64.0f);
+#endif
+    if (xi >= 0)
     {
       f2gain = 1.0f;
       f1gain = 1.0f - x;
@@ -3150,6 +3339,12 @@ struct V2Synth
   {
     sInt todo = nsamples;
 
+#ifdef V2_VALIDATE
+    // Reference base for freq-ledger object offsets; mirrors the asm `mov [this],ebp`
+    // at the top of synthRender (synth.asm:4773). Same logical base in both cores.
+    g_freqlog_synthbase = (char *)this;
+#endif
+
     // fragment loop - chunk everything into frames.
     while (todo)
     {
@@ -3331,7 +3526,16 @@ struct V2Synth
 
           V2Voice *voice = &voicesw[i];
           if (voice->note == cmd[0] && voice->gate)
+          {
             voice->noteOff();
+            // The asm (ProcessNoteOff, synth.asm:5398-5400) stops at the FIRST
+            // matching voice (`jmp .end`). The port looped over all POLY voices and
+            // released EVERY voice holding this note, so when a note is held on more
+            // than one voice of a channel (overlapping/retriggered notes) the port
+            // released the extra voice(s) the asm keeps sustaining -- a slowly
+            // accumulating whole-song divergence via the modulation envelopes.
+            break;
+          }
         }
         cmd += 2;
         break;
@@ -3838,6 +4042,50 @@ extern "C" void __stdcall synthDebugGetVceTap(void *pthis,
   *postDist = g_vcetap_dist;
   *postDcf  = g_vcetap_dcf;
   *framesize = s->instance.SRcFrameSize;
+}
+
+// Validation-only: hand the player the freq-divergence ledger accumulated during
+// the just-finished synthRender, then clear it (read-and-clear drain). Mirrored in
+// asm_appendix.asm. The record layout is FreqLogRec (compat.h).
+extern "C" void __stdcall synthDebugGetFreqLog(void **recs, int *count)
+{
+  *recs = g_freqlog_buf;
+  *count = (int)g_freqlog_count;
+  g_freqlog_count = 0;
+}
+
+// Validation-only: drain the control-source ledger (read-and-clear). Mirrored in asm.
+extern "C" void __stdcall synthDebugGetCtrlLog(void **recs, int *count)
+{
+  *recs = g_ctrllog_buf;
+  *count = (int)g_ctrllog_count;
+  g_ctrllog_count = 0;
+}
+
+// Validation-only: drain the filter ledger (read-and-clear). Mirrored in asm.
+extern "C" void __stdcall synthDebugGetFltLog(void **recs, int *count)
+{
+  *recs = g_fltlog_buf;
+  *count = (int)g_fltlog_count;
+  g_fltlog_count = 0;
+}
+
+// Validation-only: drain the osc-output ledger (read-and-clear). Mirrored in asm.
+extern "C" void __stdcall synthDebugGetOscLog(void **recs, int *count)
+{
+  *recs = g_osclog_buf;
+  *count = (int)g_osclog_count;
+  g_osclog_count = 0;
+}
+
+// Validation-only: arm the freq knockout. `recs`/`count` is an asm-recorded ledger
+// (FreqLogRec[]); subsequent freq computations replay these values by call ordinal.
+// Pass count=0 to disarm. The C++ core only; the asm oracle is never overridden.
+extern "C" void __stdcall synthDebugArmFreqKnockout(void *recs, int count)
+{
+  g_freqknockout     = (const FreqLogRec *)recs;
+  g_freqknockout_n   = (unsigned)count;
+  g_freqknockout_pos = 0;
 }
 
 // Validation-only: the dry mix (mixbuf before any global FX) -- bridges the clean

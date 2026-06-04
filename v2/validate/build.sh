@@ -130,6 +130,46 @@ sed -i \
   synth_noronan.asm
 n=$(grep -c 'call allocdbg_snap' synth_noronan.asm)
 [ "$n" -eq 1 ] || { echo "ERROR: allocdbg_snap injection count $n != 1" >&2; exit 1; }
+# Inject the freq-divergence ledger emit calls after the freq fistp stores in
+# syOscChgPitch / syLFOSet (ebp = osc/LFO base, freq stored, FPU empty). Routines
+# defined in asm_appendix.asm. Anchored on the unique freq-field fistp stores.
+sed -i \
+  -e 's/\(fistp[[:space:]][[:space:]]*dword \[ebp + syWOsc\.freq\]\)/\1\n\tcall freqlog_emit_osc/' \
+  -e 's/\(fistp[[:space:]][[:space:]]*dword \[ebp + syWLFO\.freq\]\)/\1\n\tcall freqlog_emit_lfo/' \
+  synth_noronan.asm
+n=$(grep -c 'call freqlog_emit_osc' synth_noronan.asm)
+[ "$n" -eq 1 ] || { echo "ERROR: freqlog_emit_osc injection count $n != 1" >&2; exit 1; }
+n=$(grep -c 'call freqlog_emit_lfo' synth_noronan.asm)
+[ "$n" -eq 1 ] || { echo "ERROR: freqlog_emit_lfo injection count $n != 1" >&2; exit 1; }
+# Inject the control-source ledger emit in syV2Tick, after both LFOs tick and ebp is
+# restored to the voice base (anchor: the unique `lea ebp,[ebp+0-syWV2.lfo2]`), FPU
+# empty. Routine defined in asm_appendix.asm.
+sed -i \
+  -e 's/\(lea[[:space:]][[:space:]]*ebp,[[:space:]]*\[ebp + 0 - syWV2\.lfo2\]\)/\1\n\tcall ctrllog_emit/' \
+  synth_noronan.asm
+n=$(grep -c 'call ctrllog_emit' synth_noronan.asm)
+[ "$n" -eq 1 ] || { echo "ERROR: ctrllog_emit injection count $n != 1" >&2; exit 1; }
+# Inject the filter ledger emit in syFltRender after the regular-filter state store
+# (b then l; ebp=filter base). Captures post-block IIR state. Routine in appendix.
+sed -i \
+  -e 's/\(fstp[[:space:]]*dword \[ebp + syWFlt\.l\]\)/\1\n\tcall fltlog_emit/' \
+  synth_noronan.asm
+# Inject the filter-input capture at the regular path start (esi=source), before the
+# coeff/state loads, so the first input sample is saved for the end-of-block emit.
+sed -i \
+  -e 's/\(fld[[:space:]][[:space:]]*dword \[ebp + syWFlt\.res\]\)/\tcall fltlog_capin\n\1/' \
+  synth_noronan.asm
+n=$(grep -c 'call fltlog_capin' synth_noronan.asm)
+[ "$n" -eq 1 ] || { echo "ERROR: fltlog_capin injection count $n != 1" >&2; exit 1; }
+# Inject the per-voice osc-output capture in syV2Render after the 3 oscs render
+# (ebp=voice base, ebx=vcebuf). Routine in appendix.
+sed -i \
+  -e 's/\(lea[[:space:]][[:space:]]*ebp,[[:space:]]*\[ebp - syWV2\.osc3 + 0\]\)/\1\n\tcall osclog_emit/' \
+  synth_noronan.asm
+n=$(grep -c 'call osclog_emit' synth_noronan.asm)
+[ "$n" -eq 1 ] || { echo "ERROR: osclog_emit injection count $n != 1" >&2; exit 1; }
+n=$(grep -c 'call fltlog_emit' synth_noronan.asm)
+[ "$n" -eq 1 ] || { echo "ERROR: fltlog_emit injection count $n != 1" >&2; exit 1; }
 # Append the validation appendix (exposes block routines / SR globals / offsets).
 # Concatenated onto the generated copy so the original synth.asm stays untouched.
 cat asm_appendix.asm >> synth_noronan.asm

@@ -2,6 +2,95 @@
 
 Start-here note for picking this up in a fresh session.
 
+## ⚡ LATEST STATE (2026-06-04, session 3) — READ THIS FIRST
+
+Whole-song A/B on `pzero_new.v2m` (faithful build, `auto` length = 235.3s):
+**max-abs 0.0218729973** (was 0.0491175018 at session start), rms 0.000411.
+**Bit-exact for the first ~17.8 s** (first divergence float #1567954, stereo sample
+783977 — exactly the ch7 noise/FM-channel onset). Older sections below are
+historical; trust this section where they conflict.
+
+### Fixes landed this session (in working tree, UNCOMMITTED — commit these!)
+
+1. **note-off over-release** (`synth_core.cpp`, MIDI note-off loop): the asm
+   (`ProcessNoteOff`, synth.asm:5398-5400) releases the FIRST voice matching
+   (chan, note, gate) then `jmp .end` — STOPS. The port released EVERY matching
+   voice, so overlapping/retriggered notes killed a voice the asm keeps sustaining
+   → its mod envelope drifted → filter cutoff → the dominant residual.
+   Fix: `break;` after the first `voice->noteOff()`. **0.0491 → 0.0219.**
+2. **parallel filter-balance branch** (`V2Voice::set`): the asm (syV2Set,
+   synth.asm:2468-2481) picks the f1gain/f2gain branch on the sign of
+   `fist(fltbal-64)` — the ROUND-TO-NEAREST INTEGER — not the float sign of x.
+   For modulated fltbal ∈ (63.5, 64) the asm takes the ≥0 branch → f1gain = 1-x
+   **> 1** (slight boost); the port attenuated f2gain instead. Fix: branch on
+   `v2_fistp(fltbal-64) >= 0` (portable: `lrintf`). **First divergence 7.6s → 17.8s;
+   the ENTIRE voice path became bit-exact** (see ledgers below).
+3. `flcalc` long-double VCF working state (V2LRC/lrc_step_2x + V2Flt::render):
+   **proven byte-identical no-op** (the x87-exponent hypothesis was falsified) —
+   keep as documentation-of-equivalence or revert freely.
+
+### Falsified hypotheses (do NOT re-chase these)
+
+- **"Residual = osc-freq phase drift" — DISPROVEN by knockout.** Cross-feeding the
+  asm's freq stream into the C++ (`FREQKNOCKOUT`) changed the output by ZERO (path
+  proven live via corrupt-ledger control). The osc pitch/freq drift was a SYMPTOM
+  of fix #1.
+- **"VCF state diverges from x87 exponent range" — falsified** (fix #3 = no-op).
+- The earlier "vce_flt diverges / filter-internal" reads were CONFOUNDED: offset
+  20312-style records in the fltlog are the **distortion's embedded V2Flt**
+  (V2Dist filter modes), processed AFTER the vce_flt tap; voice vcf pairs sit at
+  {base+168?, +56} with voice stride 660 (cpp). The real birth point was fix #2's
+  combine gains.
+
+### Where the remaining 0.0219 lives (current, precise)
+
+ALL per-voice ledgers are now **0 divergences over the whole song**: osc outputs +
+combine gains (osclog), env/lfo outs + suf + states (ctrllog), VCF input/state/
+coeffs/mode (fltlog), osc freq/pitch/nffrq/cnt/mode/gain/brpt/nfb (freqlog).
+BUSTAP chain (whole song): `vce_osc 0`, `vce_flt 0` →
+`vce_dist 3.8e-6` (seed: voice DIST; known fpatan-vs-libm-atan overdrive suspect)
+→ `chan 4.8e-7` → `ch_dcf1 4.8e-7` → `ch_comp 1.9e-6` → **`ch_boost 9.3e-4`** →
+**`ch_dist 6.1e-3`** → `ch_chorus/dcf2 6.1e-3` → premix 5.1e-4 → reverb 5.1e-4 →
+**`post_compr 2.0e-2`** (sum compressor amplifies) → final 0.0219.
+**NEXT:** (a) faithful x87 `fpatan` for the dist overdrive (the 3.8e-6 voice-dist
+seed AND the ch_dist jump — both dist stages); (b) re-examine ch_boost's 500x jump
+(boost was made bit-exact in isolation last session — in-context input is now
+~1.9e-6-noisy, so check whether boost amplifies or adds); start at the ch7 onset
+(17.8s), `CHANSOLO=7` isolates it.
+
+### Diagnostic infrastructure built this session (all V2_VALIDATE, reusable)
+
+Four per-event ledgers, 32-byte records (`FreqLogRec` in `compat.h`), drained per
+`synthRender` by the player, dumped under `FREQLOG=<prefix>`:
+- `<pfx>.freqlog` kind=0/1: osc/lfo freq computations — [kind, offset, freq, pitch,
+  nffrq, cnt, mode, nf.b] (+ `.freqmap` ordinal→sample sidecar).
+- `<pfx>.ctrllog` kind=2: per-voice-per-tick [aenv.out, env2.out, lfo1.out,
+  lfo2.out, env2.suf, states]. ⚠ C++ `V2Env::State` order is {OFF,RELEASE,ATTACK,
+  DECAY,SUSTAIN} ≠ asm {OFF,ATK,DEC,SUS,REL} — map before comparing.
+- `<pfx>.fltlog` kind=3: per-V2Flt-render [lrc.l, lrc.b, cfreq, res, first-input,
+  mode]. ⚠ includes the DIST's embedded filters, not just vcf1/vcf2.
+- `<pfx>.osclog` kind=4: per-voice [vcebuf[0..2], f1gain, f2gain, fmode].
+`FREQKNOCKOUT=<asm.freqlog>` replays asm freq+nffrq into the C++ core by call
+ordinal (kind-asserted; warns+falls-through past the tail). `freqdiff.py` diffs
+freqlogs. ⚠ raw `offset` fields are PER-CORE (asm/cpp struct sizes differ) — align
+by record ordinal (validated: counts equal + coeffs match), never by offset.
+⚠ asm-side emit routines live in `asm_appendix.asm`; injected by `build.sh` sed
+(anchors: osc/lfo freq fistp, syV2Tick post-LFO lea, syFltRender l-store + regular
+path start, syV2Render post-osc lea). Inert when env unset (integer-only, own
+buffers; verified byte-identical).
+
+### Operational gotchas
+
+- **The dumps are GB-scale; /tmp is a 31G tmpfs.** A full /tmp breaks EVERYTHING
+  cryptically (rtk hook SIGABRT/134, harness exit 1, empty logs, EDQUOT on write).
+  `rm /tmp/*.f32 /tmp/*.freqlog ...` between runs.
+- Renders: `./harness_{asm,cpp} ../v2m/pzero_new.v2m out.f32 auto` ≈ 30-60s each.
+- Uncommitted working-tree files: `synth_core.cpp` (2 fixes + flcalc + ledger
+  hooks), `compat.h` (FreqLogRec), `asm_appendix.asm`, `build.sh`,
+  `v2mplayer_port.cpp`, `freqdiff.py` (new). OpenSpec change
+  `characterize-v2-osc-freq-drift` documents the full investigation (KEY FINDINGS
+  1-7 in tasks.md).
+
 ## Goal & philosophy
 
 Make the C++ V2 synth (`v2/synth_core.cpp`) reproduce the original assembly

@@ -24,4 +24,22 @@
 #include <cstring> // memset used by the ported v2mplayer zero-fill
 #define vsprintf_s(buf, fmt, arg) vsnprintf((buf), sizeof(buf), (fmt), (arg))
 
+// --- Freq-divergence ledger (validation diagnostic) ------------------------
+// One fixed-width record per oscillator/LFO integer-`freq` computation (the only
+// non-exact step in the otherwise bit-exact integer phase path). See OpenSpec
+// change `characterize-v2-osc-freq-drift`. The C++ core (synth_core.cpp), the asm
+// appendix (asm_appendix.asm) and the player (v2mplayer_port.cpp) all agree on this
+// 32-byte layout. Records are drained per `synthRender` call (control rate ~344 Hz
+// per active voice, so the in-core ring only ever holds one chunk's worth).
+#define FREQLOG_CAP 16384   // max records buffered between drains (drain = per render)
+typedef struct
+{
+  unsigned kind;      // 0 = oscillator, 1 = LFO
+  unsigned offset;    // byte offset of the osc/LFO object within the V2Synth instance
+  unsigned freq;      // computed integer freq, as stored by the fistp (raw bits)
+  unsigned pno;       // pre-round float input bits (float-capture pass; else 0)
+  unsigned preround;  // pre-fistp product bits     (float-capture pass; else 0)
+  unsigned r0, r1, r2;
+} FreqLogRec;
+
 #endif // VALIDATE_COMPAT_H

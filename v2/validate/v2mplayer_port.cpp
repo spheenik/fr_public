@@ -38,6 +38,21 @@ extern "C" void __stdcall synthDebugGetPreMix(void *, float **, int *);
 // WHICH channel-FX block first diverges. Provided by both cores.
 extern "C" void __stdcall synthDebugGetChainTap(void *, float **, float **, float **,
                                                 float **, float **, float **, int *);
+// Freq-divergence ledger (gated by env FREQLOG=<prefix>): drain the per-render
+// ledger (read-and-clear) and append the FreqLogRec stream to <prefix>.freqlog,
+// plus a <prefix>.freqmap sidecar of (cumulative_record_count, sample_pos) per
+// render call for ordinal->time mapping. Provided by both cores.
+extern "C" void __stdcall synthDebugGetFreqLog(void **recs, int *count);
+// Control-source ledger (same FREQLOG=<prefix> gate): per-voice-per-tick modulation
+// source outputs, appended to <prefix>.ctrllog (record layout = FreqLogRec, kind=2).
+extern "C" void __stdcall synthDebugGetCtrlLog(void **recs, int *count);
+// Filter ledger (same FREQLOG gate): cutoff/reso/mode input per V2Flt::set, to
+// <prefix>.fltlog (record layout = FreqLogRec, kind=3).
+extern "C" void __stdcall synthDebugGetFltLog(void **recs, int *count);
+extern "C" void __stdcall synthDebugGetOscLog(void **recs, int *count); // per-voice osc output
+// Freq knockout (gated by env FREQKNOCKOUT=<asm.freqlog>): load a prior asm ledger
+// and replay its freq values into the C++ core by call ordinal. No-op on the asm core.
+extern "C" void __stdcall synthDebugArmFreqKnockout(void *recs, int count);
 static void bustap_dump(void *synth)
 {
   static FILE *fa1 = 0, *fa2 = 0, *fmx = 0;
@@ -107,6 +122,63 @@ static void bustap_dump(void *synth)
   float *pm; int n6 = 0;
   synthDebugGetPreMix(synth, &pm, &n6);    // stereo dry mix (pre-reverb)
   if (fpm) fwrite(pm, sizeof(float), 2*n6, fpm);
+}
+
+// Drain the freq-divergence ledger after a synthRender and append it to the dump
+// files. Called per render chunk with the chunk's starting sample position, so the
+// .freqmap sidecar lets the diff tool map a record ordinal back to a time.
+static void freqlog_dump(void *synth, unsigned cursmpl)
+{
+  static FILE *fl = 0, *fm = 0, *fc = 0, *ff = 0, *fo = 0;
+  static unsigned total = 0;
+  static int armed = -1;
+  if (armed < 0) {
+    const char *pfx = getenv("FREQLOG");
+    armed = pfx ? 1 : 0;
+    if (armed) {
+      char p[600];
+      snprintf(p, sizeof p, "%s.freqlog", pfx); fl = fopen(p, "wb");
+      snprintf(p, sizeof p, "%s.freqmap", pfx); fm = fopen(p, "wb");
+      snprintf(p, sizeof p, "%s.ctrllog", pfx); fc = fopen(p, "wb");
+      snprintf(p, sizeof p, "%s.fltlog",  pfx); ff = fopen(p, "wb");
+      snprintf(p, sizeof p, "%s.osclog",  pfx); fo = fopen(p, "wb");
+    }
+  }
+  if (!armed) return;  // rings self-cap at FREQLOG_CAP; no need to drain when idle
+  void *recs = 0; int n = 0;
+  synthDebugGetFreqLog(&recs, &n);
+  if (fl && n) fwrite(recs, sizeof(FreqLogRec), n, fl);
+  total += (unsigned)n;
+  if (fm) { unsigned rec[2] = { total, cursmpl }; fwrite(rec, sizeof(unsigned), 2, fm); }
+  void *crecs = 0; int cn = 0;
+  synthDebugGetCtrlLog(&crecs, &cn);
+  if (fc && cn) fwrite(crecs, sizeof(FreqLogRec), cn, fc);
+  void *frecs = 0; int fn = 0;
+  synthDebugGetFltLog(&frecs, &fn);
+  if (ff && fn) fwrite(frecs, sizeof(FreqLogRec), fn, ff);
+  void *orecs = 0; int on = 0;
+  synthDebugGetOscLog(&orecs, &on);
+  if (fo && on) fwrite(orecs, sizeof(FreqLogRec), on, fo);
+}
+
+// Arm the freq knockout once, before the first render: load a prior asm ledger and
+// replay its freq values into the C++ core by call ordinal. No-op on the asm core
+// (synthDebugArmFreqKnockout there is a stub).
+static void freqknockout_init(void *synth)
+{
+  static int done = 0;
+  if (done) return;
+  done = 1;
+  const char *path = getenv("FREQKNOCKOUT");
+  if (!path) return;
+  FILE *f = fopen(path, "rb");
+  if (!f) { fprintf(stderr, "[FREQKNOCKOUT] cannot open %s\n", path); return; }
+  fseek(f, 0, SEEK_END); long sz = ftell(f); fseek(f, 0, SEEK_SET);
+  void *buf = malloc(sz > 0 ? sz : 1);
+  size_t got = fread(buf, 1, sz, f); fclose(f);
+  int n = (int)(got / sizeof(FreqLogRec));
+  synthDebugArmFreqKnockout(buf, n);
+  fprintf(stderr, "[FREQKNOCKOUT] armed %d records from %s\n", n, path);
 }
 
 // Event trace (gated by env EVTRACE=1): decode the per-Tick MIDI buffer and print
@@ -499,6 +571,8 @@ void V2MPlayer::Render(sF32 *a_buffer, sU32 a_len, sBool a_add)
 {
 	if (!a_buffer) return;
 
+	freqknockout_init(m_synth);  // arm freq knockout (env FREQKNOCKOUT), once, pre-render
+
 	if (m_base.valid && m_state.state==PlayerState::PLAYING)
 	{
 		sU32 todo=a_len;
@@ -509,6 +583,7 @@ void V2MPlayer::Render(sF32 *a_buffer, sU32 a_len, sBool a_add)
 			{
 				synthRender(m_synth,a_buffer,torender,0,a_add);
 				bustap_dump(m_synth);
+				freqlog_dump(m_synth, m_state.cursmpl);
 				a_buffer+=2*torender;
 				todo-=torender;
 				m_state.smpldelta-=torender;

@@ -8,8 +8,9 @@ Whole-song A/B on `pzero_new.v2m` (faithful build, `auto` = 235.3s):
 **max-abs 0.021984458, rms 0.000408** — magnitude UNCHANGED from session 3
 (0.0218729973) despite three real 1-ULP set-path fixes landing (below). First
 divergence float #1568074 (was #1567954), still the 17.8s ch7 onset. The fixed
-seeds were genuine but NOT the dominant whole-song driver. OpenSpec change:
-`fix-v2-boost-a0-dist-gain2`.
+seeds were genuine but NOT the dominant whole-song driver. OpenSpec change
+(archived, full evidence chain in its design.md/tasks.md §5b):
+`openspec/changes/archive/2026-06-04-fix-v2-boost-a0-dist-gain2/`.
 
 ### Fixes landed this session (all verified bit-exact at their site)
 
@@ -180,12 +181,13 @@ Make the C++ V2 synth (`v2/synth_core.cpp`) reproduce the original assembly
 
 ## Branch / git state
 
-- Branch: **`v2-port-fidelity`** (5 commits ahead of `master`, not pushed).
-  - `5f604d6` validation harness + moog/distortion fixes
-  - `2936134` tri/saw oscillator fix
-  - `5468351` this handover note
-  - `c5d24c6` init zeroing fix (sizeof(this) -> sizeof(*this)); poison diagnostic
-  - `81754c4` bus-tap rig + compressor lookahead off-by-one fix
+- Branch: **`v2-port-fidelity`**, PUSHED to `origin` (ssh remote,
+  github.com/spheenik/fr_public). 9 commits ahead of `master`; latest:
+  - `39d868c` openspec: archive fix-v2-boost-a0-dist-gain2 + spec sync
+  - `2730c7e` session-4 fixes (boost a0/beta, dist fpatan gain2)
+  - `297b66f` session-3 fixes (note-off over-release, fltbal branch)
+  - earlier: noise-state/FM-phase, boost/chorus/reverb, dcf/moog/boost,
+    x87-faithful freq path, harness + first fixes (see `git log`)
 - Working tree clean. Nothing committed to `master`.
 
 ## Build & test

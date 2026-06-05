@@ -100,8 +100,8 @@ reading the disasm; F = aligned by fingerprint, body not yet line-diffed.
 | 0x40aef7 | syV2NoteOn/Tick (chgpitch) | verify | F |
 | 0x40af88 | channel set | verify | F |
 | 0x40b0c1 | chorus/flanger (fcmdlfomul fc1023) | no fc2/fcdcoffset vs 2004 | F |
-| 0x40b157 | reverb comb/allpass (fc2) | verify | F |
-| 0x40b317 | reverb/delay buffer render (sz586) | verify | F |
+| 0x40b157 | ModDel per-sample core (chorus+delay; triangle mod, lerp-frac mantissa trick — NOT an LCG) | identical; covered by c1_chorus_probe | C |
+| 0x40b317 | reverb render (combs+allpasses) | **line-diffed identical** (see reverb section) | C |
 | 0x40b574 | compressor render (fcgain fcgainh) | no fc64/fcdcoffset vs 2004 | F |
 | 0x40b67b | channel render wrapper | verify | F |
 | 0x40b7ba | mix / soundsystem render (sz598) | verify | F |
@@ -136,10 +136,27 @@ reading the disasm; F = aligned by fingerprint, body not yet line-diffed.
   (`pow2` loop, `cmp cl,6`) where decay = f(64/(time+1)); plus highcut damping
   (`·fci128`). Same Freeverb-style **4-comb + 2-allpass** structure as 2004
   (lencl0-3/lenal0-1/lencr0-3/lenar0-1), **gain table byte-identical**.
-- Diffusion @0x40b157: modulated/interpolated delay (own per-sample LCG → 0..1
-  fraction, two-tap lerp) — present in both eras.
+- ~~Diffusion @0x40b157: own per-sample LCG~~ **CORRECTED (line-diff)**:
+  0x40b157 is the shared **ModDel per-sample core** (called by the channel
+  chorus @0x40b287 AND the global delay @0x40b248 — NOT part of the reverb).
+  Its modulator is the deterministic triangle trick (`shl/sbb/xor` on
+  mcnt+mphase, == 2004 V2ModDel), and the `shr eax,9; or 0x3f800000` is the
+  **interpolation fraction** of the modulated offset built via the
+  mantissa-compose idiom (same idiom frandom uses — hence the misread). There
+  is NO LCG and NO diffusion stage anywhere in the 2000 reverb or delay.
 - Only param-level delta: **LowCut is v4-added** (absent in v0 fr08); conv2m
   default (0) handles it. No structural reverb divergence found.
+- **Render @0x40b317 fully line-diffed (2026-06-05)**: input bus @0x7147c4
+  (no dcoffset — gate already in place), per comb `lp = lpf + damp·((dv·gainc
+  ± in) − lpf)` with alternate phase (+,−,+,−) and the **persisted lowpass**
+  (`fst lpf` AND `fst line` — the 2004-asm behavior the port's PORT FIX
+  restored), classic 2-allpass tail, output `+=` into dest. **All 12 delay
+  lengths byte-match 2004**: L combs 1309/1635/1811/1926 (cmp 0x51d/0x663/
+  0x713/0x786), L allpass 220/74 (0xdc/0x4a); R combs 1327/1631/1833/1901
+  (0x52f/0x65f/0x729/0x76d), R allpass 205/77 (0xcd/0x4d). No lowcut hpf
+  stage (lowcut=0 makes the 2004 stage an exact no-op). ⇒ reverb render is
+  algorithm-identical; remaining tail suspects are only the FX-send glue
+  (@0x40b67b) and set-time params.
 
 ### Chorus / channel chain / player — line-diffed
 - `syChorusSet` @0x40b0c1: amount/feedback, delay L/R (`·fc1023`, ≤1023 samples),
@@ -328,6 +345,53 @@ volramp coeff (1/frame) and the env/LFO tick rate.
 isolation, so it is in how they COMBINE — the per-frame modulation matrix
 (LFO/env → osc pitch / filter cutoff routing) or the global reverb/delay tail.
 Next: tap the dry pre-reverb mix vs a 2000 tap, or probe the modmatrix.
+
+## ROOT CAUSE of the combine-residual (2026-06-05): frame TICK precedes SET
+
+The 12 s ch10-solo A/B (C1 vs port, V2_SRCVER=0) was driven to **rms 0.0118 →
+7.5e-5 (157×)**, whole-song 12 s window 0.0185 → 0.0142, by two findings:
+
+1. **No master DC filter in v0.** `fcdcflt` (126.0f) appears NOWHERE in the
+   2000 image, and the 2000 mix @0x40b7ba flows straight into the parametric
+   lc/hc EQ. The modern `dcf.renderStereo` on the global mix is a ~20 Hz
+   one-pole that phase-shifted the 88 Hz bass fundamental by +13°/−0.22 dB —
+   the *dominant* ch10 residual. Gated behind `!eraV0()` (synth_core.cpp,
+   global render). [bit-exact-gateable]
+
+2. **Frame control order: TICK then SET (the real root cause).** The 2000
+   render driver @0x40b9a8 loop does, per voice: `call 0x40ad06` (TICK =
+   env/lfo step + volramp) → test env1.state → `call 0x40af88` (SET = param
+   store + modmatrix). The port's `V2Synth::tick` did SET then TICK. So in
+   the 2000 synth **every tick steps the sub-objects with the PREVIOUS frame's
+   params**, and a modsource change (velocity at noteon, ctl, env/lfo-sourced
+   mods) reaches osc/flt/env one frame LATER than modern. For fr08 ch10
+   (env-gain = velocity-mod, base 0) this makes the **note's first frame
+   silent** in the 2000 binary (C1 tick log: out=0/st=1 at tick#1). Gated:
+   `V2Synth::tick` runs `voicesw[i].tick()` then `storeV2Values(i)` under
+   `eraV0()`. **Verified by the chanstream tap** (`CHANSTREAM=` port /
+   `C1_CHANSTREAM=` C1 solo probe, dumping chanbuf pre/post the channel-FX
+   chain): ch10 PRE and POST are now **max|d| = 0** (bit-exact voice sum).
+   The voice-tick code itself (`V2Voice::tick`) already matched 0x40ad06
+   (env1,env2,lfo1,lfo2,volramp) instruction-for-instruction; only the outer
+   order was wrong. [bit-exact-gateable; confirmed against disasm, not curve-fit]
+
+Modern path untouched: kkrieger6 / debris_ost asm-vs-cpp A/B still max|d| = 0.
+
+**New residual frontier = ch5 (chords/polyphony), not ch10.** In the 12 s
+window only ch5 + ch10 are active; ch10 is now bit-exact dry. ch5 (3-voice
+chord, modnum=6: TWO LFO mods src=10/11 + CC2 src=2, vs ch10's single LFO mod)
+is **bit-exact for 7.38 s then diverges at a held-chord re-trigger** event
+(`b5 01 7f 02 00` CC1=127/CC2=0 then `95 48 50 4d 50 50 50` noteons of the
+already-held 72/77/80). NOT voice-steal (only 3 allocs all at t=0). Dry ch5
+residual rms 0.0137 ⇒ voice/channel chain, not the reverb tail. Suspects, in
+order: (a) the v0 retrigger/note-off→on path (gate-clear @0x40af70 ordering
+vs the new tick-then-set), (b) multi-LFO/CC2 modmatrix routing, (c) which
+held voice drives the CHANNEL mods (`voicemap[chan]`). Next probe: the same
+chanstream tap on ch5, aligned, to split voice-sum vs channel-FX at 7.38 s.
+
+(The reverb/delay tail itself is now exonerated as a *primary* suspect: the
+ch10 full-vs-dry split showed muting reverb+delay drops ch10 rms 7.5e-5 → the
+tail contributes, but ch5's dry divergence dwarfs it.)
 
 ## Final delta list (legacy step-B summary, superseded by the table above)
 

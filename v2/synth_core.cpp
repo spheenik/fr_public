@@ -4205,6 +4205,28 @@ private:
       if (chanmap[i] < 0)
         continue;
 
+      if (instance.eraV0())
+      {
+        // era <v1 (fr08): the 2000 frame tick runs the voice TICK (env/lfo
+        // step + volramp, @0x40ad06) BEFORE the voice SET (@0x40af88). So a
+        // tick always steps with the params of the PREVIOUS set, and
+        // modsource changes (velocity at noteon! ctls, env/lfo-sourced mods)
+        // reach the sub-objects one frame later than modern. Concretely:
+        // fr08 ch10 has env-gain = velocity-mod with base 0, so the first
+        // tick after noteon still sees gain 0 -> the note's first frame is
+        // SILENT in the 2000 binary (proven by the C1 tick log: out=0 st=1
+        // at tick#1, out=2*a*g at tick#2). Modern order made it ramp one
+        // frame early -- this was the residual voice-level delta. (DELTA.md)
+        voicesw[i].tick();
+        if (voicesw[i].env[0].state == V2Env::OFF)
+        {
+          chanmap[i] = -1;
+          continue;
+        }
+        storeV2Values(i);
+        continue;
+      }
+
       storeV2Values(i);
       voicesw[i].tick();
 
@@ -4301,18 +4323,68 @@ private:
       if (chan == CHANS-1)
         ronanCBProcess(&ronan, &instance.chanbuf[0].l, nsamples);
 
-      chansw[chan].process(nsamples); 
+#ifdef V2_VALIDATE
+      // CHANSTREAM=<prefix>[:<chan>] (default chan 10): append this channel's
+      // chanbuf BEFORE (.pre) and AFTER (.post) the channel FX chain as a
+      // contiguous stereo f32 stream. The C1-side counterpart hooks the
+      // matching 2000 call (chan render @0x40b5cc, chanbuf @0x7153c4), so the
+      // two streams are byte-comparable and split voice-glue vs channel-FX
+      // divergence.
+      static FILE *cs_pre = 0, *cs_post = 0; static int cs_ch = -2;
+      if (cs_ch == -2) {
+        const char *e = getenv("CHANSTREAM");
+        cs_ch = -1;
+        if (e) {
+          char pfx[512]; int ch = 10;
+          const char *c = strrchr(e, ':');
+          if (c) { snprintf(pfx, sizeof pfx, "%.*s", (int)(c-e), e); ch = atoi(c+1); }
+          else    snprintf(pfx, sizeof pfx, "%s", e);
+          char p[600];
+          snprintf(p, sizeof p, "%s.pre",  pfx); cs_pre  = fopen(p, "wb");
+          snprintf(p, sizeof p, "%s.post", pfx); cs_post = fopen(p, "wb");
+          cs_ch = ch;
+        }
+      }
+      if (chan == cs_ch && cs_pre)
+        fwrite(instance.chanbuf, sizeof(StereoSample), nsamples, cs_pre);
+#endif
+
+      chansw[chan].process(nsamples);
+
+#ifdef V2_VALIDATE
+      if (chan == cs_ch && cs_post)
+        fwrite(instance.chanbuf, sizeof(StereoSample), nsamples, cs_post);
+#endif
     }
 
     // global filters
     StereoSample *mix = instance.mixbuf;
     MIXTAP_SNAP(premix, mix, nsamples);   // dry channel sum, before any global FX
+#ifdef V2_VALIDATE
+    // A/B localization knobs: mute a global FX return on BOTH sides (C1 probe
+    // nops the matching call @0x40bae8 / @0x40baf3) to attribute residual to
+    // the reverb/delay vs the dry path.
+    static const bool muteRvb = getenv("MUTEREVERB") != 0;
+    static const bool muteDel = getenv("MUTEDELAY") != 0;
+    if (!muteRvb)
+#endif
     reverb.render(mix, nsamples);
     MIXTAP_SNAP(reverb, mix, nsamples);
+#ifdef V2_VALIDATE
+    if (!muteDel)
+#endif
     delay.renderAux2Main(mix, nsamples);
     MIXTAP_SNAP(delay, mix, nsamples);
-    dcf.renderStereo(mix, mix, nsamples);
-    MIXTAP_SNAP(dcf, mix, nsamples);
+    // era <v1 (fr08): NO master DC filter -- fcdcflt (126.0f) appears nowhere
+    // in the 2000 image, and the 2000 mix @0x40b7ba goes straight to the
+    // parametric lc/hc EQ. The ungated ~20Hz one-pole here was the dominant
+    // ch10 residual: +13deg phase / -0.22dB at the 88Hz bass fundamental
+    // (the per-harmonic phase fit is exactly 1-126/SR). (DELTA.md)
+    if (!instance.eraV0())
+    {
+      dcf.renderStereo(mix, mix, nsamples);
+      MIXTAP_SNAP(dcf, mix, nsamples);
+    }
 
     // low cut/high cut
     sF32 lcf = lcfreq, hcf = hcfreq;

@@ -127,11 +127,30 @@
       256-frame — biggest single fix, 0.0375→0.0185), overdrive native `fpatan`,
       chorus/reverb/delay/mix `fcdcoffset` (feedback combs accumulate it),
       channel chain = dist+chorus only (no dcf1/comp/boost/dcf2), per-voice dcf
-      absent, LFO sine `fsin` + S&H MSVC-LCG, seed-zeroing. **Remaining ch10
-      residual 0.0118**: every component is bit-exact in isolation, so it is in
-      how they COMBINE — the per-frame modulation matrix (LFO/env → cutoff/pitch
-      routing) or the global reverb/delay tail. Next: dry-pre-reverb tap or a
-      modmatrix probe. Speech: RONAN off both sides (silent), not yet isolated.
+      absent, LFO sine `fsin` + S&H MSVC-LCG, seed-zeroing.
+      → **COMBINE-RESIDUAL ROOT CAUSE FOUND (2026-06-05): frame TICK precedes
+      SET.** ch10-solo A/B driven **0.0118 → 7.5e-5 (157×)** by two gated fixes
+      (DELTA.md "ROOT CAUSE of the combine-residual"):
+      (1) **No master DC filter in v0** — `fcdcflt`/126.0f absent from the 2000
+          image; `dcf.renderStereo` on the global mix gated off under `!eraV0()`
+          (it was phase-shifting the bass fundamental +13°). 
+      (2) **Frame control order = TICK then SET** — the 2000 driver @0x40b9a8
+          does `call 0x40ad06`(tick) → state check → `call 0x40af88`(set) per
+          voice; the port did set-then-tick, so mods reached sub-objects a frame
+          early (note's first frame should be SILENT under velocity-gated env).
+          `V2Synth::tick` now ticks-then-sets under `eraV0()`. Confirmed against
+          the disasm driver (not curve-fit) AND by the new **chanstream tap**
+          (`CHANSTREAM=`/`C1_CHANSTREAM=`, chanbuf pre/post channel-FX): ch10
+          PRE+POST now **max|d|=0**. Modern A/B (kkrieger6/debris_ost) still
+          max|d|=0 (no regression). New tap/mute knobs added: `MUTEREVERB`/
+          `MUTEDELAY` (+ `C1_MUTE_REVERB`/`C1_MUTE_DELAY`), `CHANSTREAM`,
+          `C1_CHANSTREAM`/`C1_TICKLOG` in the solo probe.
+      **New frontier = ch5 (chords/polyphony), NOT ch10.** ch5 (3-voice chord,
+      modnum=6 = 2 LFO mods + CC2) is bit-exact dry for 7.38 s then diverges at
+      a held-chord re-trigger (`b5 01 7f 02 00` + `95 …` re-noteons). Dry rms
+      0.0137 ⇒ voice/channel chain, not reverb tail. Suspects: v0 retrigger
+      note-off→on gate-clear (@0x40af70) order, multi-LFO/CC2 modmatrix, or
+      `voicemap[chan]` channel-mod source. Speech: RONAN off both sides.
 - [x] 3.5 Line-diff the fingerprint-only (F) functions. → **DONE.** Filter:
       non-moog SVF bit-identical @44100, moog modes 6/7 absent. Reverb: shared
       Freeverb topology + identical gain table. Chorus: shared modulated delay.

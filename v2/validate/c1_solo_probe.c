@@ -90,8 +90,8 @@ int g_cs_ch = -1;
 FILE *g_cs_pre = 0, *g_cs_post = 0;
 const uint32_t g_chanfx_real = VA_CHAN_FX;
 
-extern FILE *g_fvc; extern int g_vce_chan; extern uint32_t g_vce_count;
-extern float g_acc_chan[640];
+extern FILE *g_fvc, *g_fvcp; extern int g_vce_chan; extern uint32_t g_vce_count;
+extern float g_acc_chan[640], g_acc_chanpost[640];
 
 static void cs_dump(uint32_t ebp, FILE *f)
 {
@@ -115,7 +115,18 @@ void chanstream_pre(uint32_t ebp)
     }
   }
 }
-void chanstream_post(uint32_t ebp) { cs_dump(ebp, g_cs_post); }
+void chanstream_post(uint32_t ebp)
+{
+  cs_dump(ebp, g_cs_post);
+  if (g_fvcp) {
+    int ch = (int)((ebp - VA_CHANOBJ0) / 0x78u);
+    if (ch == g_vce_chan) {
+      const float *cb = (const float*)(uintptr_t)VA_CHANBUF;
+      uint32_t n = g_vce_count; if (n > 320) n = 320;
+      for (uint32_t i = 0; i < 2*n; i++) g_acc_chanpost[i] += cb[i];
+    }
+  }
+}
 
 // Tick log (C1_TICKLOG=1): trace the first voice ticks -- env1 out/state,
 // volramp cur/ramp -- to pin the control-timeline question empirically.
@@ -162,7 +173,8 @@ uint32_t g_vce_pos = 0, g_vce_count = 0;
 FILE *g_fvo = 0, *g_fvf = 0, *g_fvd = 0;
 float g_acc_osc[320], g_acc_flt[320], g_acc_dist[320];
 float g_acc_chan[640]; // stereo, post-volramp voice sum (pre channel-FX)
-FILE *g_fvc = 0;
+float g_acc_chanpost[640]; // stereo, chanbuf AFTER channel-FX chain
+FILE *g_fvc = 0, *g_fvcp = 0;
 int g_vce_chan = -1;   // channel to tap chanbuf for (= solo channel)
 const uint32_t g_chunk_real = VA_CHUNK_REAL;
 const uint32_t g_v2r_real   = VA_V2R_REAL;
@@ -184,6 +196,7 @@ void chunk_pre(uint32_t cnt)
   uint32_t n = cnt > 320 ? 320 : cnt;
   memset(g_acc_osc, 0, n*4); memset(g_acc_flt, 0, n*4); memset(g_acc_dist, 0, n*4);
   memset(g_acc_chan, 0, n*8);
+  memset(g_acc_chanpost, 0, n*8);
 }
 void chunk_post(void)
 {
@@ -193,6 +206,7 @@ void chunk_post(void)
     if (g_fvf) fwrite(g_acc_flt,  4, n, g_fvf);
     if (g_fvd) fwrite(g_acc_dist, 4, n, g_fvd);
     if (g_fvc) fwrite(g_acc_chan, 8, n, g_fvc);
+    if (g_fvcp) fwrite(g_acc_chanpost, 8, n, g_fvcp);
   }
   g_vce_pos += g_vce_count;
 }
@@ -342,6 +356,7 @@ int main(int argc, char **argv)
     snprintf(p,sizeof p,"%s.flt",pfx);  g_fvf=fopen(p,"wb");
     snprintf(p,sizeof p,"%s.dist",pfx); g_fvd=fopen(p,"wb");
     snprintf(p,sizeof p,"%s.chan",pfx); g_fvc=fopen(p,"wb");
+    snprintf(p,sizeof p,"%s.chanpost",pfx); g_fvcp=fopen(p,"wb");
     g_vce_chan = g_solo;  // tap chanbuf for the soloed channel
     // verify opcodes before patching
     uint8_t *c1=(uint8_t*)(uintptr_t)VA_CHUNK_CALL, *c2=(uint8_t*)(uintptr_t)VA_V2R_CALL;

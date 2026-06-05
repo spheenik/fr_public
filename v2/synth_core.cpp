@@ -3942,6 +3942,32 @@ struct V2Synth
             StereoSample scratch[V2Instance::MAX_FRAME_SIZE];
             memset(scratch, 0, tickd * sizeof(StereoSample));
             voicesw[usevoice].render(scratch, tickd);
+
+            // ...and the CHANNEL FX (one level up). Both eras SKIP silent
+            // channels in the render loop, but when this note-on ACTIVATES a
+            // previously-silent channel mid-frame (npoly==0), the 2000 renders
+            // that channel's FX over the partial remainder too (@0x40b5cc runs
+            // per sub-frame chunk), advancing the chorus mod-counter /
+            // write-pointer; the port (=2004) defers the whole channel to the
+            // next boundary, leaving the chorus `tickd` samples out of phase.
+            // The voice's output is muted (curvol=0) so the FX input is ~0 --
+            // only the chorus STATE advance matters. (DELTA.md ch5)
+            if (npoly == 0)
+            {
+              V2Chan &cw = chansw[chan];
+              StereoSample z[V2Instance::MAX_FRAME_SIZE];
+              memset(z, 0, tickd * sizeof(StereoSample));
+              if (cw.fxr == V2Chan::FXR_DIST_THEN_CHORUS)
+              {
+                cw.dist.renderStereo(z, z, tickd);
+                cw.chorus.renderChan(z, tickd);
+              }
+              else
+              {
+                cw.chorus.renderChan(z, tickd);
+                cw.dist.renderStereo(z, z, tickd);
+              }
+            }
           }
 
           cmd += 2;
@@ -4383,6 +4409,14 @@ private:
 #ifdef V2_VALIDATE
       if (chan == cs_ch && cs_post)
         fwrite(instance.chanbuf, sizeof(StereoSample), nsamples, cs_post);
+      // VCEFRAME .chanpost: this channel's chanbuf AFTER its FX chain (chorus
+      // included), accumulated for the per-frame post-channel-FX comparison.
+      static FILE *cp = 0; static int cp_arm = -1, cp_ch = -1;
+      if (cp_arm < 0) { const char *p=getenv("VCEFRAME"); cp_arm=p?1:0;
+        const char *c=getenv("VCEFRAME_CH"); cp_ch=c?atoi(c):-1;
+        if (cp_arm){ char b[600]; snprintf(b,sizeof b,"%s.chanpost",p); cp=fopen(b,"wb"); } }
+      if (cp && chan == cp_ch)
+        fwrite(instance.chanbuf, sizeof(StereoSample), nsamples, cp);
 #endif
     }
 

@@ -116,20 +116,22 @@
       Modern path untouched throughout; flag-unset A/B asm-vs-cpp still max-abs 0.
 - [~] 3.4 Validate per D6: matched-seed A/B (same fixed rdtsc stub both sides)
       gated core vs C1 → expect whole-signal max-abs 0, noise included.
-      → **Two layers PROVEN bit-exact; residual localized to the synth voice
-      chain.** (a) `c1_osc_probe`: eraV0 oscillator vs the genuine 2000
-      syOscSet/syOscRender — all 7 cases **max|d|=0**. (b) `c1_timing_probe`:
-      detours the 2000 sequencer tick, logs per-event (sample-pos, MIDI bytes)
-      vs `v2mplayer_port` EVTRACE_RAW — over 204 events both the **event sample
-      positions AND the MIDI bytes are identical (0 mismatches)**. So the PLAYER
-      and CONVERSION layers are bit-exact (the earlier "growing-lag" reading was
-      a cross-correlation artifact of phase-shifted quasi-periodic signals, NOT
-      a timing drift). Whole-song A/B vs C1: rms 0.0588 (modern) → 0.0483
-      (gated); the residual is now **100% synth-internal, downstream of the
-      bit-exact oscillator** — voice chain (filter/dist/dcf/channel-mix),
-      env/volramp, or per-note osc phase. Next: a voice-buffer tap (vcebuf
-      @0x714fc4 / chan buf @0x7153c4) with the same probe methodology. Speech:
-      RONAN off both sides (silent), not yet isolated.
+      → **EIGHT components PROVEN bit-exact vs the 2000 binary; whole-song rms
+      0.0588 → 0.0185 (3.2×).** Probes (call the genuine 2000 routine in the
+      mapped image, byte-compare vs a `synthTest*V0` export), all max|d|=0:
+      player timing + conversion/MIDI (`c1_timing_probe`), oscillator
+      (`c1_osc_probe`), SVF filter (`c1_flt_probe`), distortion
+      (`c1_dist_probe`), chorus (`c1_chorus_probe`), envelope (`c1_env_probe`),
+      LFO (`c1_lfo_probe`). Deltas found+gated along the way (see DELTA.md
+      table): the **LFO 0.5 frame-compensation** (half-speed LFO under the
+      256-frame — biggest single fix, 0.0375→0.0185), overdrive native `fpatan`,
+      chorus/reverb/delay/mix `fcdcoffset` (feedback combs accumulate it),
+      channel chain = dist+chorus only (no dcf1/comp/boost/dcf2), per-voice dcf
+      absent, LFO sine `fsin` + S&H MSVC-LCG, seed-zeroing. **Remaining ch10
+      residual 0.0118**: every component is bit-exact in isolation, so it is in
+      how they COMBINE — the per-frame modulation matrix (LFO/env → cutoff/pitch
+      routing) or the global reverb/delay tail. Next: dry-pre-reverb tap or a
+      modmatrix probe. Speech: RONAN off both sides (silent), not yet isolated.
 - [x] 3.5 Line-diff the fingerprint-only (F) functions. → **DONE.** Filter:
       non-moog SVF bit-identical @44100, moog modes 6/7 absent. Reverb: shared
       Freeverb topology + identical gain table. Chorus: shared modulated delay.

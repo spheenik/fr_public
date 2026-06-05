@@ -281,7 +281,55 @@ quasi-periodic signals correlate at a drifting lag even when perfectly aligned
 in time.) Next probe: a voice-buffer tap (vcebuf @0x714fc4 / channel buf
 @0x7153c4) to localize within the voice chain, same methodology.
 
-## Final delta list (era-gate surface for v0 fr08)
+## IMPLEMENTED era-gate surface + component probes (phase D, current)
+
+The era gate (`eraV0()` = srcVersion<1, `eraEnvOld()` = srcVersion<2) now covers
+the full delta inventory below, each VERIFIED bit-exact against the genuine 2000
+routine called in the mapped image (`validate/c1_*_probe`, `synthTest*V0`
+exports). Whole-song A/B vs C1 (converted fr08, V2_SRCVER=0): rms **0.0588
+(modern) → 0.0185** (3.2×). ch10-solo 0.0457 → 0.0118.
+
+**Root cause: control frame 256 vs 128** (`synthSetSourceVersion` sets
+`SRcFrameSize=256`/`SRfciframe=1/256` under eraEnvOld). From it follow the
+volramp coeff (1/frame) and the env/LFO tick rate.
+
+**Components proven bit-exact (max|d|=0) vs the 2000 binary:**
+| component | probe | 2000 routine |
+|-----------|-------|--------------|
+| player timing | c1_timing_probe | seq tick @0x4095a5 |
+| conversion/MIDI | c1_timing_probe | (conv_v2m stream) |
+| oscillator (5 modes) | c1_osc_probe | syOscSet/Render @0x40a4d2/0x40a585 |
+| SVF filter (6 modes) | c1_flt_probe | syFltSet/Render @0x40a837/0x40a880 |
+| distortion (5 modes) | c1_dist_probe | syDistSet/Render @0x40aa93/0x40ab71 |
+| chorus | c1_chorus_probe | @0x40b0c1/0x40b268 |
+| envelope | c1_env_probe | syEnvSet/Tick @0x40a6d1/0x40a759 |
+| LFO (6 modes) | c1_lfo_probe | syLFOSet/Tick @0x40a945/0x40a9c2 |
+
+**Era deltas gated (synth_core.cpp, all behind eraV0/eraEnvOld):**
+1. Envelope: attackmul −11/128; dec/rel calcfreq ×10 + the 256-frame tick.
+2. Osc: 4×-oversampled box renderer (NOT 2004 analytic convolution) + freq const
+   `fcoscbase_v0`=3185015.0; sine native `fsin`; noise MSVC-LCG `·214013+2531011`
+   (16-bit float gen) + the exact 2000 LRC recurrence.
+3. **LFO freq**: drop the modern `·0.5` (a 128-frame compensation) — under the
+   256-frame eraV0 the LFO ran at half speed (the largest single residual: this
+   one fix took whole-song 0.0375→0.0185). Plus LFO sine `fsin`, S&H MSVC-LCG.
+4. Param/volramp smoother = 1/frame (follows from frame=256).
+5. **No `fcdcoffset` anywhere** — gated in: SVF render, voice→channel mix,
+   channel chorus input, global delay + reverb input. (The chorus/reverb/delay
+   feedback combs ACCUMULATE the bias, so these mattered.)
+6. Per-voice DC filter ABSENT (2000 voice = osc→flt→dist→volramp, no dcf).
+7. Channel chain = **dist + chorus only** (2000 @0x40b5cc) — dcf1/comp/boost/dcf2
+   are all post-2000; gated off.
+8. Osc overdrive uses native `fpatan` (not fastatan polynomial).
+9. Seed-zeroing (osc-noise + LFO-S&H seeds → 0) to match C1's rdtsc=0.
+10. VCF moog modes 6,7 absent (fr08 can't select them).
+
+**Remaining residual (ch10 0.0118):** all 8 components are bit-exact in
+isolation, so it is in how they COMBINE — the per-frame modulation matrix
+(LFO/env → osc pitch / filter cutoff routing) or the global reverb/delay tail.
+Next: tap the dry pre-reverb mix vs a 2000 tap, or probe the modmatrix.
+
+## Final delta list (legacy step-B summary, superseded by the table above)
 
 Faithful-modern by default; gate these to period behavior when source v2m is v0:
 1. Envelope: attackmul −11/128 (not −12/128); dec/rel via calcfreq ×10 (calcfreq2

@@ -2819,7 +2819,7 @@ struct V2ModDel
     {
       StereoSample x;
 
-      sF32 in = inst->aux2buf[i] + fcdcoffset;
+      sF32 in = inst->aux2buf[i] + (inst->eraV0() ? 0.0f : fcdcoffset); // era: no DC bias
       processSample(&x, in, in, 0.0f);
 
       dest[i].l += x.l;
@@ -3268,7 +3268,7 @@ struct V2Reverb
 
     for (sInt i=0; i < nsamples; i++)
     {
-      sF32 in = inbuf[i] * gainin + fcdcoffset;
+      sF32 in = inbuf[i] * gainin + (inst->eraV0() ? 0.0f : fcdcoffset); // era: no DC bias
 
       for (sInt ch=0; ch < 2; ch++)
       {
@@ -3420,20 +3420,26 @@ struct V2Chan
     accumulate(chan, inst->auxabuf, nsamples, aarcv);
     accumulate(chan, inst->auxbbuf, nsamples, abrcv);
 
-    // Filters
-    dcf1.renderStereo(chan, chan, nsamples);
-    CHTAP_SNAP(dcf1, chan, nsamples);
-    DEBUG_PLOT_STEREO(&dcf1, chan, nsamples);
-    comp.render(chan, nsamples);
-    CHTAP_SNAP(comp, chan, nsamples);
-    boost.render(chan, nsamples);
-    CHTAP_SNAP(boost, chan, nsamples);
+    // Filters. era <v1 (fr08): the 2000 channel chain @0x40b5cc is ONLY
+    // dist + chorus (in fxr order) -- the dcf1/comp/boost/dcf2 stages are all
+    // post-2000 (comp/boost are v1 features with no code in v0; dcf1/dcf2 are
+    // added DC filters). Gate them out so the chain matches. (DELTA.md)
+    const bool v0 = inst->eraV0();
+    if (!v0)
+    {
+      dcf1.renderStereo(chan, chan, nsamples);
+      CHTAP_SNAP(dcf1, chan, nsamples);
+      DEBUG_PLOT_STEREO(&dcf1, chan, nsamples);
+      comp.render(chan, nsamples);
+      CHTAP_SNAP(comp, chan, nsamples);
+      boost.render(chan, nsamples);
+      CHTAP_SNAP(boost, chan, nsamples);
+    }
     if (fxr == FXR_DIST_THEN_CHORUS)
     {
       dist.renderStereo(chan, chan, nsamples);
       CHTAP_SNAP(dist, chan, nsamples);
-      dcf2.renderStereo(chan, chan, nsamples);
-      CHTAP_SNAP(dcf2, chan, nsamples);
+      if (!v0) { dcf2.renderStereo(chan, chan, nsamples); CHTAP_SNAP(dcf2, chan, nsamples); }
       chorus.renderChan(chan, nsamples);
       CHTAP_SNAP(chorus, chan, nsamples);
     }
@@ -3443,8 +3449,7 @@ struct V2Chan
       CHTAP_SNAP(chorus, chan, nsamples);
       dist.renderStereo(chan, chan, nsamples);
       CHTAP_SNAP(dist, chan, nsamples);
-      dcf2.renderStereo(chan, chan, nsamples);
-      CHTAP_SNAP(dcf2, chan, nsamples);
+      if (!v0) { dcf2.renderStereo(chan, chan, nsamples); CHTAP_SNAP(dcf2, chan, nsamples); }
     }
 
     // Aux1/2 send (mono)

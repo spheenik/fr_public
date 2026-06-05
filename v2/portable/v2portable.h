@@ -1,0 +1,95 @@
+// v2portable -- portable, version-native V2M player.
+//
+// Self-contained: no dependency on the rest of v2/ (the x87-faithful lab) or
+// any library beyond the C/C++ standard library. Plays v2m files of any
+// format version (0..6) natively: the loader detects the version by
+// structural fingerprint, canonicalizes the patch data, and the engine
+// switches its behavior deltas on the source version (see v2eras.h).
+//
+// Determinism contract: same file + same seed + same compiled version range
+// => bit-identical float32 output on every supported host. All
+// transcendentals are project-owned (v2math.h); ordinary arithmetic is
+// strict IEEE-754 binary32, matching the original x87 PC=24 rounding
+// op-for-op. Build policy: NO -ffast-math, -ffp-contract=off, subnormals
+// must not be flushed (open() verifies this at runtime).
+//
+// Compile-time configuration:
+//   V2_VER_MIN / V2_VER_MAX  -- supported format version range (default 0/6).
+//                               Out-of-range gates constant-fold away.
+//   V2_RONAN                 -- 1 (default): include the Ronan speech synth.
+//
+// OpenSpec change: portable-version-native-player.
+
+#ifndef V2PORTABLE_H_
+#define V2PORTABLE_H_
+
+#include <stddef.h>
+#include <stdint.h>
+
+#ifndef V2_VER_MIN
+#define V2_VER_MIN 0
+#endif
+#ifndef V2_VER_MAX
+#define V2_VER_MAX 6
+#endif
+#ifndef V2_RONAN
+#define V2_RONAN 1
+#endif
+
+namespace v2portable {
+
+enum class Result {
+  OK = 0,
+  BadFile,            // structurally invalid / not a v2m
+  UnsupportedVersion, // detected version outside [V2_VER_MIN, V2_VER_MAX]
+  FpEnvBroken,        // FP environment flushes subnormals (e.g. -ffast-math host)
+};
+
+struct PlayerImpl; // engine + sequencer + loaded song (one heap allocation)
+
+class Player {
+public:
+  Player();
+  ~Player();
+  Player(const Player &) = delete;
+  Player &operator=(const Player &) = delete;
+
+  // Detect the file's format version, canonicalize, and prepare for playback.
+  // The data is copied; the caller's buffer may be freed after open().
+  // forceBehaviorVersion: -1 = use the detected version (normal operation);
+  // 0..6 = research override, render with that version's engine semantics
+  // (must lie within the compiled version range).
+  Result open(const void *v2mData, size_t length, int forceBehaviorVersion = -1);
+
+  // Format version (0..6) detected by the last successful open().
+  // After a failed open() with UnsupportedVersion, still reports what was
+  // detected. -1 if nothing has been detected yet.
+  int fileVersion() const;
+
+  // Start playback at the given song position. Implies a full synth reset.
+  void play(uint32_t fromMs = 0);
+  bool isPlaying() const; // false once the song end was reached (tail may ring)
+
+  // Pull-render interleaved stereo float32 at 44100 Hz. Renders silence when
+  // nothing is open/playing. Never allocates. Chunk-size invariant: any
+  // partition of N frames produces identical bits.
+  void render(float *stereoInterleaved, uint32_t frames);
+
+  // Replaces the historical rdtsc noise/S&H/dist seeding. Default 0 -- the
+  // deterministic reference (matches the pinned-rdtsc C1 oracle convention).
+  // Takes effect at the next play().
+  void setSeed(uint64_t seed);
+
+private:
+  PlayerImpl *impl_;
+  int detectedVersion_;
+};
+
+// One-time FP environment self-check (also run by open()): verifies subnormal
+// arithmetic is not flushed to zero. Exposed for embedders that want to fail
+// fast at startup.
+bool fpEnvironmentOk();
+
+} // namespace v2portable
+
+#endif // V2PORTABLE_H_

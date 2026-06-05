@@ -1,0 +1,5 @@
+*.o
+*.a
+v2play
+test/mathcheck
+test/twoinstance

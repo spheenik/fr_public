@@ -1,0 +1,38 @@
+#!/bin/sh
+# Build the portable V2M player: static lib + CLI render driver + tests.
+#
+# FP policy (portable-determinism spec): strict IEEE float32 in the audio
+# path. -ffp-contract=off forbids FMA contraction (an FMA skips one rounding
+# step -> different bits); fast-math is never used (it would also enable
+# FTZ/DAZ via crtfastmath, breaking the v0 subnormal-envelope semantics).
+# Optimization level must not change output bits (checked by test driver).
+set -e
+cd "$(dirname "$0")"
+
+CXX="${CXX:-g++}"
+OPT="${OPT:--O2}"
+FPFLAGS="-ffp-contract=off"
+CXXFLAGS="${OPT} ${FPFLAGS} -Wall -Wextra -std=c++17 ${CXXFLAGS_EXTRA}"
+
+# version-range / feature configuration, e.g.:
+#   V2DEFS="-DV2_VER_MIN=6 -DV2_VER_MAX=6 -DV2_RONAN=0" ./build.sh
+V2DEFS="${V2DEFS:-}"
+
+echo "[1/3] lib"
+for src in v2player v2core v2seq; do
+  $CXX $CXXFLAGS $V2DEFS -c $src.cpp -o $src.o
+done
+ar rcs libv2portable.a v2player.o v2core.o v2seq.o
+
+echo "[2/3] cli driver"
+$CXX $CXXFLAGS $V2DEFS v2play.cpp libv2portable.a -o v2play
+
+echo "[3/3] tests"
+if [ -f test/mathcheck.cpp ]; then
+  $CXX $CXXFLAGS $V2DEFS test/mathcheck.cpp -o test/mathcheck
+fi
+if [ -f test/twoinstance.cpp ]; then
+  $CXX $CXXFLAGS $V2DEFS test/twoinstance.cpp libv2portable.a -o test/twoinstance
+fi
+
+echo "done: libv2portable.a v2play"

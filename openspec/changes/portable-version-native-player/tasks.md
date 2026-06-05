@@ -42,6 +42,11 @@
       via temporary direct-v6 parse) and record per-file rms/max|d| vs
       `harness_asm` renders; investigate anything above the ε expectation
       before proceeding
+      (DONE: all 16 v6 files max|d| = 0 at 5s vs harness_cpp [proven
+      bit-exact to the asm]; 60s spot checks: 2x exact, kkrieger6 1 ULP.
+      Fixes en route: fastsin/fastatan per-op PC=24 rounding, V2Rand
+      replacing libc rand() in LFO S&H, fistp 0x80000000 out-of-range.
+      Formal per-file table vs harness_asm directly = task 8.1/8.4.)
 - [x] 3.5 Chunk-size invariance test (4096 vs 333 frames, bit-identical)
       and render-before-open / two-instance safety checks
 
@@ -98,11 +103,20 @@
 - [ ] 8.4 Publish the ε table (per-file rms/max|d| for v0 and v6 paths) in
       the change docs / portable README
 
-## 9. Documentation
+## 9. CLI tools (user-added scope)
 
-- [ ] 9.1 `v2/portable/README.md`: API usage, build flags policy
+- [x] 9.0a `v2dump <in.v2m> <out.{wav,f32}> [secs] [chunk]`: offline render
+      tool (renamed from the scaffold's v2play); .wav = IEEE-float32 RIFF
+      with payload bit-identical to the raw .f32 compare format; mp3 out of
+      scope by design (external encoder)
+- [ ] 9.0b live playback tool `v2play` against ALSA (separate CLI linking
+      libasound; libv2portable stays dependency-free) -- DEFERRED by user
+
+## 10. Documentation
+
+- [ ] 10.1 `v2/portable/README.md`: API usage, build flags policy
       (fast-math/FTZ prohibition), version support matrix, evidence
       legend for the era table, ε table, and the follow-up era-evidence
       research track (period-binary hunts) as future work
-- [ ] 9.2 Update DELTA.md / handover cross-references to point at
+- [ ] 10.2 Update DELTA.md / handover cross-references to point at
       `v2eras.h` as the living threshold ledger

@@ -1,5 +1,18 @@
 # fr-08 (year-2000) synth vs final (2004) V2 — behavioral delta
 
+> **STATUS 2026-06-05: fr08 full mix is BIT-EXACT for the first 66.8 s** vs the
+> genuine year-2000 binary (C1 ground truth), incl. reverb/delay tail (verified
+> over 5.29 M samples, 0 diverging). At **t=66.80 s (stereo 2,945,793)** a
+> divergence appears. Localized: **ch3 (pgm 5) oscillator** — at the 66.8 s note
+> the pulse osc is phase-INVERTED (C1 steady +1.758, port steady −1.758,
+> opposite pulse segments; ch4/ch12 bit-exact). So an osc-phase difference at the
+> new note, most likely a voice-allocation/keysync delta (which slot the note
+> lands in → different leftover osc cnt for a non-resync osc). ~10 min of further
+> song sections remain to sweep. Modern (≥v1) stays bit-exact vs the 2004 asm.
+> Fixes landed: gated **sub-frame rendering** (the 4 sub-frame facets), **reverb
+> gain PC=64 precision** + SetSourceVersion-before-SetGlobals reorder, **reverb
+> low-cut gate**.
+
 Working catalogue for the `characterize-fr08-synth-delta` change. Evidence
 source: the depacked v1.01 image (`unpacked.bin`, md5
 `2c1ebe7efac1000ba9a4be86f38c55b1`, minimal-PE memory image at base

@@ -1981,15 +1981,30 @@ struct V2LFO
     case SIN:
       COVER("LFO sin");
       v = utof23(cntr);
-      v = fastsinrc(v * fc2pi) * 0.5f + 0.5f;
+      // era <v1 (fr08): native fsin (syLFO sine @0x40aa28), not the fastsinrc
+      // polynomial (same delta as the osc sine; DELTA.md delta 3).
+      v = (inst->eraV0() ? v2_sin(v * fc2pi) : fastsinrc(v * fc2pi)) * 0.5f + 0.5f;
       break;
 
     case S_H:
       COVER("LFO sample+hold");
-      if (cntr < last)
-        nseed = urandom(&nseed);
-      last = cntr;
-      v = utof23(nseed);
+      if (inst->eraV0())
+      {
+        // era <v1: S&H uses the MSVC LCG (214013/2531011) and the low-16-bit
+        // value extraction (nseed&0xffff)<<16 (syLFO S&H @0x40aa37), not the
+        // 2004 urandom + full-nseed.
+        if (cntr < last)
+          nseed = nseed * 214013 + 2531011;
+        last = cntr;
+        v = utof23((nseed & 0xffff) << 16);
+      }
+      else
+      {
+        if (cntr < last)
+          nseed = urandom(&nseed);
+        last = cntr;
+        v = utof23(nseed);
+      }
       break;
     }
 
@@ -4452,6 +4467,24 @@ extern "C" void synthTestEnvV0(const float *p, const unsigned char *gates,
   para.sr = p[3]; para.rr = p[4]; para.vol = p[5];
   e.set(&para);
   for (int i=0; i < n; i++) { e.tick(gates[i] != 0); out[i] = e.out; }
+}
+
+// Validation: run the eraV0 LFO (V2LFO) vs the genuine 2000 syLFOInit/Set/KeyOn/
+// Tick (@0x40a935/0x40a945/0x40a98b/0x40a9c2) in c1_lfo_probe. p = 2000 syVLFO
+// {mode,sync,eg,rate,phase,amp} (NO pol). out[i] = LFO output per tick.
+extern "C" void synthTestLfoV0(const float *p, float *out, int n)
+{
+  static V2Instance inst;
+  inst.calcNewSampleRate(44100);
+  inst.srcVersion = 0; // eraV0 (256-frame LFO rate; nseed=0)
+  static V2LFO lfo;
+  lfo.init(&inst);
+  syVLFO para;
+  para.mode = p[0]; para.sync = p[1]; para.egmode = p[2]; para.rate = p[3];
+  para.phase = p[4]; para.pol = 0.0f; para.amp = p[5];
+  lfo.set(&para);
+  lfo.keyOn();
+  for (int i=0; i < n; i++) { lfo.tick(); out[i] = lfo.out; }
 }
 #endif
 

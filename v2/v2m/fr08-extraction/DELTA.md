@@ -450,15 +450,31 @@ debris_ost/josie/pzero) still max|d|=0.
 - **ch5 (chords + chorus fb): DRY bit-exact.** Its only remaining full-mix
   contribution (~2.3e-5 rms) is the global reverb/delay TAIL (deterministic send
   of the bit-exact dry signal; tap aux1/aux2→reverb for the last 1-ULP).
-- **ch10 (mono, no chorus): DRY ~8.25e-4 max** (localized, much smaller rms).
-  Voice + channel FX bit-exact; residual is downstream (master lc/hc EQ / mix /
-  sum-compressor) and value-specific to ch10 (ch5 is bit-exact through the same
-  global stages). Separate 1-ULP-class item.
+- **ch10 (mono, no chorus): DRY ~8.25e-4 max** — a single-frame transient that
+  decays to bit-exact by ~6.5 s. FULLY PINNED via the premix tap
+  (`C1_VCEFRAME .premix` detour @0x40baf8 vs port `VCEFRAME .premix`): the EQ
+  input (channel sum) is bit-exact at every frame EXCEPT frame 445 (sample
+  113920), where it differs by a **constant ratio 0.984375 = 63/64** (std
+  5.8e-8) = a single-frame `chgain` error. Cause: a ctl7 CC ramps 63→64 at
+  113920 (`ba 07 40`), which is frame-ALIGNED (113920 = 445·256); ch10 has a
+  ctl7→chanvol mod (src=7→dest 59). The 2000 fires the frame-445 control-tick at
+  the **trailing edge** (end of the render filling frame 444, BEFORE the
+  boundary-aligned ProcessMIDI updates ctl7 → uses ctl7=63); the port (=2004) at
+  the **leading edge** (start of the next render, AFTER ProcessMIDI → ctl7=64).
+  One frame later both agree, so only frame 445 differs; the one-frame chgain
+  step kicks the global lc/hc low-cut EQ, which rings down. **4th facet of the
+  same sub-frame era-difference** (after within-frame TICK-before-SET; mid-frame
+  note-on voice phase; mid-frame channel-activation chorus phase). Clean fix for
+  all four = gated sub-frame rendering under eraV0 (decouple the trailing-edge
+  pre-event control-tick from the per-chunk render). Deferred: a single-frame,
+  decaying, −90 dB transient; a targeted eager-tick risks the frame-aligned
+  note-on case, so it waits for the full refactor.
 
 The per-voice and per-channel DSP is now bit-exact for both channels; the
 sub-0.2 % that remains is in the GLOBAL mix/FX tail. Next-pass tooling:
-`C1_VCEFRAME`/`C1_VCE_LO/HI` (post-osc/flt/dist + post-volramp + post-channel-FX)
-and port `VCEFRAME`/`VCEFRAME_CH`; `MUTEREVERB`/`MUTEDELAY` to split dry vs tail.
+`C1_VCEFRAME`/`C1_VCE_LO/HI` (post-osc/flt/dist + post-volramp + post-channel-FX
++ premix/EQ-input) and port `VCEFRAME`/`VCEFRAME_CH`; `MUTEREVERB`/`MUTEDELAY` to
+split dry vs tail.
 
 (The reverb/delay tail is exonerated as a *primary* suspect: ch10 full-vs-dry
 split showed the tail contributes only at the 7.5e-5 level.)

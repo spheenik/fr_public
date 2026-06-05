@@ -4514,6 +4514,9 @@ private:
         if(vc) fwrite(g_chantap, sizeof(StereoSample),nsamples,vc);     // pre channel-FX (absolute)
         if(vcp) fwrite(g_chanposttap, sizeof(StereoSample),nsamples,vcp); // post channel-FX (absolute, VCEFRAME_CH)
       }
+      static FILE *vpm=0;
+      if (armed && !vpm) { const char *p=getenv("VCEFRAME"); char b[600]; snprintf(b,sizeof b,"%s.premix",p); vpm=fopen(b,"wb"); }
+      if (vpm) fwrite(g_mixtap_premix, sizeof(StereoSample), nsamples, vpm); // EQ input (dry channel sum, absolute)
     }
 #endif
   }

@@ -56,6 +56,8 @@ static const uint32_t RDTSC_SITES[] = { 0x40a494u, 0x40a93eu, 0x40aa6cu };
 #define VA_V2R_REAL    0x40ad4du
 #define VA_POSTOSC     0x40ad76u   // `8d ad 4c ff ff ff` lea ebp,[ebp-0xb4]
 #define VA_POSTFLT     0x40adfeu   // `be c4 4f 71 00` mov esi,0x714fc4
+#define VA_PREMIX_EQ   0x40baf8u   // `8b 0d 94 6f 72 00` mov ecx,[0x726f94] = lc/hc EQ entry
+#define VA_OUTPTR      0x726f98u   // ptr to current output chunk (= channel sum pre-EQ)
 
 int g_solo = -1; // channel to keep (0..15); -1 = all
 
@@ -174,7 +176,8 @@ FILE *g_fvo = 0, *g_fvf = 0, *g_fvd = 0;
 float g_acc_osc[320], g_acc_flt[320], g_acc_dist[320];
 float g_acc_chan[640]; // stereo, post-volramp voice sum (pre channel-FX)
 float g_acc_chanpost[640]; // stereo, chanbuf AFTER channel-FX chain
-FILE *g_fvc = 0, *g_fvcp = 0;
+float g_acc_premix[640];   // stereo, channel-sum output buffer just before the lc/hc EQ
+FILE *g_fvc = 0, *g_fvcp = 0, *g_fvpm = 0;
 int g_vce_chan = -1;   // channel to tap chanbuf for (= solo channel)
 const uint32_t g_chunk_real = VA_CHUNK_REAL;
 const uint32_t g_v2r_real   = VA_V2R_REAL;
@@ -189,6 +192,21 @@ static void vce_snap(float *acc)
 void snap_osc(void)  { vce_snap(g_acc_osc); }
 void snap_flt(void)  { vce_snap(g_acc_flt); }
 void snap_dist(void) { vce_snap(g_acc_dist); }
+void snap_premix(void)
+{
+  if (!g_fvpm) return;
+  const float *ob = *(const float**)(uintptr_t)VA_OUTPTR; // current chunk output (channel sum, pre-EQ)
+  uint32_t n = g_vce_count; if (n > 320) n = 320;
+  for (uint32_t i = 0; i < 2*n; i++) g_acc_premix[i] += ob[i];
+}
+extern void hook_premix(void);
+__asm__(
+  ".text\n.globl hook_premix\nhook_premix:\n"
+  "  pushal\n  fnsave g_fpu\n  call snap_premix\n  frstor g_fpu\n  popal\n"
+  "  movl 0x726f94,%ecx\n"        // the overwritten `mov ecx,[0x726f94]`
+  "  jmp *g_jmp_premix\n"
+);
+const uint32_t g_jmp_premix = VA_PREMIX_EQ + 6;
 
 void chunk_pre(uint32_t cnt)
 {
@@ -197,6 +215,7 @@ void chunk_pre(uint32_t cnt)
   memset(g_acc_osc, 0, n*4); memset(g_acc_flt, 0, n*4); memset(g_acc_dist, 0, n*4);
   memset(g_acc_chan, 0, n*8);
   memset(g_acc_chanpost, 0, n*8);
+  memset(g_acc_premix, 0, n*8);
 }
 void chunk_post(void)
 {
@@ -207,6 +226,7 @@ void chunk_post(void)
     if (g_fvd) fwrite(g_acc_dist, 4, n, g_fvd);
     if (g_fvc) fwrite(g_acc_chan, 8, n, g_fvc);
     if (g_fvcp) fwrite(g_acc_chanpost, 8, n, g_fvcp);
+    if (g_fvpm) fwrite(g_acc_premix, 8, n, g_fvpm);
   }
   g_vce_pos += g_vce_count;
 }
@@ -357,6 +377,7 @@ int main(int argc, char **argv)
     snprintf(p,sizeof p,"%s.dist",pfx); g_fvd=fopen(p,"wb");
     snprintf(p,sizeof p,"%s.chan",pfx); g_fvc=fopen(p,"wb");
     snprintf(p,sizeof p,"%s.chanpost",pfx); g_fvcp=fopen(p,"wb");
+    snprintf(p,sizeof p,"%s.premix",pfx); g_fvpm=fopen(p,"wb");
     g_vce_chan = g_solo;  // tap chanbuf for the soloed channel
     // verify opcodes before patching
     uint8_t *c1=(uint8_t*)(uintptr_t)VA_CHUNK_CALL, *c2=(uint8_t*)(uintptr_t)VA_V2R_CALL;
@@ -367,6 +388,9 @@ int main(int argc, char **argv)
     install_call(VA_V2R_CALL,   &hook_v2r);
     install_detour(VA_POSTOSC, &hook_postosc, 6);
     install_detour(VA_POSTFLT, &hook_postflt, 5);
+    { uint8_t *pe=(uint8_t*)(uintptr_t)VA_PREMIX_EQ;
+      if (pe[0]==0x8b) install_detour(VA_PREMIX_EQ, &hook_premix, 6);
+      else fprintf(stderr,"[vce] premix EQ opcode %02x (skipped)\n",pe[0]); }
     // chanbuf (post-volramp voice sum) tap needs the channel-FX detour too
     { uint8_t *cc=(uint8_t*)(uintptr_t)VA_CHAN_CALL;
       if (cc[0]==0xe8) install_call(VA_CHAN_CALL, &hook_chan); }

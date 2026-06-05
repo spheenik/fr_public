@@ -1869,10 +1869,12 @@ struct V2LFO
   sF32 dc;      // output dc
   sU32 nseed;   // random seed
   sU32 last;    // last counter value (for s&h transition)
+  V2Instance *inst;
 
   void init(V2Instance *instance)
   {
     cntr = last = 0;
+    inst = instance;
     // era <v1 (fr08): C1 pins rdtsc=0, so the S&H seed must be 0 for the
     // matched-seed A/B (DELTA.md D6). (Re-seeded by the era setter for the
     // synth-init-time voices, as srcVersion isn't set yet at first init.)
@@ -1904,7 +1906,12 @@ struct V2LFO
     // (calcfreq * fc32bit * 0.5). The truncating (sInt) below is off-by-one
     // whenever the frac >= 0.5, which slowly desyncs the integer phase counter
     // and (via LFO->amp-env modulation) drifts curvol over the whole song.
-    freq = v2_fistp(calcfreq(para->rate * 0.0078125f) * fc32bit * 0.5f);
+    // era <v1 (fr08): syLFOSet @0x40a965 uses calcfreq*2^31 (no *0.5). The 0.5
+    // compensates for the modern 128-sample control frame; under the eraV0
+    // 256-frame it must be dropped or the LFO runs at half speed (modulating
+    // filter cutoff/pitch/amp -> diverges). per-sample rate stays invariant.
+    sF32 lfomul = inst->eraV0() ? fc32bit : (fc32bit * 0.5f);
+    freq = v2_fistp(calcfreq(para->rate * 0.0078125f) * lfomul);
 #else
     freq = (sInt)(0.5f * fc32bit * calcfreq(para->rate / 128.0f));
 #endif

@@ -24,8 +24,9 @@ for src in v2player v2core v2seq; do
 done
 ar rcs libv2portable.a v2player.o v2core.o v2seq.o
 
-echo "[2/3] cli driver"
-$CXX $CXXFLAGS $V2DEFS v2play.cpp libv2portable.a -o v2play
+echo "[2/3] cli tools"
+$CXX $CXXFLAGS $V2DEFS v2dump.cpp libv2portable.a -o v2dump
+# (live ALSA player tool: planned, separate from the dependency-free lib)
 
 echo "[3/3] tests"
 if [ -f test/mathcheck.cpp ]; then
@@ -35,4 +36,4 @@ if [ -f test/twoinstance.cpp ]; then
   $CXX $CXXFLAGS $V2DEFS test/twoinstance.cpp libv2portable.a -o test/twoinstance
 fi
 
-echo "done: libv2portable.a v2play"
+echo "done: libv2portable.a v2dump"

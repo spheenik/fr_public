@@ -1,5 +1,6 @@
 *.o
 *.a
+v2dump
 v2play
 test/mathcheck
 test/twoinstance

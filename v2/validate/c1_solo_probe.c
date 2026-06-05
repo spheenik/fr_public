@@ -150,8 +150,17 @@ void ticklog(uint32_t ebp)
   uint32_t st = *(uint32_t*)(uintptr_t)(ebp + 0x128);
   float cur   = *(float*)(uintptr_t)(ebp + 0x0c);
   float ramp  = *(float*)(uintptr_t)(ebp + 0x10);
-  fprintf(stderr, "[tick] pos=%u vc=%d env1.out=%g st=%u cur=%g ramp=%g\n",
-          pos, vc, out, st, cur, ramp);
+  // env struct = {out,state,val,atd,dcf,sul,suf,ref,gain} (9 dwords, 0x24);
+  // env1 @ voice+0x124, env2 @ voice+0x148 (see syEnvSet/Tick layout).
+  uint32_t e1v = *(uint32_t*)(uintptr_t)(ebp + 0x12c);  // env1.val bits
+  uint32_t e2o = *(uint32_t*)(uintptr_t)(ebp + 0x148);  // env2.out bits
+  uint32_t e2s = *(uint32_t*)(uintptr_t)(ebp + 0x14c);  // env2.state
+  uint32_t e2v = *(uint32_t*)(uintptr_t)(ebp + 0x150);  // env2.val bits
+  fprintf(stderr, "[tick] pos=%u vc=%d env1.out=%g st=%u cur=%g ramp=%g "
+          "| e1.out=%08x e1.val=%08x e2.st=%u e2.out=%08x e2.val=%08x cur=%08x ramp=%08x\n",
+          pos, vc, out, st, cur, ramp,
+          *(uint32_t*)(uintptr_t)(ebp + 0x124), e1v, e2s, e2o, e2v,
+          *(uint32_t*)(uintptr_t)(ebp + 0x0c), *(uint32_t*)(uintptr_t)(ebp + 0x10));
 }
 
 extern void hook_tick(void);
@@ -165,6 +174,41 @@ __asm__(
   "  call ticklog\n"
   "  addl $4, %esp\n"
   "  popal\n"
+  "  ret\n"
+);
+
+// chgPitch trace (C1_FREQTRACE=1, window C1_FREQ_LO/HI on sample pos): log every
+// genuine syOscChgPitch @0x40a49b -- (pos, osc obj, pitch/note INPUT bits, integer
+// freq + nffrq OUTPUT bits) -- to byte-compare per-tick freq vs the port's FREQLOG
+// ledger (the env2->osc-pitch mod path, ch2 pgm3 chase). Detours all 4 call sites
+// (syOscSet per-tick @0x40a4f5 + the 3 noteOn calls @0x40af46/4e/56); ebp = osc.
+#define VA_CHGPITCH 0x40a49bu
+static const uint32_t CHGPITCH_CALLS[] = { 0x40a4f5u, 0x40af46u, 0x40af4eu, 0x40af56u };
+const uint32_t g_chgpitch_real = VA_CHGPITCH;
+int g_freqtrace_n = 0;
+
+void freqtrace(uint32_t ebp)
+{
+  uint32_t pos = *(uint32_t*)(uintptr_t)0x592de4;
+  const char *lo = getenv("C1_FREQ_LO"), *hi = getenv("C1_FREQ_HI");
+  if (lo && pos < (uint32_t)strtoul(lo,0,10)) return;
+  if (hi && pos > (uint32_t)strtoul(hi,0,10)) return;
+  if (g_freqtrace_n >= 4000) return;
+  g_freqtrace_n++;
+  fprintf(stderr, "[chgp] pos=%u osc=%05x pitch=%08x note=%08x freq=%08x nffrq=%08x\n",
+          pos, ebp - 0x716a18u,
+          *(uint32_t*)(uintptr_t)(ebp+0x44), *(uint32_t*)(uintptr_t)(ebp+0x40),
+          *(uint32_t*)(uintptr_t)(ebp+0x8),  *(uint32_t*)(uintptr_t)(ebp+0x20));
+}
+
+extern uint8_t g_fpu[128];   // FPU save area (defined with the premix hook below)
+extern void hook_chgp(void);
+__asm__(
+  ".text\n.globl hook_chgp\nhook_chgp:\n"
+  "  call *g_chgpitch_real\n"  // real chgPitch first (outputs land in the osc obj)
+  "  pushal\n  fnsave g_fpu\n" // printf may touch x87; preserve stack AND ctrl word
+  "  pushl %ebp\n  call freqtrace\n  addl $4, %esp\n"
+  "  frstor g_fpu\n  popal\n"
   "  ret\n"
 );
 
@@ -405,6 +449,17 @@ int main(int argc, char **argv)
     int32_t rel = (int32_t)((uintptr_t)&hook_tick - (VA_TICK_CALL + 5));
     memcpy(site+1, &rel, 4);
     fprintf(stderr,"[solo] tick log armed\n");
+  }
+
+  // optional chgPitch trace (all 4 call sites)
+  if (getenv("C1_FREQTRACE")) {
+    for (unsigned i = 0; i < 4; i++) {
+      uint8_t *site = (uint8_t*)(uintptr_t)CHGPITCH_CALLS[i];
+      if (site[0] != 0xe8) { fprintf(stderr,"no call at chgp site %x (%02x)\n",CHGPITCH_CALLS[i],site[0]); return 1; }
+      int32_t rel = (int32_t)((uintptr_t)&hook_chgp - (CHGPITCH_CALLS[i] + 5));
+      memcpy(site+1, &rel, 4);
+    }
+    fprintf(stderr,"[solo] chgPitch trace armed\n");
   }
 
   // detour ProcessMIDI call in the tick -> hook_pm (filters, then real PM)

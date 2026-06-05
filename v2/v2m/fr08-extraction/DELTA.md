@@ -1,16 +1,18 @@
 # fr-08 (year-2000) synth vs final (2004) V2 — behavioral delta
 
-> **STATUS 2026-06-05: fr08 full mix is BIT-EXACT for the first 66.8 s** vs the
-> genuine year-2000 binary (C1 ground truth), incl. reverb/delay tail (verified
-> over 5.29 M samples, 0 diverging). At **t=66.80 s (stereo 2,945,793)** a
-> divergence appears. Localized: **ch3 (pgm 5) oscillator** — at the 66.8 s note
-> the pulse osc is phase-INVERTED (C1 steady +1.758, port steady −1.758,
-> opposite pulse segments; ch4/ch12 bit-exact). So an osc-phase difference at the
-> new note, most likely a voice-allocation/keysync delta (which slot the note
-> lands in → different leftover osc cnt for a non-resync osc). ~10 min of further
-> song sections remain to sweep. Modern (≥v1) stays bit-exact vs the 2004 asm.
-> Fixes landed: gated **sub-frame rendering** (the 4 sub-frame facets), **reverb
-> gain PC=64 precision** + SetSourceVersion-before-SetGlobals reorder, **reverb
+> **STATUS 2026-06-05 (eod): fr08 full mix is BIT-EXACT for the first
+> 118.056 s** vs the genuine year-2000 binary (C1 ground truth), incl.
+> reverb/delay tail. The 66.8 s "ch3 osc inversion" was resolved as TWO
+> findings: (a) the claim itself was a tap-window alignment artifact, and (b)
+> the actual ch3 divergence was **8 corrupted bytes in the EXTRACTED v2m**
+> (vs the image-embedded original; re-extracted + reconverted — data, not
+> synth). The next divergence (ch2 @67.05 s) was a REAL era delta: the
+> **env DECAY-clamp placement** (see the syEnvTick section below), now gated
+> under eraV0. Current frontier: **ch15 first activation @118.056 s**, a
+> sub-frame channel-activation timing facet — see `HANDOVER-fr08-sweep.md`.
+> Modern (≥v1) stays bit-exact vs the 2004 asm (5-song gate green). Fixes
+> landed earlier: gated **sub-frame rendering** (4 facets), **reverb gain
+> PC=64 precision** + SetSourceVersion-before-SetGlobals reorder, **reverb
 > low-cut gate**.
 
 Working catalogue for the `characterize-fr08-synth-delta` change. Evidence
@@ -81,6 +83,36 @@ The pow2 helper @0x40a46e is `fld 2.0; fyl2x; <pow2 tail>` ≡ pow2 (the
    halving) at format v2. To be confirmed against the 2000 `syEnvSet`/
    `syEnvTick` disassembly.
 
+## syEnvTick (2000) decoded — clamp placement delta (2026-06-05, GATED)
+
+`syEnvTick` @0x40a759: 5-state jump table @0x40a745 → handlers OFF 0x40a76f /
+ATTACK 0x40a781 / DECAY 0x40a7a8 / SUSTAIN 0x40a7cd / RELEASE 0x40a803. All
+transitions are operation-identical to the port's `V2Env::tick`
+(synth_core.cpp ~1573): gate-off from ATTACK/DECAY/SUSTAIN jumps to the
+RELEASE handler and applies `val *= ref` the SAME tick; gate-on from
+OFF/RELEASE applies `val += atd` the same tick; attack clamps at 128→DECAY;
+decay floors at sul→SUSTAIN; sustain ceilings at 128.
+
+**The one structural difference: the `val ≤ 2^-13 (0x39000000) → val=0,
+state=OFF` clamp exists ONLY in the SUSTAIN (@0x40a7e2) and RELEASE
+(@0x40a819) handlers.** The port applies it globally after every state
+(synth_core.cpp:1623), including DECAY and ATTACK. Consequence: with
+`sl < 2^-13` and the gate held, the 2000 env NEVER leaves DECAY — val decays
+multiplicatively into denormals, the voice stays allocated and its osc/filter
+state keeps advancing — while the port kills the env (→OFF) and the voice.
+(ATTACK can't underflow in practice: atd ≥ 2^-4 over the whole ar range.)
+
+Status: **GATED 2026-06-05** — `V2Env::tick` skips the clamp in DECAY/ATTACK
+under `eraV0()` (synth_core.cpp ~1623). The 2004 asm DOES reach the clamp from
+DECAY (`.state_dec` → `.s4checkrunout`, synth.asm:1178), so the modern path is
+already faithful-2004; the runout-from-DECAY check was added between 2000 and
+2004. Proven culprit of the fr08 ch2 (pgm 3) divergence @67.05 s: gate-held
+env2 with sul<2^-13 feeds env2→osc-pitch mods; the 2000's denormal-decaying
+env2 keeps a residual pitch offset (chgPitch trace: pitch 41000008 vs
+41000000 → integer freq +2 → slow phase drift). Note `c1_env_probe`'s
+"bit-exact" verdict did NOT exercise this edge (gate-held sub-clamp DECAY).
+(ATTACK leg of the gate is belt-and-braces: atd ≥ 2^-4 > 2^-13, unreachable.)
+
 ## Full function sweep (2000 image → 2004 synth.asm)
 
 51 functions in 0x40a464–0x40c800, segmented at call targets and aligned to
@@ -98,7 +130,7 @@ reading the disasm; F = aligned by fingerprint, body not yet line-diffed.
 | 0x40a585 | syOscRender | **sine = native x87 `fsin`** (2004 = fastsin poly fcsinx3/5/7); **noise LCG = MSVC rand `·214013+2531011`** (2004 = ·196314165+907633515); saw/tri/pulse phase trick identical | C |
 | 0x40a6c9 | syEnvInit (zero state) | identical | C |
 | 0x40a6d1 | syEnvSet | **attackmul −11/128; dec/rel via calcfreq ×10 not calcfreq2 ×11** | C |
-| 0x40a759 | syEnvTick (state machine) | no float consts; verify immediates | F |
+| 0x40a759 | syEnvTick (state machine) | **clamp only in SUS+REL** (see syEnvTick section) | C |
 | 0x40a837 | syLFOSet (fci128, calcfreq) | verify | F |
 | 0x40a935 | syLFOInit | **seeds S&H = `rdtsc`** | C |
 | 0x40a945 | syLFO render / S&H (fci128 fc32bit) | uses MSVC-rand noise too — verify | F |

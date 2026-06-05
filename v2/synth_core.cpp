@@ -1620,7 +1620,17 @@ struct V2Env
     }
 
     // avoid underflow to denormals
-    if (val <= fclowest)
+    // era <v1 (fr08): the 2000 tick @0x40a759 has the LOWEST->OFF runout check
+    // ONLY in its SUSTAIN and RELEASE handlers; the 2004 `.s4checkrunout` jump
+    // from DECAY (synth.asm:1178) did not exist yet. So a gate-held env whose
+    // sustain level is below 2^-13 NEVER leaves DECAY in the 2000 -- val keeps
+    // decaying into denormals and out stays (tiny) nonzero. Audible when such
+    // an env drives a modmatrix dest: fr08 ch2 (pgm 3) mods env2->osc1/osc2
+    // pitch; the residual eps shifts the integer osc freq by ~2 -> slow phase
+    // drift vs a port that clamped env2 to exact 0. (ATTACK is unreachable
+    // here either way: atd >= 2^-4 > fclowest.) Gate: skip the clamp in
+    // DECAY/ATTACK under eraV0. (DELTA.md "syEnvTick clamp placement")
+    if (val <= fclowest && !(inst->eraV0() && (state == DECAY || state == ATTACK)))
     {
       val = 0.0f;
       state = OFF;

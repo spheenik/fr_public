@@ -3270,7 +3270,42 @@ struct V2Reverb
       0.994260075f, 0.998044717f
     };
 
-    sF32 e = inst->SRfclinfreq * sqr(64.0f / (para->revtime + 1.0f));
+    // era <v1 (fr08): the 2000 syReverbSet @0x40b2d0 computes e = sqr(64/(revtime
+    // +1)) with NO SRfclinfreq factor (a 2004 SR-flexibility addition, =1.0 at
+    // 44100) AND at the DEFAULT x87 precision (PC=64), not the PC=24 the render
+    // path uses -- so the 64/(revtime+1) quotient is kept full-precision and
+    // squared, then rounded once (square-exact-quotient). The modern C path
+    // rounds the quotient to 24 bits first (round-then-square), giving e one ULP
+    // lower, which flips the near-tie comb feedback gain gainc[2]
+    // (3f6a7efb -> 3f6a7efc) and seeds the reverb-tail residual. Reproduce the
+    // 2000 by computing the quotient+square in double, no SRfclinfreq. (DELTA.md)
+    sF32 e;
+    if (inst->eraV0())
+    {
+      // The build/render runs x87 at PC=24 (-mpc32), but the 2000 reverb set
+      // ran at the default PC=64, so the 64/(revtime+1) quotient is kept
+      // full-precision and squared (square-exact-quotient). Temporarily raise
+      // PC to 64 so GCC keeps the quotient in the register at full precision
+      // through the square. (round-then-square at PC=24 is one ULP low.)
+      unsigned short cw0, cw64;
+      static const sF32 c64 = 64.0f;
+      sF32 rt1 = para->revtime + 1.0f; // (exact: revtime int + 1)
+      __asm__ volatile ("fnstcw %0" : "=m"(cw0));
+      cw64 = (unsigned short)((cw0 & ~0x0300) | 0x0300); // PC=64
+      __asm__ volatile (
+        "fldcw %1\n\t"
+        "flds %3\n\t"            // 64
+        "fdivs %2\n\t"           // 64 / rt1   (st0 = 64/(revtime+1), full PC=64 precision)
+        "fmul %%st, %%st\n\t"    // square (still PC=64, then rounded to 24 on store)
+        "fldcw %4\n\t"           // restore PC
+        : "=t"(e)
+        : "m"(cw64), "m"(rt1), "m"(c64), "m"(cw0));
+#ifdef V2_VALIDATE
+      if (getenv("REVERBTRACE")) { union{sF32 f;sU32 u;}E; E.f=e; fprintf(stderr,"[reverb.e] e=%08x\n",E.u); }
+#endif
+    }
+    else
+      e = inst->SRfclinfreq * sqr(64.0f / (para->revtime + 1.0f));
     for (sInt i=0; i < 4; i++)
       gainc[i] = v2_powf(gaincdef[i], e);
 
@@ -3333,9 +3368,18 @@ struct V2Reverb
           cur = dv - gaina[j] * dz;
         }
 
-        // low cut and output
-        hpf[ch] += lowcut * (cur - hpf[ch]);
-        dest[i].ch[ch] += cur - hpf[ch];
+        // low cut and output. era <v1 (fr08): the 2000 reverb render @0x40b435
+        // outputs `dest += cur` with NO low-cut high-pass stage (the lowcut hpf
+        // is v4-added). fr08's reverb lowcut param is nonzero, so the port's hpf
+        // is an EXTRA high-pass not in the binary -- it diverges the reverb tail.
+        // Gate it out under eraV0. (DELTA.md)
+        if (inst->eraV0())
+          dest[i].ch[ch] += cur;
+        else
+        {
+          hpf[ch] += lowcut * (cur - hpf[ch]);
+          dest[i].ch[ch] += cur - hpf[ch];
+        }
       }
     }
   }

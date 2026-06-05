@@ -370,13 +370,15 @@ void V2MPlayer::Reset()
 		if (getenv("POISON"))
 			memset(m_synth, 0xCC, sizeof(m_synth));
 		synthInit(m_synth,(void*)m_base.patchmap,m_samplerate);
-		synthSetGlobals(m_synth,(void*)m_base.globals);
-		synthSetLyrics(m_synth,m_base.speechptrs);
 		// era compat: synthInit resets the core to modern; re-apply the source
-		// format version so period files keep their period DSP behaviors
-		// (fr08-extraction/DELTA.md). -1 = unset, leave the core's default.
+		// format version BEFORE synthSetGlobals so the GLOBAL FX set-time DSP
+		// (e.g. the reverb feedback-gain precision) also runs in period mode --
+		// the 2000 Reset @0x40940b sets globals as v0. -1 = unset, leave default.
+		// (fr08-extraction/DELTA.md)
 		if (m_srcver >= 0)
 			synthSetSourceVersion(m_synth, m_srcver);
+		synthSetGlobals(m_synth,(void*)m_base.globals);
+		synthSetLyrics(m_synth,m_base.speechptrs);
 	}
 }
 

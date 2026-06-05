@@ -436,6 +436,11 @@ int main(int argc, char **argv)
     if (!*playing) { if (tail >= 6*44100) break; tail += chunk; }
   }
   fclose(o);
+  if (getenv("REVDUMP")) {
+    uint32_t *rv = (uint32_t*)(uintptr_t)0x7194e0u; // reverb obj: gainc[0..3], gaina[0..1] at +0x10/0x14
+    fprintf(stderr,"[revdump] gainc=%08x,%08x,%08x,%08x gaina=%08x,%08x damp=%08x gainin=%08x\n",
+            rv[0],rv[1],rv[2],rv[3], rv[4],rv[5], rv[7], rv[6]);
+  }
   fprintf(stderr,"[solo] wrote %.1fs -> %s\n", (double)total/44100.0, out);
   return 0;
 }

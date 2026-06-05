@@ -1,23 +1,23 @@
 # fr-08 (year-2000) synth vs final (2004) V2 — behavioral delta
 
-> **STATUS 2026-06-05 (eod): fr08 WHOLE SONG (663 s) is BIT-EXACT vs the
-> genuine year-2000 binary EXCEPT a single 7.4 s decaying transient at
-> 271.64–279.03 s** (max|d| 0.0025, rings out to 0; the last 384 s and
-> everything before 271.6 s are bit-exact, reverb/delay tail included). The
-> day's findings, in order: (1) the 66.8 s "ch3 osc inversion" was a
-> tap-window alignment artifact AND **8 corrupted bytes in the EXTRACTED v2m**
-> (re-extracted from the image-embedded original — data, not synth);
-> (2) ch2 @67.05 s = **env DECAY-clamp placement** era delta (syEnvTick
-> section below), gated; (3) ch15 @118.06 s = the C1 harness/probe were
-> running Ronan's speech PROCESS on ch15 with uninitialized state (now nop'd —
-> the port has no Ronan); (4) ch1 @192.09 s = **PGM-change era delta** (no
-> same-pgm early-out + ctl7→127 reset; PC handler section below), gated.
-> The remaining 271.6 s transient is the **mid-frame channel-activation
-> chorus-phase facet** (ch1 staccato-through-chorus; dry input bit-exact,
-> chorus mod/delay phase drifts then flushes) — see `HANDOVER-fr08-sweep.md`.
-> Modern (≥v1) stays bit-exact vs the 2004 asm (5-song gate green). Earlier
-> fixes: gated **sub-frame rendering** (4 facets), **reverb gain PC=64
-> precision** + SetSourceVersion reorder, **reverb low-cut gate**.
+> **STATUS 2026-06-05 (final): fr08 WHOLE SONG (663 s) is BIT-EXACT
+> (max|d| = 0) vs the genuine year-2000 binary**, reverb/delay tail included.
+> The last divergence (a 7.4 s decaying transient at 271.64–279.03 s) was a
+> single-sample 1-ULP **bitcrusher gain1-association era delta** (section
+> below) — NOT the suspected chorus phase (the chorus state ledger proved
+> mcnt/dbptr/cells identical). The day's findings, in order: (1) the 66.8 s
+> "ch3 osc inversion" was a tap-window alignment artifact AND **8 corrupted
+> bytes in the EXTRACTED v2m** (re-extracted from the image-embedded
+> original — data, not synth); (2) ch2 @67.05 s = **env DECAY-clamp
+> placement** era delta (syEnvTick section below), gated; (3) ch15 @118.06 s
+> = the C1 harness/probe were running Ronan's speech PROCESS on ch15 with
+> uninitialized state (now nop'd — the port has no Ronan); (4) ch1 @192.09 s
+> = **PGM-change era delta** (no same-pgm early-out + ctl7→127 reset; PC
+> handler section below), gated; (5) ch1 @271.64 s = **bitcrusher
+> association**, gated. Modern (≥v1) stays bit-exact vs the 2004 asm (5-song
+> gate green). Earlier fixes: gated **sub-frame rendering** (4 facets),
+> **reverb gain PC=64 precision** + SetSourceVersion reorder, **reverb
+> low-cut gate**.
 
 Working catalogue for the `characterize-fr08-synth-delta` change. Evidence
 source: the depacked v1.01 image (`unpacked.bin`, md5
@@ -136,6 +136,34 @@ different chgain → a **constant DC offset** in the dry mix from the next ch1
 note-on (192.086 s). Gate (eraV0, `processMIDI` case 4): drop the same-pgm
 early-out and set `chans[chan].ctl[6]=127` after the ctl1–6 reset.
 
+## Bitcrusher gain1 association — the LAST delta, GATED (2026-06-05)
+
+The 271.64 s "chorus transient" was ONE divergent sample (11979350, L only;
+the rest of the 7.4 s window was its global-EQ/reverb/delay tail, plus a
+delay echo at +14691 ≈ the delay's dboffs[0]=14632). ch1 (pgm2, fxr=1 =
+chorus→dist, dist mode 3 = bitcrusher, param1=102 → crush2=26113, param2=93
+→ crxor=0xBA00). The chorus state ledger (port `CHORLOG`, C1 `C1_CHORLOG`)
+proved mcnt/dbptr/offs/frac AND the read delay cells bit-identical — the
+chorus was innocent all along.
+
+The delta is in the crusher's scaling association:
+
+- **2000 set** (@0x40ab0b): `crush1 = 32768/x` — gain1 NOT folded in.
+  **2000 render** (@0x40abef): `fld in; fmul gain1; fmul crush1; fistp` —
+  TWO separate 24-bit-rounded multiplies, `(in·gain1)·(32768/x)`.
+- **2004 set** (synth.asm:1858-1860): `crush1 = (32768/x)·gain1` folded at
+  set; render does ONE multiply `in·crush1`. The port matched 2004.
+
+Same product, different association → 1 ULP apart near quantizer ties. At
+11979350 the operand landed on the −1.5 fistp tie: 2000 got −1.49999…→ t=−1
+(out −26113^0xBA00 = −1.71878), port got −1.5→ t=−2 (−52226 → clamp −32767;
+out −1.54684). Once in 663 s. (Overdrive and clip apply gain1 per-sample in
+BOTH eras — only the crusher folded it between 2000 and 2004.)
+
+Gate (eraV0, `V2Dist::set` BITCRUSHER + `bitcrusher()`): keep crush1 =
+32768/x and compute `in * gain1 * crush1` per sample. → **WHOLE SONG
+max|d| = 0**; 5-song modern gate green.
+
 ## Full function sweep (2000 image → 2004 synth.asm)
 
 51 functions in 0x40a464–0x40c800, segmented at call targets and aligned to
@@ -159,8 +187,8 @@ reading the disasm; F = aligned by fingerprint, body not yet line-diffed.
 | 0x40a945 | syLFO render / S&H (fci128 fc32bit) | uses MSVC-rand noise too — verify | F |
 | 0x40a9f1 | sine/range-reduce helper (fc2pi fci2) | self-recursive; verify role | F |
 | 0x40aa60 | syDistInit | **seeds rand = `rdtsc`** | C |
-| 0x40aa93 | syDistSet | fp matches 2004 **minus fci127** | F |
-| 0x40ab71 | syDistRenderMono (fci32768) | identical fp | F |
+| 0x40aa93 | syDistSet | **crusher: crush1 = 32768/x, gain1 NOT folded** (see bitcrusher section) | C |
+| 0x40ab71 | syDistRenderMono (fci32768) | **crusher: per-sample `fmul gain1; fmul crush1`** (2004 = one folded mul); overdrive/clip/decimator identical | C |
 | 0x40acb3 | syV2Init | calls the 3 rdtsc inits | C |
 | 0x40ad06 | param smoother | **coeff fci256 (1/256) where 2004 uses fci127 (1/127)** | C |
 | 0x40ad4d | syV2Render (osc→flt→dist) | calls oscrender/distrender | F |

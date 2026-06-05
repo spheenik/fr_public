@@ -1,10 +1,11 @@
 # Handover: fr08 whole-song bit-exact sweep
 
 **Goal:** make the fr08 whole-song render bit-exact vs the genuine year-2000
-binary. **The whole 663 s song is now BIT-EXACT except ONE 7.4 s decaying
-transient at 271.64–279.03 s** (max|d| 0.0025; everything before 271.6 s and
-the entire last 384 s match, reverb/delay tail included). This doc carries
-that last target plus the solved-case playbook (the methods matter).
+binary. **DONE 2026-06-05: the WHOLE 663 s song renders BIT-EXACT
+(max|d| = 0), reverb/delay tail included.** The last divergence (the
+"chorus transient" @271.64 s) was the **bitcrusher gain1-association era
+delta** — see the section below and DELTA.md. This doc remains the
+solved-case playbook (the methods matter).
 
 Branch: `v2-port-fidelity`. Work dir: `/home/spheenik/projects/scene/fr_public/v2/validate`.
 `../v2m/fr08-extraction/DELTA.md` = the delta catalogue + era-gating model
@@ -59,43 +60,35 @@ surfaced at ch1 @192.09 s (the PGM-change delta, gated — see DELTA.md).
 The earlier "C1 chan content is phase-shifted, 5th sub-frame facet" analysis
 was chasing the Ronan-corrupted ch15 output; disregard it.
 
-## CURRENT (and LAST) TARGET: chorus-phase transient @271.64–279.03 s
+## SOLVED: the @271.64 s transient = bitcrusher gain1 association (NOT chorus)
 
-The whole song is bit-exact except this one **7.4 s decaying transient**
-(max|d| 0.0025 at onset → rings out to exactly 0 by 279.03 s; bit-exact
-before and after). It is **ch1**, isolated by chanstream:
-- **ch1 PRE-FX (chorus input) is bit-exact for the entire 272 s** — the dry
-  voice sum feeding the channel FX never diverges.
-- **ch1 POST-FX diverges only in the final ~0.07 s of the active passage**
-  (c1=−1.719 vs port=−1.547), with PRE bit-exact at that same sample.
+The "7.4 s decaying transient" was **ONE divergent sample** (11979350, left
+channel; the rest of the window was its hc-EQ ring-down + reverb tail + a
+global-delay echo at +14691 ≈ dboffs[0]=14632). Diagnosis chain:
 
-So the divergence is **chorus-internal**: identical input, divergent output ⇒
-the chorus's own state (mod counter / delay write-pointer) has desynced.
-Cause: ch1 here plays **rapid staccato** (note 84, ~48 ms on / 48 ms off,
-through pgm2's chorus). Channels are SKIPPED when silent (npoly==0), freezing
-the chorus; each mid-frame reactivation runs the eraV0 channel-activation
-advance (DELTA.md "ch5 SOLVED … mid-frame channel-activation"). One of these
-rapid toggles advances the 2000's chorus mod/delay phase by a sample the port
-doesn't replicate; the error stays bounded, then the passage ends and silence
-flushes the delay line back to bit-exact.
+1. Diff-signal clustering: only 2 L clusters >1e-4, the 2nd = delay echo of
+   the 1st ⇒ a single-sample impulse smeared by the EQ (decay ratio ~0.22 =
+   1−hcf per sample).
+2. Per-chunk ch1 POST-FX compare (k1 taps): exactly ONE sample differs;
+   PRE bit-exact ⇒ inside the channel FX chain, no recirculation anywhere.
+3. **Chorus state ledger** (new tooling, below): mcnt, dbptr, offs, frac,
+   read idx AND the delay-cell contents bit-identical on both sides at the
+   spike ⇒ chorus innocent. The handover's "chorus mod/delay phase drift"
+   hypothesis was WRONG (lesson: a self-healing transient does not imply
+   stateful desync — a stateless 1-ULP edge through the global FX tail looks
+   identical).
+4. **[distK] ledger**: ch1 = fxr 1 (chorus→dist), dist mode 3 = bitcrusher
+   (param1=102 → crush2=26113, param2=93 → crxor=0xBA00). Decoding the POST
+   values: c1 t=−1·26113 (out −1.71878) vs port t=−2·26113→clamp −32767
+   (out −1.54684) — a fistp TIE at −1.5 in the quantizer.
+5. Line-diff of the 2000 crusher (@0x40ab0b set / @0x40abea render) vs 2004
+   (synth.asm:1858/1974): **2000 = per-sample `(in·gain1)·(32768/x)` (two
+   24-bit-rounded muls); 2004/port = `in·(gain1·(32768/x))` folded at set.**
+   1 ULP apart near ties; flipped exactly once in 663 s.
 
-**Where to look next:**
-1. This is an EDGE CASE of the already-gated channel-activation chorus advance
-   (`processMIDI` note-on, `npoly==0` branch, ~3994): that advance renders the
-   partial sub-frame on a ZERO buffer (activating voice muted), advancing only
-   the chorus mod-counter/write-pointer. Verify the advance length and the
-   chorus mod-counter increment against the 2000 for a RAPID re-activation
-   (the ch5 proof was a single activation; rapid on/off/on within a few frames
-   may hit a different `tickd`/skip interaction).
-2. Tap ch1's chorus mod-counter + delay write-pointer per chunk on both sides
-   (C1: chorus obj in the channel block @0x718cd8+ch*0x78; port: V2Chan.chorus)
-   across 270–272 s and find the first chunk where the counter desyncs.
-3. The chunk sidecar (`C1_VCEFRAME … .chunks`: pos/count/chanfx_n/fired) +
-   `.chanpre`/`.chanv` taps (added this session) show exactly which sub-chunks
-   ran ch1's FX — use them to align the per-chunk chorus-state comparison.
-4. Because it self-heals (flushes to bit-exact), this is the lowest-severity
-   class; a fix must not regress the single-activation ch5 case or the
-   5-song modern gate.
+**Gate** (eraV0, `V2Dist::set` BITCRUSHER + `V2Dist::bitcrusher`,
+synth_core.cpp): crush1 = 32768/x (unfolded), render `in * gain1 * crush1`.
+Result: **whole song max|d| = 0**; 5-song modern gate green.
 
 ## Ground truth & reproduction
 
@@ -156,6 +149,19 @@ flushes the delay line back to bit-exact.
 - **Chanvol trace** (NEW): C1 `C1_CHANVTRACE=N` / port `CHANVTRACE=N` → the
   modulated chanvol float (hex) + raw ctl7 whenever it changes. Pinned the
   192 s PGM-change ctl7→chanvol delta.
+- **Chorus/dist state ledger** (NEW): port `CHORLOG=<ch> CHORLOG_LO/HI=<abs
+  smpl>` (+`CHORLOG_SLO/SHI` per-sample detail window); C1 `C1_CHORLOG=<ch>
+  C1_CHOR_LO/HI/SLO/SHI` (needs `C1_VCEFRAME` armed for the pos clock; detours
+  the channel-chorus call into the ModDel core @0x40b287→0x40b157). Emits
+  byte-comparable `[chorK]` (per chunk: pos, dbptr, mcnt), `[chorS]` (per
+  sample: counter/offs/idx/frac + delay-cell contents in1/in2) and `[distK]`
+  (per chunk: fxr, dist mode, decimator dcount/dfreq/dval). 2000 obj layout:
+  chan blk @0x718cd8+ch*0x78: +0x0 chgain +0x4 a1gain +0x8 a2gain +0xc fxr,
+  +0x10 dist obj (+0x0 mode &7, +0x4 gain1, +0x8 gain2/crush?, +0x10 crush1,
+  +0x14 crush2, +0x18 crxor, +0x1c dcount +0x20 dfreq +0x24/28 dval),
+  +0x44 chorus/ModDel obj (+0x0 dbL +0x4 dbR +0x8 mask +0xc dbptr +0x10/14
+  dboffs L/R +0x18 mcnt +0x1c mfreq +0x20 mphase +0x24 mmaxoffs +0x28 fb
+  +0x2c dry +0x30 wet). Pinned the 271.64 s bitcrusher delta.
 - **Param dumps**: `OSCDUMP` `MODDUMP` `NOTETRACE` `ALLOCTRACE` `LFODUMP`
   `ENVTRACE` `DISTTRACE` `CHORUSTRACE` `REVERBTRACE` `CHANTRACE`; C1 `REVDUMP`.
 - **Patch/event spelunking offline**: the v2m parses trivially in python
@@ -216,4 +222,8 @@ confirm the frontier moved.
    ch1 @192 s = PGM-change era delta (no same-pgm check + ctl7→127, gated).
    **118.056 s → WHOLE SONG bit-exact except one 7.4 s chorus-phase transient
    @271.6 s.** Tools: C1_ALLOCTRACE, CHANVTRACE, .chunks/.chanpre/.chanv
-   sidecars, -mstackrealign. Next: the chorus-activation edge case (above).
+   sidecars, -mstackrealign.
+7. 2026-06-05c: the 271.6 s transient = ONE sample = bitcrusher gain1
+   association era delta (chorus exonerated by the state ledger; gated in
+   V2Dist set+render). **WHOLE SONG (663 s) BIT-EXACT, max|d| = 0.** Tools:
+   CHORLOG / C1_CHORLOG chorus+dist state ledgers.

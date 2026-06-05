@@ -214,6 +214,78 @@ __asm__(
   "  jmp *g_chanset_real\n"  // tail-jmp: the real SET's ret returns to site+5
 );
 
+// Chorus per-sample state ledger (C1_CHORLOG=<ch>, wide window C1_CHOR_LO/HI on
+// abs OUTPUT sample, tight per-sample window C1_CHOR_SLO/SHI): detours the
+// CHANNEL chorus's call into the ModDel per-sample core (@0x40b287 ->
+// 0x40b157). At the call site ebp = ModDel obj, edx = dbptr. 2000 obj layout
+// (from the core disasm): +0x00 dbL +0x04 dbR +0x08 mask +0x0c dbptr(store)
+// +0x10 dboffsL +0x14 dboffsR +0x18 mcnt +0x1c mfreq +0x20 mphase
+// +0x24 mmaxoffs. The chorus obj lives inside the channel block
+// @0x718cd8+ch*0x78. Counterpart of the port's CHORLOG=<ch>; lines
+// byte-comparable ([chorK] per chunk, [chorS] per sample, both channels).
+// NB needs C1_VCEFRAME armed for the chunk-pos clock (g_vce_pos).
+#define VA_CHORUS_CALL 0x40b287u
+extern uint32_t g_vce_pos;
+const uint32_t g_moddel_real = 0x40b157u;
+int g_chor_ch = -1;
+uint32_t g_chor_lo = 0, g_chor_hi = 0, g_chor_slo = 0, g_chor_shi = 0;
+uint32_t g_chor_calls = 0;   // per-chunk sample counter for the target chorus
+
+static void chor_detail(uint32_t ebp, uint32_t dbptr, int ch, uint32_t pos)
+{
+  uint32_t mcnt  = *(uint32_t*)(uintptr_t)(ebp+0x18);
+  uint32_t mph   = *(uint32_t*)(uintptr_t)(ebp+0x20);
+  uint32_t mmax  = *(uint32_t*)(uintptr_t)(ebp+0x24);
+  uint32_t mask  = *(uint32_t*)(uintptr_t)(ebp+0x08);
+  uint32_t dboff = *(uint32_t*)(uintptr_t)(ebp + (ch ? 0x14 : 0x10));
+  const float *db = *(const float**)(uintptr_t)(ebp + (ch ? 0x04 : 0x00));
+  uint32_t counter = mcnt + (ch ? mph : 0);
+  counter = (counter < 0x80000000u) ? counter*2u : 0xffffffffu - counter*2u;
+  uint64_t offs64 = (uint64_t)counter * mmax;
+  uint32_t offs_int = (uint32_t)(offs64 >> 32) + dboff;
+  uint32_t idx = dbptr - offs_int - (ch ? 1u : 0u);
+  uint32_t in1 = *(uint32_t*)&db[idx & mask];
+  uint32_t in2 = *(uint32_t*)&db[(idx+1u) & mask];
+  fprintf(stderr, "[chorS] pos=%u ch=%d dbptr=%u mcnt=%08x cnt=%08x offs=%u "
+          "idx=%u frac=%08x in1=%08x in2=%08x\n",
+          pos, ch, dbptr, mcnt, counter, offs_int, idx & mask,
+          (uint32_t)(offs64 & 0xffffffffu), in1, in2);
+}
+void chorlog(uint32_t ebp, uint32_t edx)
+{
+  int ch = (int)((ebp - VA_CHANOBJ0) / 0x78u);
+  if (ch != g_chor_ch) return;
+  uint32_t pos = g_vce_pos + g_chor_calls;
+  g_chor_calls++;
+  if (pos < g_chor_lo || pos > g_chor_hi) return;
+  if (g_chor_calls == 1) {
+    fprintf(stderr, "[chorK] pos=%u dbptr=%u mcnt=%08x\n",
+            pos, edx, *(uint32_t*)(uintptr_t)(ebp+0x18));
+    // channel obj = chorus obj - 0x44 (2000 chain @0x40b5cc); dist obj at
+    // chan+0x10: +0x0 mode (&7, jump table @0x40ac57), decimator +0x1c dcount
+    // +0x20 dfreq +0x24 dvall +0x28 dvalr. fxr = [chan+0xc].
+    uint32_t chan = ebp - 0x44u, dist = chan + 0x10u;
+    fprintf(stderr, "[distK] pos=%u fxr=%u mode=%u dcount=%08x dfreq=%08x dvall=%08x dvalr=%08x\n",
+            pos, *(uint32_t*)(uintptr_t)(chan+0xc),
+            *(uint32_t*)(uintptr_t)(dist+0x0) & 7u,
+            *(uint32_t*)(uintptr_t)(dist+0x1c), *(uint32_t*)(uintptr_t)(dist+0x20),
+            *(uint32_t*)(uintptr_t)(dist+0x24), *(uint32_t*)(uintptr_t)(dist+0x28));
+  }
+  if (pos >= g_chor_slo && pos <= g_chor_shi) {
+    chor_detail(ebp, edx, 0, pos);
+    chor_detail(ebp, edx, 1, pos);
+  }
+}
+extern void hook_chorus(void);
+__asm__(
+  ".text\n.globl hook_chorus\nhook_chorus:\n"
+  "  pushal\n  fnsave g_fpu\n"
+  "  pushl %edx\n  pushl %ebp\n"
+  "  call chorlog\n  addl $8,%esp\n"
+  "  frstor g_fpu\n  popal\n"
+  "  jmp *g_moddel_real\n"  // tail-jmp: the real core's ret returns to site+5
+);
+
 // chgPitch trace (C1_FREQTRACE=1, window C1_FREQ_LO/HI on sample pos): log every
 // genuine syOscChgPitch @0x40a49b -- (pos, osc obj, pitch/note INPUT bits, integer
 // freq + nffrq OUTPUT bits) -- to byte-compare per-tick freq vs the port's FREQLOG
@@ -304,6 +376,7 @@ void chunk_pre(uint32_t cnt)
   memset(g_acc_chanpre, 0, n*8);
   memset(g_acc_chanv, 0, n*8);
   g_chanfx_fired = 0; g_chanfx_n = 0;
+  g_chor_calls = 0;   // chorus ledger: per-chunk sample counter
 }
 void chunk_post(void)
 {
@@ -558,6 +631,24 @@ int main(int argc, char **argv)
       if (cc[0]==0xe8) install_call(VA_CHAN_CALL, &hook_chan); }
     g_vce = 1;
     fprintf(stderr,"[vce] frame tap armed [%u..%u] -> %s.{osc,flt,dist}\n",g_vce_lo,g_vce_hi,pfx);
+  }
+
+  // optional chorus state ledger (needs C1_VCEFRAME for the chunk-pos clock)
+  if (getenv("C1_CHORLOG")) {
+    g_chor_ch = atoi(getenv("C1_CHORLOG"));
+    const char *a;
+    if ((a = getenv("C1_CHOR_LO")))  g_chor_lo  = (uint32_t)strtoul(a,0,10);
+    if ((a = getenv("C1_CHOR_HI")))  g_chor_hi  = (uint32_t)strtoul(a,0,10);
+    if ((a = getenv("C1_CHOR_SLO"))) g_chor_slo = (uint32_t)strtoul(a,0,10);
+    if ((a = getenv("C1_CHOR_SHI"))) g_chor_shi = (uint32_t)strtoul(a,0,10);
+    uint8_t *site = (uint8_t*)(uintptr_t)VA_CHORUS_CALL;
+    if (site[0] != 0xe8) { fprintf(stderr,"no call at chorus site (%02x)\n",site[0]); return 1; }
+    int32_t rel = (int32_t)((uintptr_t)&hook_chorus - (VA_CHORUS_CALL + 5));
+    memcpy(site+1, &rel, 4);
+    if (!getenv("C1_VCEFRAME"))
+      fprintf(stderr,"[chorlog] WARNING: C1_VCEFRAME not set -- pos clock dead\n");
+    fprintf(stderr,"[chorlog] ch%d armed [%u..%u] detail [%u..%u]\n",
+            g_chor_ch, g_chor_lo, g_chor_hi, g_chor_slo, g_chor_shi);
   }
 
   // optional voice-tick trace

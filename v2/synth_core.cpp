@@ -2118,7 +2118,16 @@ struct V2Dist
     case BITCRUSHER:
       x = para->param1 * 256.0f + 1.0f;
       crush2 = (sInt)x;
-      crush1 = gain1 * (32768.0f / x);
+      // era <v1 (fr08): the 2000 crusher set (@0x40ab0b) stores crush1 =
+      // 32768/x WITHOUT gain1 -- gain1 is a separate per-sample multiply in
+      // its render (@0x40abef: fmul gain1; fmul crush1). 2004 folds gain1
+      // into crush1 at set time (synth.asm:1858-1860; one render multiply).
+      // Same product, different association: near a quantizer tie the 1-ULP
+      // difference flips the fistp (fr08 ch1 @271.64s, t=-1 vs -2).
+      if (inst->eraV0())
+        crush1 = 32768.0f / x;
+      else
+        crush1 = gain1 * (32768.0f / x);
       crxor = ((sInt)para->param2) << 9;
       break;
 
@@ -2248,7 +2257,10 @@ private:
 
   inline sF32 bitcrusher(sF32 in)
   {
-    sInt t = (sInt)lrintf(in * crush1); // ASM uses fistp (round-to-nearest), not truncation
+    // era <v1 (fr08): (in*gain1)*crush1 -- two separate 24-bit-rounded
+    // multiplies like the 2000 render; crush1 excludes gain1 there (see set).
+    sF32 scaled = inst->eraV0() ? (in * gain1 * crush1) : (in * crush1);
+    sInt t = (sInt)lrintf(scaled); // ASM uses fistp (round-to-nearest), not truncation
     t = clamp(t * crush2, -0x7fff, 0x7fff) ^ crxor;
     return (sF32)t / 32768.0f;
   }
@@ -2775,6 +2787,17 @@ struct syVModDel
   sF32 mphase;    // modulation stereo phase (0=-180deg, 64=0deg, 127=180deg)
 };
 
+#ifdef V2_VALIDATE
+// CHORLOG=<chan> [CHORLOG_LO/HI=<abs smpl>]: per-sample chorus state ledger for
+// one channel's chorus, byte-comparable with the C1 probe's C1_CHORLOG detour
+// (per-sample core @0x40b157). Armed per renderFrame chunk in the channel loop.
+struct V2ModDel;
+static V2ModDel *g_chorlog_obj = 0;
+static sU32 g_chorlog_pos = 0;          // abs sample pos of current chunk start
+static sU32 g_chorlog_lo = 0, g_chorlog_hi = 0;
+static sU32 g_chorlog_i = 0;            // sample index within chunk
+#endif
+
 struct V2ModDel
 {
   sF32 *db[2];    // left/right delay buffer
@@ -2913,6 +2936,30 @@ private:
     sF32 in2 = delaybuf[(idx + 1) & dbufmask];
     sF32 delayed = in1 + (1.0f - x) * (in2 - in1);
 
+#ifdef V2_VALIDATE
+    if (g_chorlog_obj == this)
+    {
+      sU32 pos = g_chorlog_pos + g_chorlog_i;
+      if (pos >= g_chorlog_lo && pos <= g_chorlog_hi)
+      {
+        // per-chunk header on the first sample of every chunk in the wide window
+        if (g_chorlog_i == 0 && ch == 0)
+          fprintf(stderr, "[chorK] pos=%u dbptr=%u mcnt=%08x\n", pos, dbptr, mcnt);
+        // full per-sample detail only in the tight window (env CHORLOG_SLO/SHI)
+        static sU32 slo = ~0u, shi = 0;
+        if (slo == ~0u) {
+          const char *a = getenv("CHORLOG_SLO"), *b = getenv("CHORLOG_SHI");
+          slo = a ? (sU32)strtoul(a,0,10) : 0; shi = b ? (sU32)strtoul(b,0,10) : 0;
+        }
+        if (pos >= slo && pos <= shi)
+          fprintf(stderr, "[chorS] pos=%u ch=%d dbptr=%u mcnt=%08x cnt=%08x offs=%u "
+                  "idx=%u frac=%08x in1=%08x in2=%08x in=%08x dly=%08x\n",
+                  pos, ch, dbptr, mcnt, counter, offs_int, idx & dbufmask,
+                  (sU32)(offs32_32 & 0xffffffffu), f2u(in1), f2u(in2), f2u(in), f2u(delayed));
+      }
+    }
+#endif
+
     // mix and output
     delaybuf[dbptr] = in + delayed*fbval;
     return in*dry + delayed*wetout;
@@ -2926,6 +2973,10 @@ private:
     // tick
     mcnt += mfreq;
     dbptr = (dbptr + 1) & dbufmask;
+#ifdef V2_VALIDATE
+    if (g_chorlog_obj == this)
+      g_chorlog_i++;
+#endif
   }
 };
 
@@ -4450,6 +4501,11 @@ private:
   {
     // (eraV0 sub-frame path passes a partial count; modern passes SRcFrameSize)
 
+#ifdef V2_VALIDATE
+    // absolute output sample position of this chunk (for CHORLOG)
+    { static sU32 abspos = 0; g_chorlog_pos = abspos; abspos += nsamples; }
+#endif
+
     // clear output buffer
     memset(instance.mixbuf, 0, nsamples * sizeof(StereoSample));
 
@@ -4536,9 +4592,35 @@ private:
         fwrite(instance.chanbuf, sizeof(StereoSample), nsamples, cs_pre);
 #endif
 
+#ifdef V2_VALIDATE
+      // CHORLOG arming: per-sample chorus state ledger for one channel
+      {
+        static int chl_ch = -2; static sU32 chl_lo = 0, chl_hi = 0;
+        if (chl_ch == -2) {
+          const char *e = getenv("CHORLOG");
+          chl_ch = e ? atoi(e) : -1;
+          const char *a = getenv("CHORLOG_LO"), *b = getenv("CHORLOG_HI");
+          chl_lo = a ? (sU32)strtoul(a,0,10) : 0;
+          chl_hi = b ? (sU32)strtoul(b,0,10) : ~0u;
+        }
+        if (chan == chl_ch) {
+          g_chorlog_obj = &chansw[chan].chorus;
+          g_chorlog_lo = chl_lo; g_chorlog_hi = chl_hi; g_chorlog_i = 0;
+        } else if (chl_ch >= 0)
+          g_chorlog_obj = 0;
+      }
+#endif
+
       chansw[chan].process(nsamples);
 
 #ifdef V2_VALIDATE
+      // CHORLOG companion: post-chunk dist state (decimator counter/held vals)
+      if (g_chorlog_obj == &chansw[chan].chorus && g_chorlog_pos >= g_chorlog_lo
+          && g_chorlog_pos <= g_chorlog_hi)
+        fprintf(stderr, "[distK] pos=%u fxr=%d mode=%d dcount=%08x dfreq=%08x dvall=%08x dvalr=%08x\n",
+                g_chorlog_pos, chansw[chan].fxr, chansw[chan].dist.mode,
+                chansw[chan].dist.dcount, chansw[chan].dist.dfreq,
+                f2u(chansw[chan].dist.dvall), f2u(chansw[chan].dist.dvalr));
       if (chan == cs_ch && cs_post)
         fwrite(instance.chanbuf, sizeof(StereoSample), nsamples, cs_post);
       // VCEFRAME .chanpost: this channel's chanbuf AFTER its FX chain (chorus

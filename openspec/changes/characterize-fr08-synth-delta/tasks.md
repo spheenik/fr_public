@@ -178,13 +178,30 @@
       → 1.00000, chorus post-FX max|d|=0, **ch5 dry bit-exact**. Whole-song 12s
       full-mix vs C1: rms **0.0185 → 7.8e-5 (237×)**, rel 0.18%. Modern A/B
       (kkrieger6/debris_ost/josie/pzero) still max|d|=0.
-      **Remaining (sub-0.2%, GLOBAL tail, 1-ULP-class):** ch5 full ~2.3e-5 =
-      reverb/delay tail (dry bit-exact); ch10 dry ~8.25e-4 max = master lc/hc
-      EQ / mix / sum-compressor (voice+channel bit-exact, value-specific to
-      ch10). Per-voice and per-channel DSP is bit-exact for both channels.
-      Tooling: `C1_VCEFRAME`/`C1_VCE_LO/HI` + port `VCEFRAME`/`VCEFRAME_CH`
-      (post-osc/flt/dist/volramp/channel-FX taps), `MUTEREVERB`/`MUTEDELAY`.
-      Speech: RONAN off both sides.
+      **Remaining (whole-song −54.9 dB, GLOBAL tail) — ALL the same sub-frame
+      era-difference (now 4 facets, fully characterized):**
+      1. within-frame TICK-before-SET (fixed: V2Synth::tick eraV0 order);
+      2. mid-frame note-on VOICE phase (fixed: voice-scratch advance);
+      3. mid-frame channel-activation CHORUS phase (fixed: channel-FX advance);
+      4. frame-ALIGNED control-tick edge (ch10 dry): pinned via premix tap to a
+         single-frame chgain error = exactly 63/64 at frame 445 — a ctl7 CC
+         ramps 63→64 at the frame-aligned sample 113920 (ch10 has ctl7→chanvol),
+         and the 2000 ticks frame 445 at the TRAILING edge (pre-event ctl7=63)
+         while the port (=2004) ticks at the LEADING edge (post-event ctl7=64);
+         the one-frame chgain step rings the global lc/hc low-cut EQ. (~8e-4
+         decaying transient.) ch5 full ~2.3e-5 = reverb/delay tail, same family.
+      Also gated this round: the **global sum compressor** (eraV0) — the 2000
+      mix @0x40baf8 ends after the lc/hc EQ, no compressor.
+      **The clean fix for all four facets = gated sub-frame rendering under
+      eraV0** (decouple the trailing-edge pre-event control-tick from a per-chunk
+      voice+channel+global-FX render; matches the 2000 driver @0x40b95c/0x40ba10
+      exactly and subsumes the two scratch-advance hacks). Deferred: a
+      well-scoped ~100-line eraV0-only render()/renderFrame() refactor; the
+      remaining residual is inaudible (−55 dB) so it's a correctness/elegance
+      pass, not an audible one. Per-voice + per-channel DSP is bit-exact for both
+      channels; ch5 dry is bit-exact. Tooling: `C1_VCEFRAME`/`C1_VCE_LO/HI` +
+      port `VCEFRAME`/`VCEFRAME_CH` (post-osc/flt/dist/volramp/channel-FX +
+      premix/EQ-input taps), `MUTEREVERB`/`MUTEDELAY`. Speech: RONAN off both.
 - [x] 3.5 Line-diff the fingerprint-only (F) functions. → **DONE.** Filter:
       non-moog SVF bit-identical @44100, moog modes 6/7 absent. Reverb: shared
       Freeverb topology + identical gain table. Chorus: shared modulated delay.

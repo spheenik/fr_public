@@ -4443,6 +4443,35 @@ private:
     MIXTAP_SNAP(compr, mix, nsamples);
 
     DEBUG_PLOT_STEREO(mix, mix, nsamples);
+
+#ifdef V2_VALIDATE
+    // VCEFRAME=<prefix>: append the per-FRAME (not per-synthRender) accumulated
+    // voice sub-stage taps (osc/flt/dist, mono, summed across voices) so the A/B
+    // harness can byte-diff a specific control frame against the C1 vce tap.
+    // (BUSTAP dumps only the last frame of each synthRender call; this dumps
+    // every frame, which is needed to localize a divergence deep inside a
+    // multi-frame render span.)
+    {
+      static FILE *vo=0,*vf=0,*vd=0; static int armed=-1;
+      if (armed<0) {
+        const char *p=getenv("VCEFRAME"); armed=p?1:0;
+        if (armed){ char b[600];
+          snprintf(b,sizeof b,"%s.osc",p);  vo=fopen(b,"wb");
+          snprintf(b,sizeof b,"%s.flt",p);  vf=fopen(b,"wb");
+          snprintf(b,sizeof b,"%s.dist",p); vd=fopen(b,"wb"); }
+      }
+      static FILE *vc=0;
+      if (armed<0) {} // (armed set above)
+      if (armed && !vc) { const char *p=getenv("VCEFRAME"); char b[600];
+        snprintf(b,sizeof b,"%s.chan",p); vc=fopen(b,"wb"); }
+      if (armed){
+        if(vo) fwrite(g_vcetap_osc, sizeof(sF32),nsamples,vo);
+        if(vf) fwrite(g_vcetap_flt, sizeof(sF32),nsamples,vf);
+        if(vd) fwrite(g_vcetap_dist,sizeof(sF32),nsamples,vd);
+        if(vc) fwrite(g_chantap, sizeof(StereoSample),nsamples,vc); // post-volramp voice sum, pre channel-FX
+      }
+    }
+#endif
   }
 };
 

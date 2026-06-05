@@ -43,6 +43,20 @@ static const uint32_t RDTSC_SITES[] = { 0x40a494u, 0x40a93eu, 0x40aa6cu };
 #define VA_RONAN_PUSH_ARG1 0x409a9cu
 #define VA_RONAN_INIT_CALL 0x409aadu
 
+// Per-frame voice sub-stage tap (C1_VCEFRAME=<pfx>, optional C1_VCE_LO/HI):
+// accumulate vcebuf @0x714fc4 post-osc / post-flt / post-dist across the voices
+// in each render-chunk and dump per chunk -- the C1 counterpart of the port's
+// VCEFRAME dump. Detours: the chunk render call @0x40b982 (pos/reset/dump),
+// the per-voice syV2Render call @0x40ba88 (post-dist on return), and inside
+// syV2Render at 0x40ad76 (post-osc) and 0x40adfe (post-flt).
+#define VA_VCEBUF      0x714fc4u
+#define VA_CHUNK_CALL  0x40b982u   // `e8 89 00 00 00` call render-chunk 0x40ba10
+#define VA_CHUNK_REAL  0x40ba10u
+#define VA_V2R_CALL    0x40ba88u   // `e8 c0 f2 ff ff` call syV2Render 0x40ad4d
+#define VA_V2R_REAL    0x40ad4du
+#define VA_POSTOSC     0x40ad76u   // `8d ad 4c ff ff ff` lea ebp,[ebp-0xb4]
+#define VA_POSTFLT     0x40adfeu   // `be c4 4f 71 00` mov esi,0x714fc4
+
 int g_solo = -1; // channel to keep (0..15); -1 = all
 
 // Filter the assembled 2000 MIDI buffer in place: keep only events whose
@@ -76,6 +90,9 @@ int g_cs_ch = -1;
 FILE *g_cs_pre = 0, *g_cs_post = 0;
 const uint32_t g_chanfx_real = VA_CHAN_FX;
 
+extern FILE *g_fvc; extern int g_vce_chan; extern uint32_t g_vce_count;
+extern float g_acc_chan[640];
+
 static void cs_dump(uint32_t ebp, FILE *f)
 {
   if (!f) return;
@@ -84,7 +101,20 @@ static void cs_dump(uint32_t ebp, FILE *f)
   uint32_t n = *(uint32_t*)(uintptr_t)VA_CHUNK_N;
   fwrite((void*)(uintptr_t)VA_CHANBUF, 2*sizeof(float), n, f);
 }
-void chanstream_pre(uint32_t ebp)  { cs_dump(ebp, g_cs_pre); }
+void chanstream_pre(uint32_t ebp)
+{
+  cs_dump(ebp, g_cs_pre);
+  // vce tap: accumulate this channel's post-volramp voice sum (chanbuf, pre
+  // channel-FX) for the per-frame comparison against the port's g_chantap.
+  if (g_fvc) {
+    int ch = (int)((ebp - VA_CHANOBJ0) / 0x78u);
+    if (ch == g_vce_chan) {
+      const float *cb = (const float*)(uintptr_t)VA_CHANBUF;
+      uint32_t n = g_vce_count; if (n > 320) n = 320;
+      for (uint32_t i = 0; i < 2*n; i++) g_acc_chan[i] += cb[i];
+    }
+  }
+}
 void chanstream_post(uint32_t ebp) { cs_dump(ebp, g_cs_post); }
 
 // Tick log (C1_TICKLOG=1): trace the first voice ticks -- env1 out/state,
@@ -124,6 +154,97 @@ __asm__(
   "  popal\n"
   "  ret\n"
 );
+
+// ---- per-frame voice sub-stage tap ------------------------------------------
+int   g_vce = 0;
+uint32_t g_vce_lo = 0, g_vce_hi = 0xffffffffu;
+uint32_t g_vce_pos = 0, g_vce_count = 0;
+FILE *g_fvo = 0, *g_fvf = 0, *g_fvd = 0;
+float g_acc_osc[320], g_acc_flt[320], g_acc_dist[320];
+float g_acc_chan[640]; // stereo, post-volramp voice sum (pre channel-FX)
+FILE *g_fvc = 0;
+int g_vce_chan = -1;   // channel to tap chanbuf for (= solo channel)
+const uint32_t g_chunk_real = VA_CHUNK_REAL;
+const uint32_t g_v2r_real   = VA_V2R_REAL;
+uint8_t g_fpu[128] __attribute__((aligned(16)));
+
+static void vce_snap(float *acc)
+{
+  const float *vb = (const float*)(uintptr_t)VA_VCEBUF;
+  uint32_t n = g_vce_count; if (n > 320) n = 320;
+  for (uint32_t i = 0; i < n; i++) acc[i] += vb[i];
+}
+void snap_osc(void)  { vce_snap(g_acc_osc); }
+void snap_flt(void)  { vce_snap(g_acc_flt); }
+void snap_dist(void) { vce_snap(g_acc_dist); }
+
+void chunk_pre(uint32_t cnt)
+{
+  g_vce_count = cnt;
+  uint32_t n = cnt > 320 ? 320 : cnt;
+  memset(g_acc_osc, 0, n*4); memset(g_acc_flt, 0, n*4); memset(g_acc_dist, 0, n*4);
+  memset(g_acc_chan, 0, n*8);
+}
+void chunk_post(void)
+{
+  uint32_t n = g_vce_count > 320 ? 320 : g_vce_count;
+  if (g_vce_pos >= g_vce_lo && g_vce_pos <= g_vce_hi) {
+    if (g_fvo) fwrite(g_acc_osc,  4, n, g_fvo);
+    if (g_fvf) fwrite(g_acc_flt,  4, n, g_fvf);
+    if (g_fvd) fwrite(g_acc_dist, 4, n, g_fvd);
+    if (g_fvc) fwrite(g_acc_chan, 8, n, g_fvc);
+  }
+  g_vce_pos += g_vce_count;
+}
+
+// detour @0x40b982: ecx = chunk sample count on entry
+extern void hook_chunk(void);
+__asm__(
+  ".text\n.globl hook_chunk\nhook_chunk:\n"
+  "  pushal\n  pushl %ecx\n  call chunk_pre\n  addl $4,%esp\n  popal\n"
+  "  call *g_chunk_real\n"
+  "  pushal\n  call chunk_post\n  popal\n  ret\n"
+);
+// wrap @0x40ba88: syV2Render, snapshot post-dist on return
+extern void hook_v2r(void);
+__asm__(
+  ".text\n.globl hook_v2r\nhook_v2r:\n"
+  "  call *g_v2r_real\n"
+  "  pushal\n  fnsave g_fpu\n  call snap_dist\n  frstor g_fpu\n  popal\n  ret\n"
+);
+// detour @0x40ad76: post-osc, then the overwritten `lea ebp,[ebp-0xb4]`
+extern void hook_postosc(void);
+__asm__(
+  ".text\n.globl hook_postosc\nhook_postosc:\n"
+  "  pushal\n  fnsave g_fpu\n  call snap_osc\n  frstor g_fpu\n  popal\n"
+  "  lea -0xb4(%ebp),%ebp\n"
+  "  jmp *g_jmp_postosc\n"
+);
+// detour @0x40adfe: post-flt, then the overwritten `mov esi,0x714fc4`
+extern void hook_postflt(void);
+__asm__(
+  ".text\n.globl hook_postflt\nhook_postflt:\n"
+  "  pushal\n  fnsave g_fpu\n  call snap_flt\n  frstor g_fpu\n  popal\n"
+  "  movl $0x714fc4,%esi\n"
+  "  jmp *g_jmp_postflt\n"
+);
+const uint32_t g_jmp_postosc = VA_POSTOSC + 6;  // resume after the 6-byte lea
+const uint32_t g_jmp_postflt = VA_POSTFLT + 5;  // resume after the 5-byte mov
+
+static void install_detour(uint32_t site, void *target, int len)
+{
+  uint8_t *s = (uint8_t*)(uintptr_t)site;
+  s[0] = 0xe9; // jmp rel32
+  int32_t rel = (int32_t)((uintptr_t)target - (site + 5));
+  memcpy(s+1, &rel, 4);
+  for (int i=5;i<len;i++) s[i]=0x90;
+}
+static void install_call(uint32_t site, void *target)
+{
+  uint8_t *s = (uint8_t*)(uintptr_t)site;
+  int32_t rel = (int32_t)((uintptr_t)target - (site + 5));
+  s[0]=0xe8; memcpy(s+1,&rel,4);
+}
 
 extern void hook_chan(void);
 __asm__(
@@ -208,6 +329,34 @@ int main(int argc, char **argv)
     int32_t rel = (int32_t)((uintptr_t)&hook_chan - (VA_CHAN_CALL + 5));
     memcpy(site+1, &rel, 4);
     fprintf(stderr,"[solo] chanstream tap on ch%d -> %s.{pre,post}\n", ch, pfx);
+  }
+
+  // optional per-frame voice sub-stage tap
+  if (getenv("C1_VCEFRAME")) {
+    const char *pfx = getenv("C1_VCEFRAME");
+    const char *lo = getenv("C1_VCE_LO"), *hi = getenv("C1_VCE_HI");
+    if (lo) g_vce_lo = (uint32_t)strtoul(lo,0,10);
+    if (hi) g_vce_hi = (uint32_t)strtoul(hi,0,10);
+    char p[600];
+    snprintf(p,sizeof p,"%s.osc",pfx);  g_fvo=fopen(p,"wb");
+    snprintf(p,sizeof p,"%s.flt",pfx);  g_fvf=fopen(p,"wb");
+    snprintf(p,sizeof p,"%s.dist",pfx); g_fvd=fopen(p,"wb");
+    snprintf(p,sizeof p,"%s.chan",pfx); g_fvc=fopen(p,"wb");
+    g_vce_chan = g_solo;  // tap chanbuf for the soloed channel
+    // verify opcodes before patching
+    uint8_t *c1=(uint8_t*)(uintptr_t)VA_CHUNK_CALL, *c2=(uint8_t*)(uintptr_t)VA_V2R_CALL;
+    uint8_t *po=(uint8_t*)(uintptr_t)VA_POSTOSC,   *pf=(uint8_t*)(uintptr_t)VA_POSTFLT;
+    if (c1[0]!=0xe8||c2[0]!=0xe8||po[0]!=0x8d||pf[0]!=0xbe) {
+      fprintf(stderr,"[vce] opcode check failed %02x %02x %02x %02x\n",c1[0],c2[0],po[0],pf[0]); return 1; }
+    install_call(VA_CHUNK_CALL, &hook_chunk);
+    install_call(VA_V2R_CALL,   &hook_v2r);
+    install_detour(VA_POSTOSC, &hook_postosc, 6);
+    install_detour(VA_POSTFLT, &hook_postflt, 5);
+    // chanbuf (post-volramp voice sum) tap needs the channel-FX detour too
+    { uint8_t *cc=(uint8_t*)(uintptr_t)VA_CHAN_CALL;
+      if (cc[0]==0xe8) install_call(VA_CHAN_CALL, &hook_chan); }
+    g_vce = 1;
+    fprintf(stderr,"[vce] frame tap armed [%u..%u] -> %s.{osc,flt,dist}\n",g_vce_lo,g_vce_hi,pfx);
   }
 
   // optional voice-tick trace

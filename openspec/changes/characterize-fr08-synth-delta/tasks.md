@@ -156,12 +156,25 @@
       max|d| 0.136 → 0.0033, rms 76×; whole-song 12 s full-mix vs C1 rms
       0.0185 → 2.0e-4 (92×).** Modern A/B still max|d|=0. Probe knob added:
       `C1_TICK_LO/HI`.
-      **Remaining ch5 residual (~3%, decaying, phase-exact):** NOT the
-      partial-frame transient (frames 1272-1275 after the note are bit-exact)
-      and NOT an env-state transition (still ATTACK at divergence frame 1276).
-      A bounded filter/dist state diff appearing ~4 frames into the note with no
-      MIDI event between. Next: C1 vce-tap (osc/flt/dist) at frame 1276 to
-      bisect. Speech: RONAN off both sides.
+      **Remaining ch5 residual FULLY TRACED → channel-FX sub-frame phase.**
+      Built a C1 per-frame voice-substage tap (`C1_VCEFRAME`: post-osc/flt/dist
+      + post-volramp voice sum) vs the port's `VCEFRAME` dump. At the first
+      divergent frame 1276: post-osc, post-flt, post-dist, AND post-volramp
+      voice sum are all **max|d|=0** — the whole dry voice is bit-exact. The
+      residual enters in the **channel FX chain (dist+chorus)**: the chorus is
+      a feedback modulated-delay (fb≈0.42), so the divergence recirculates and
+      grows over ~3-4 loops, surfacing ~4 frames after onset. Root cause = the
+      same sub-frame-rendering era-delta one level up: the 2000 renders
+      voices+channel-FX per sub-frame chunk @0x40ba10, so a mid-frame note-on
+      advances the channel chorus mod-counter/write-pointer over the partial
+      frame; the port (=2004) runs channel-FX once per whole frame, leaving the
+      chorus `tickd` samples out of phase. The voice-scratch gate fixed the
+      voice phase but not the channel-FX phase. Faithful fix = **gated
+      sub-frame rendering** under eraV0 (a moderate render()/renderFrame()
+      refactor, kept behind eraV0 so the modern whole-frame path stays
+      bit-exact). Deferred: ~0.46% whole-song, bounded/decaying/phase-exact;
+      characterization complete. Tap knobs: `C1_VCEFRAME`/`C1_VCE_LO/HI`,
+      port `VCEFRAME`. Speech: RONAN off both sides.
 - [x] 3.5 Line-diff the fingerprint-only (F) functions. → **DONE.** Filter:
       non-moog SVF bit-identical @44100, moog modes 6/7 absent. Reverb: shared
       Freeverb topology + identical gain table. Chorus: shared modulated delay.

@@ -409,13 +409,34 @@ noteon's only keysync branch zeros the 3 osc cnt fields, never reseeds — but
 ch5 isn't SYNC_FULL so it had no effect; kept out to avoid dead gating until a
 SYNC_FULL v0 patch is found.)
 
-**Remaining ch5 residual (~3% on the one mid-frame-onset note, DECAYING 3.3%→
-1.2% as it rings out, phase-exact):** a bounded filter/dist state transient from
-the partial-frame advance. First 7 s stay bit-exact; only that note carries it.
-Suspect: a 1-ULP-class difference in how the 4×-oversampled osc box filter / SVF
-state splits across the `tickd`+`SRcFrameSize` boundary vs the 2000's single
-sub-frame chunk, or the dist. Next: render-osc-only vs osc+flt in the scratch
-advance to bisect, or a C1 vce-tap at 325632.
+**Remaining ch5 residual FULLY TRACED (2026-06-05) → channel-FX sub-frame
+phase.** Built a C1 per-frame voice-substage tap (`C1_VCEFRAME=`/`C1_VCE_LO/HI`
+in the solo probe: post-osc @0x40ad76, post-flt @0x40adfe, post-dist on
+syV2Render return, post-volramp voice-sum via the channel-FX detour) vs the
+port's `VCEFRAME=` per-frame dump (`g_vcetap_*` + `g_chantap`). Result at the
+first divergent frame (1276, the note's ~5th frame):
+- post-osc, post-flt, post-dist (voice mono sum): **max|d| = 0**
+- post-volramp voice sum (chanbuf, pre channel-FX): **max|d| = 0**
+- dry output (post channel-FX): **diverges**
+
+So the whole dry VOICE is bit-exact; the residual enters in the **channel FX
+chain (dist + chorus)**. The chorus is a feedback modulated-delay: a divergence
+recirculates (fb≈0.42, dboffs≈296) and grows over ~3–4 loops, which is why it
+first crosses 1e-6 ~4 frames *after* the note onset (frames 1272–1275 of the
+output are bit-exact) even though the cause is at the onset.
+
+**Root cause (same sub-frame class as the voice fix, one level up):** the 2000
+driver renders voices AND channel-FX per sub-frame chunk @0x40ba10, so a
+mid-frame note-on advances the channel chorus's mod-counter / write-pointer /
+feedback over the partial frame remainder. The port (=2004) runs channel-FX
+once per whole frame in `V2Chan::process`, so the chorus state is `tickd`
+samples out of phase. The voice-scratch gate fixed the VOICE phase but not the
+channel-FX phase. The faithful fix is **gated sub-frame rendering** under eraV0
+(render voices+channels in `min(remaining, frame_left)` chunks; tick control +
+global FX only at 256-boundaries) — a moderate `render()`/`renderFrame()`
+refactor that must stay behind eraV0 so the modern whole-frame path (bit-exact
+vs the 2004 asm) is untouched. Deferred: ~0.46 % whole-song, bounded, decaying,
+phase-exact; characterization complete.
 
 (The reverb/delay tail is exonerated as a *primary* suspect: ch10 full-vs-dry
 split showed the tail contributes only at the 7.5e-5 level.)

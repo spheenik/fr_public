@@ -1,10 +1,10 @@
 # Handover: fr08 whole-song bit-exact sweep
 
 **Goal:** make the fr08 whole-song render bit-exact vs the genuine year-2000
-binary. **Currently bit-exact for the first 118.056 s** (full mix, incl.
-reverb/delay tail). The sweep proceeds divergence by divergence; this doc
-carries the current target plus everything solved so far (methods matter — the
-solved cases are the playbook).
+binary. **The whole 663 s song is now BIT-EXACT except ONE 7.4 s decaying
+transient at 271.64–279.03 s** (max|d| 0.0025; everything before 271.6 s and
+the entire last 384 s match, reverb/delay tail included). This doc carries
+that last target plus the solved-case playbook (the methods matter).
 
 Branch: `v2-port-fidelity`. Work dir: `/home/spheenik/projects/scene/fr_public/v2/validate`.
 `../v2m/fr08-extraction/DELTA.md` = the delta catalogue + era-gating model
@@ -44,52 +44,58 @@ runout-from-DECAY check was added between 2000 and 2004. **Gated**: skip the
 clamp in DECAY/ATTACK under `eraV0()` (`V2Env::tick`, synth_core.cpp ~1623).
 Regression gate green (5 songs modern A/B MATCH).
 
-## CURRENT TARGET: ch15 first activation @118.056 s
+## ch15 @118.06 s — RESOLVED (Ronan speech, not a synth delta)
 
-First mix diff: stereo sample 5,206,273 = **frame 20337 offset 1** (the
-volramp-signature offset). ch15: pgm 0x11 set @116.29 s, **first note ever**
-(note 0x41 vel 0x50) @ sample **5,206,249** = mid-frame 20336.91, surrounded
-by a CC7 ramp (`bf 07 xx` every ~424 smp — sub-chunk boundaries). pgm17: osc1
-saw/tri col=1, osc2 pulse col=61, F1 allpass, LFO1 sin→osc1 pitch (vibrato),
-mods vel→ampenv, lfo1→osc1pitch, ctl7→chanvol.
+The C1 harness AND c1_solo_probe were running Ronan's speech PROCESS call on
+ch15 (`cmp cl,0xf; call 0x40b7ba` @0x40baac, and the alloc-time noteon
+@0x40bc71/@0x4093e7) EVEN with Ronan INIT nop'd — processing ch15's chanbuf
+with uninitialized speech state from ch15's first note (118.06 s). The old
+"speech silently absent" assumption was wrong. The port compiles RONAN out
+entirely, so to make ch15 the raw voice chain on both sides, **nop the
+process call** @0x40baac in both C1 tools (`C1_RONAN=1` overrides). After
+re-deriving the ground truth, ch15 was bit-exact and the next real divergence
+surfaced at ch1 @192.09 s (the PGM-change delta, gated — see DELTA.md).
 
-**Exonerated (bit-exact over the activation window, all verified):**
-- voice chain: osc / flt / dist taps — bit-exact
-- envelopes: env1+env2 out/state per tick (C1 ticklog vs port ctrllog) — bit-exact
-- osc freq path: all 51 chgPitch records (pitch/freq/nffrq bits) — bit-exact
+The earlier "C1 chan content is phase-shifted, 5th sub-frame facet" analysis
+was chasing the Ronan-corrupted ch15 output; disregard it.
 
-**The divergence enters at the post-volramp `.chan` tap** (voice→chan
-accumulation): first diff frame 20338 offset 1 on the ch15 SOLO (frame 20337
-offset 1 in the full mix — note the 1-frame discrepancy, unexplained).
-Port-side `cv` (chan/(voice·lvol)) is exactly linear `k·0.00102145` = the
-trailing-edge tick2 ramp ✓ self-consistent. C1-side "cv" looks ≈
-`A·k(k+1)/2` for small k but turns chaotic (sign flips, |cv|>1) at larger k ⇒
-**C1's chan content is NOT a scaled copy of the voice buffer — it is
-timing/phase-shifted content**, i.e. the 2000 accumulates the activating
-voice into chan with different sub-frame timing than the port (the mid-frame
-note-on partial piece [5206249..5206272) and/or the CC7-event sub-chunks).
-This is a **5th facet of the sub-frame era-difference family** (after
-TICK-before-SET, mid-frame note-on voice phase, mid-frame channel-activation
-chorus phase, trailing-edge control tick).
+## CURRENT (and LAST) TARGET: chorus-phase transient @271.64–279.03 s
+
+The whole song is bit-exact except this one **7.4 s decaying transient**
+(max|d| 0.0025 at onset → rings out to exactly 0 by 279.03 s; bit-exact
+before and after). It is **ch1**, isolated by chanstream:
+- **ch1 PRE-FX (chorus input) is bit-exact for the entire 272 s** — the dry
+  voice sum feeding the channel FX never diverges.
+- **ch1 POST-FX diverges only in the final ~0.07 s of the active passage**
+  (c1=−1.719 vs port=−1.547), with PRE bit-exact at that same sample.
+
+So the divergence is **chorus-internal**: identical input, divergent output ⇒
+the chorus's own state (mod counter / delay write-pointer) has desynced.
+Cause: ch1 here plays **rapid staccato** (note 84, ~48 ms on / 48 ms off,
+through pgm2's chorus). Channels are SKIPPED when silent (npoly==0), freezing
+the chorus; each mid-frame reactivation runs the eraV0 channel-activation
+advance (DELTA.md "ch5 SOLVED … mid-frame channel-activation"). One of these
+rapid toggles advances the 2000's chorus mod/delay phase by a sample the port
+doesn't replicate; the error stays bounded, then the passage ends and silence
+flushes the delay line back to bit-exact.
 
 **Where to look next:**
-1. The port's mid-frame note-on advance (`processMIDI` note-on, eraV0 scratch
-   render) assumes the partial render is INAUDIBLE (curvol=0,ramp=0). Verify
-   what the 2000 actually does with the partial piece's chan accumulation for
-   THIS case (ch5's verification only covered chorus-state advance with FX
-   input exactly 0). Check leftover curvol in slot 0 (FULL→OSC collapse does
-   NOT zero curvol; both solo modes event-filter, so slot history should
-   match — verify).
-2. Dump C1's chan tap per SUB-CHUNK (the .chan stream concatenates variable
-   sub-chunks — instrument chunk_pre/chunk_post with explicit (pos,count)
-   sidecars to see exact piece boundaries) and find at which piece the
-   timing shift enters.
-3. Port side: add cur/ramp + chan-accumulation logging per render piece
-   (sub-frame path, `renderSubFrame`/`controlTick` ~4256).
-4. Note the CC7 ramp: chgain is flat-per-frame in BOTH eras (ch10 63/64 case
-   + 2000 chan code @0x40b67b — param store + channel modmatrix, no
-   per-sample gain ramp), so chgain VALUES are not the suspect; TIMING of the
-   pieces is.
+1. This is an EDGE CASE of the already-gated channel-activation chorus advance
+   (`processMIDI` note-on, `npoly==0` branch, ~3994): that advance renders the
+   partial sub-frame on a ZERO buffer (activating voice muted), advancing only
+   the chorus mod-counter/write-pointer. Verify the advance length and the
+   chorus mod-counter increment against the 2000 for a RAPID re-activation
+   (the ch5 proof was a single activation; rapid on/off/on within a few frames
+   may hit a different `tickd`/skip interaction).
+2. Tap ch1's chorus mod-counter + delay write-pointer per chunk on both sides
+   (C1: chorus obj in the channel block @0x718cd8+ch*0x78; port: V2Chan.chorus)
+   across 270–272 s and find the first chunk where the counter desyncs.
+3. The chunk sidecar (`C1_VCEFRAME … .chunks`: pos/count/chanfx_n/fired) +
+   `.chanpre`/`.chanv` taps (added this session) show exactly which sub-chunks
+   ran ch1's FX — use them to align the per-chunk chorus-state comparison.
+4. Because it self-heals (flushes to bit-exact), this is the lowest-severity
+   class; a fix must not regress the single-activation ch5 case or the
+   5-song modern gate.
 
 ## Ground truth & reproduction
 
@@ -109,7 +115,10 @@ chorus phase, trailing-edge control tick).
   chunked compare (233 MB).
 - **Event list**: `./c1_timing_probe /tmp/fr08/unpacked.bin CSV SECONDS` →
   (idx, cursmpl, songtick, running-status MIDI hex — parse statefully).
-  Current: `/tmp/fr08/c1_timing_full.csv` (through 121 s).
+  Current: `/tmp/fr08/c1_timing_full.csv` (through 275 s).
+- **NB the C1 tools now nop Ronan's ch15 process call by default** (`C1_RONAN=1`
+  to keep speech). Re-derive ground truth after any c1_fr08_harness change:
+  `./c1_fr08_harness /tmp/fr08/unpacked.bin /tmp/fr08/c1_fr08.f32 4096 700`.
 
 ## Tooling reference (validate/; env-gated, never affects audio)
 
@@ -120,7 +129,13 @@ chorus phase, trailing-edge control tick).
   C1 `C1_VCEFRAME=<pfx> C1_VCE_LO=<smpl> C1_VCE_HI=<smpl>` (dumps only chunks
   with pos in window; SUB-CHUNK granularity — align by content!);
   port `VCEFRAME=<pfx> VCEFRAME_CH=N` (absolute, every frame).
-  Files: `.osc/.flt/.dist` mono, `.chan/.chanpostA/.premix` stereo.
+  Files: `.osc/.flt/.dist` mono, `.chan/.chanpostA/.premix` stereo. Added
+  this session (C1): `.chanpre` (chanbuf BEFORE voice render — stale/zeroed
+  audit), `.chanv` (chanbuf right AFTER the voice volramp loop, before any
+  other writer), `.chunks` (per-chunk sidecar {pos,count,chanfx_n,fired}).
+  `C1_VCE_CH=N` taps channel N in a FULL-MIX render (no C1_SOLO needed).
+  NB the probe now needs **`-mstackrealign`** (hooks call C on the 2000's
+  unaligned stack).
 - **Voice tick trace**: C1 `C1_TICKLOG=1 C1_TICK_LO/HI=<smpl>` → per-tick
   env1.out/state, cur, ramp (+ hex: e1.out/val, e2.st/out/val, cur, ramp).
   NB pos labels lag (pos = last processed event, not frame start).
@@ -133,6 +148,14 @@ chorus phase, trailing-edge control tick).
   (kind=0: freq=r[2], pitch=r[3], nffrq=r[4]). Streams align 1:1 in order.
 - **Mute global FX**: `MUTEREVERB=1 MUTEDELAY=1` / `C1_MUTE_REVERB=1
   C1_MUTE_DELAY=1`.
+- **Alloc trace** (NEW): C1 `C1_ALLOCTRACE=1` → `[alloc] pos chan slot note
+  vel` from the genuine voice allocator (@0x40bd9f, just before the SET call);
+  port `ALLOCTRACE=1`. Streams align 1:1 — diff to find the first diverging
+  steal (can long predate the audible divergence if the disputed voices are
+  silent). fr08: all 2640 allocations identical.
+- **Chanvol trace** (NEW): C1 `C1_CHANVTRACE=N` / port `CHANVTRACE=N` → the
+  modulated chanvol float (hex) + raw ctl7 whenever it changes. Pinned the
+  192 s PGM-change ctl7→chanvol delta.
 - **Param dumps**: `OSCDUMP` `MODDUMP` `NOTETRACE` `ALLOCTRACE` `LFODUMP`
   `ENVTRACE` `DISTTRACE` `CHORUSTRACE` `REVERBTRACE` `CHANTRACE`; C1 `REVDUMP`.
 - **Patch/event spelunking offline**: the v2m parses trivially in python
@@ -186,7 +209,11 @@ confirm the frontier moved.
 3. `c04b844` reverb gain precision + SetSourceVersion reorder + low-cut gate
    → 66.8 s bit-exact.
 4. `fa3f5cf`/`f5ec77c` status + the (wrong) ch3-osc handover.
-5. 2026-06-05: osc claim disproven (alignment artifact); ch3 = corrupted
+5. 2026-06-05a: osc claim disproven (alignment artifact); ch3 = corrupted
    extraction (8 bytes, re-extracted); ch2 = env DECAY-clamp era delta
-   (gated); **frontier 66.798 s → 118.056 s**. New tools: C1_FREQTRACE,
-   hex ticklog. Next: ch15 activation chan-timing facet (above).
+   (gated). **66.798 s → 118.056 s.** Tools: C1_FREQTRACE, hex ticklog.
+6. 2026-06-05b: ch15 = Ronan ch15 speech process (nop'd in C1 tools);
+   ch1 @192 s = PGM-change era delta (no same-pgm check + ctl7→127, gated).
+   **118.056 s → WHOLE SONG bit-exact except one 7.4 s chorus-phase transient
+   @271.6 s.** Tools: C1_ALLOCTRACE, CHANVTRACE, .chunks/.chanpre/.chanv
+   sidecars, -mstackrealign. Next: the chorus-activation edge case (above).

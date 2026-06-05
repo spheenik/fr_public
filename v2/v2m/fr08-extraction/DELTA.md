@@ -1,19 +1,23 @@
 # fr-08 (year-2000) synth vs final (2004) V2 — behavioral delta
 
-> **STATUS 2026-06-05 (eod): fr08 full mix is BIT-EXACT for the first
-> 118.056 s** vs the genuine year-2000 binary (C1 ground truth), incl.
-> reverb/delay tail. The 66.8 s "ch3 osc inversion" was resolved as TWO
-> findings: (a) the claim itself was a tap-window alignment artifact, and (b)
-> the actual ch3 divergence was **8 corrupted bytes in the EXTRACTED v2m**
-> (vs the image-embedded original; re-extracted + reconverted — data, not
-> synth). The next divergence (ch2 @67.05 s) was a REAL era delta: the
-> **env DECAY-clamp placement** (see the syEnvTick section below), now gated
-> under eraV0. Current frontier: **ch15 first activation @118.056 s**, a
-> sub-frame channel-activation timing facet — see `HANDOVER-fr08-sweep.md`.
-> Modern (≥v1) stays bit-exact vs the 2004 asm (5-song gate green). Fixes
-> landed earlier: gated **sub-frame rendering** (4 facets), **reverb gain
-> PC=64 precision** + SetSourceVersion-before-SetGlobals reorder, **reverb
-> low-cut gate**.
+> **STATUS 2026-06-05 (eod): fr08 WHOLE SONG (663 s) is BIT-EXACT vs the
+> genuine year-2000 binary EXCEPT a single 7.4 s decaying transient at
+> 271.64–279.03 s** (max|d| 0.0025, rings out to 0; the last 384 s and
+> everything before 271.6 s are bit-exact, reverb/delay tail included). The
+> day's findings, in order: (1) the 66.8 s "ch3 osc inversion" was a
+> tap-window alignment artifact AND **8 corrupted bytes in the EXTRACTED v2m**
+> (re-extracted from the image-embedded original — data, not synth);
+> (2) ch2 @67.05 s = **env DECAY-clamp placement** era delta (syEnvTick
+> section below), gated; (3) ch15 @118.06 s = the C1 harness/probe were
+> running Ronan's speech PROCESS on ch15 with uninitialized state (now nop'd —
+> the port has no Ronan); (4) ch1 @192.09 s = **PGM-change era delta** (no
+> same-pgm early-out + ctl7→127 reset; PC handler section below), gated.
+> The remaining 271.6 s transient is the **mid-frame channel-activation
+> chorus-phase facet** (ch1 staccato-through-chorus; dry input bit-exact,
+> chorus mod/delay phase drifts then flushes) — see `HANDOVER-fr08-sweep.md`.
+> Modern (≥v1) stays bit-exact vs the 2004 asm (5-song gate green). Earlier
+> fixes: gated **sub-frame rendering** (4 facets), **reverb gain PC=64
+> precision** + SetSourceVersion reorder, **reverb low-cut gate**.
 
 Working catalogue for the `characterize-fr08-synth-delta` change. Evidence
 source: the depacked v1.01 image (`unpacked.bin`, md5
@@ -112,6 +116,25 @@ env2 keeps a residual pitch offset (chgPitch trace: pitch 41000008 vs
 41000000 → integer freq +2 → slow phase drift). Note `c1_env_probe`'s
 "bit-exact" verdict did NOT exercise this edge (gate-held sub-clamp DECAY).
 (ATTACK leg of the gate is belt-and-braces: atd ≥ 2^-4 > 2^-13, unreachable.)
+
+## ProcessProgramChange (2000) — two deltas, GATED (2026-06-05)
+
+2000 PC handler @**0x40be15** vs 2004 `ProcessProgramChange` (synth.asm:5685):
+
+1. **No same-program early-out.** 2004 does `cmp al,[edi]; jz .sameprg` and
+   skips the voice-kill when the program is unchanged. The 2000 has NO such
+   check — EVERY PC event (even a reload of the current pgm) runs the
+   not-aus loop (`chanmap[v]==chan → −1` for all voices).
+2. **Controller reset writes ctl7 = 127.** Both zero ctl1–6
+   (`mov cl,6; rep stosb`), but the 2000 then does `mov al,0x7f; stosb`
+   (@0x40be46) — ctl7 (channel volume) snaps back to MAX. 2004 dropped that
+   store (ctl7 preserved).
+
+Proven by fr08 ch1: pgm2 reload @190.12 s with ctl7 sitting at 109; the 2000
+resets ctl7→127, and ch1's `ctl7→chanvol` mod (src7→dest59) then yields a
+different chgain → a **constant DC offset** in the dry mix from the next ch1
+note-on (192.086 s). Gate (eraV0, `processMIDI` case 4): drop the same-pgm
+early-out and set `chans[chan].ctl[6]=127` after the ctl1–6 reset.
 
 ## Full function sweep (2000 image → 2004 synth.asm)
 

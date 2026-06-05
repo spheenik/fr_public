@@ -11,7 +11,10 @@
 // (which discards other channels' emitted bytes). Timing/allocation bookkeeping
 // is unchanged; only that channel sounds.
 //
-// Build: gcc -m32 -no-pie -O2 c1_solo_probe.c -o c1_solo_probe
+// Build: gcc -m32 -no-pie -O2 -mstackrealign c1_solo_probe.c -o c1_solo_probe
+// (-mstackrealign is REQUIRED: the hook trampolines call C functions on the
+//  2000 code's stack, which is not 16-byte aligned; without it gcc's SSE
+//  spills (movaps) in any hook-reachable function segfault.)
 // Run:   C1_SOLO=10 ./c1_solo_probe /tmp/fr08/unpacked.bin /tmp/fr08/c1_solo10.f32 [secs]
 //   port: CHANSOLO=10 V2_SRCVER=0 ./harness_cpp ../v2m/converted/fr08.v2m out.f32 N
 
@@ -94,6 +97,12 @@ const uint32_t g_chanfx_real = VA_CHAN_FX;
 
 extern FILE *g_fvc, *g_fvcp; extern int g_vce_chan; extern uint32_t g_vce_count;
 extern float g_acc_chan[640], g_acc_chanpost[640];
+// chunk sidecar (written by chunk_post when armed): per in-window chunk,
+// {pos, count, chanfx_n, chanfx_fired} -- audits the .chan stream construction
+// (whether the soloed channel's FX ran this chunk and with which sample count,
+// vs the chunk count the voice taps use). Catches stale-chanbuf-tail reads.
+extern FILE *g_fvchunks;
+uint32_t g_chanfx_fired = 0, g_chanfx_n = 0;
 
 static void cs_dump(uint32_t ebp, FILE *f)
 {
@@ -114,6 +123,8 @@ void chanstream_pre(uint32_t ebp)
       const float *cb = (const float*)(uintptr_t)VA_CHANBUF;
       uint32_t n = g_vce_count; if (n > 320) n = 320;
       for (uint32_t i = 0; i < 2*n; i++) g_acc_chan[i] += cb[i];
+      g_chanfx_fired = 1;
+      g_chanfx_n = *(uint32_t*)(uintptr_t)VA_CHUNK_N; // the 2000's own count
     }
   }
 }
@@ -177,6 +188,32 @@ __asm__(
   "  ret\n"
 );
 
+// Alloc trace (C1_ALLOCTRACE=1): log every voice allocation -- the genuine
+// allocator's choice (@0x40bc5f..0x40bd99) just before the SET call @0x40bd9f,
+// where edx=slot, ecx=channel, esi->note,vel. Byte-comparable with the port's
+// ALLOCTRACE to find the FIRST diverging steal choice (which can long predate
+// the first audible divergence when the disputed voices are silent).
+#define VA_ALLOC_SET_CALL 0x40bd9fu
+const uint32_t g_chanset_real = 0x40af88u;
+int g_alloctrace_n = 0;
+void alloclog(uint32_t edx, uint32_t ecx, uint32_t esi)
+{
+  if (g_alloctrace_n >= 20000) return;
+  g_alloctrace_n++;
+  uint32_t pos = *(uint32_t*)(uintptr_t)0x592de4;
+  fprintf(stderr, "[alloc] pos=%u chan=%u slot=%u note=%u vel=%u\n",
+          pos, ecx, edx, *(uint8_t*)(uintptr_t)esi, *(uint8_t*)(uintptr_t)(esi+1));
+}
+extern void hook_allocset(void);
+__asm__(
+  ".text\n.globl hook_allocset\nhook_allocset:\n"
+  "  pushal\n  fnsave g_fpu\n"
+  "  pushl %esi\n  pushl %ecx\n  pushl %edx\n"
+  "  call alloclog\n  addl $12,%esp\n"
+  "  frstor g_fpu\n  popal\n"
+  "  jmp *g_chanset_real\n"  // tail-jmp: the real SET's ret returns to site+5
+);
+
 // chgPitch trace (C1_FREQTRACE=1, window C1_FREQ_LO/HI on sample pos): log every
 // genuine syOscChgPitch @0x40a49b -- (pos, osc obj, pitch/note INPUT bits, integer
 // freq + nffrq OUTPUT bits) -- to byte-compare per-tick freq vs the port's FREQLOG
@@ -222,6 +259,10 @@ float g_acc_chan[640]; // stereo, post-volramp voice sum (pre channel-FX)
 float g_acc_chanpost[640]; // stereo, chanbuf AFTER channel-FX chain
 float g_acc_premix[640];   // stereo, channel-sum output buffer just before the lc/hc EQ
 FILE *g_fvc = 0, *g_fvcp = 0, *g_fvpm = 0;
+FILE *g_fvchunks = 0;  // chunk sidecar: {pos,count,chanfx_n,chanfx_fired} per chunk
+FILE *g_fvcpre = 0;    // chanbuf BEFORE the voice render (stale-vs-zeroed audit)
+FILE *g_fvcv = 0;      // chanbuf right AFTER the voice render (volramp output)
+float g_acc_chanpre[640], g_acc_chanv[640];
 int g_vce_chan = -1;   // channel to tap chanbuf for (= solo channel)
 const uint32_t g_chunk_real = VA_CHUNK_REAL;
 const uint32_t g_v2r_real   = VA_V2R_REAL;
@@ -260,9 +301,26 @@ void chunk_pre(uint32_t cnt)
   memset(g_acc_chan, 0, n*8);
   memset(g_acc_chanpost, 0, n*8);
   memset(g_acc_premix, 0, n*8);
+  memset(g_acc_chanpre, 0, n*8);
+  memset(g_acc_chanv, 0, n*8);
+  g_chanfx_fired = 0; g_chanfx_n = 0;
 }
 void chunk_post(void)
 {
+  // C1_CHANVTRACE=<ch>: log the modulated chanvol float (chan param store
+  // @0x718918+ch*0x3c, first param = chanvol) + raw ctl7 byte whenever the
+  // value changes. Counterpart of the port's CHANVTRACE.
+  static int cvch = -2;
+  if (cvch == -2) { const char *e = getenv("C1_CHANVTRACE"); cvch = e ? atoi(e) : -1; }
+  if (cvch >= 0) {
+    static uint32_t last = 0xffffffffu;
+    uint32_t cv = *(uint32_t*)(uintptr_t)(0x718918u + 0x3cu*cvch);
+    if (cv != last) {
+      last = cv;
+      fprintf(stderr, "[chanv] pos=%u ch%d chanvol=%08x ctl7=%u\n",
+              g_vce_pos, cvch, cv, *(uint8_t*)(uintptr_t)(0x715c94u + 8u*cvch + 7u));
+    }
+  }
   uint32_t n = g_vce_count > 320 ? 320 : g_vce_count;
   if (g_vce_pos >= g_vce_lo && g_vce_pos <= g_vce_hi) {
     if (g_fvo) fwrite(g_acc_osc,  4, n, g_fvo);
@@ -271,6 +329,12 @@ void chunk_post(void)
     if (g_fvc) fwrite(g_acc_chan, 8, n, g_fvc);
     if (g_fvcp) fwrite(g_acc_chanpost, 8, n, g_fvcp);
     if (g_fvpm) fwrite(g_acc_premix, 8, n, g_fvpm);
+    if (g_fvchunks) {
+      uint32_t rec[4] = { g_vce_pos, g_vce_count, g_chanfx_n, g_chanfx_fired };
+      fwrite(rec, sizeof rec, 1, g_fvchunks);
+    }
+    if (g_fvcpre) fwrite(g_acc_chanpre, 8, n, g_fvcpre);
+    if (g_fvcv) fwrite(g_acc_chanv, 8, n, g_fvcv);
   }
   g_vce_pos += g_vce_count;
 }
@@ -284,11 +348,48 @@ __asm__(
   "  pushal\n  call chunk_post\n  popal\n  ret\n"
 );
 // wrap @0x40ba88: syV2Render, snapshot post-dist on return
+// Pre-voice-render snapshot of the chanbuf (the volramp loop's accumulation
+// TARGET, @0x7153c4) + per-piece voice cur/ramp log. Answers two questions the
+// ch15 chase needs: (a) is the chanbuf zeroed or stale when the voice
+// accumulates into it, (b) what cur/ramp does each sub-frame PIECE really use
+// (no inference from output division). ebp = voice obj at the call site.
+extern FILE *g_fvcpre, *g_fvcv;
+extern float g_acc_chanpre[640], g_acc_chanv[640];
+void v2r_pre(uint32_t ebp)
+{
+  if (g_vce_pos < g_vce_lo || g_vce_pos > g_vce_hi) return;
+  if (g_fvcpre) {
+    const float *cb = (const float*)(uintptr_t)VA_CHANBUF;
+    uint32_t n = g_vce_count; if (n > 320) n = 320;
+    for (uint32_t i = 0; i < 2*n; i++) g_acc_chanpre[i] += cb[i];
+  }
+  static int nlog = 0;
+  if (nlog < 200) { nlog++;
+    fprintf(stderr, "[v2r] pos=%u n=%u vc=%05x cur=%08x ramp=%08x\n",
+            g_vce_pos, g_vce_count, ebp - 0x716a18u,
+            *(uint32_t*)(uintptr_t)(ebp+0xc), *(uint32_t*)(uintptr_t)(ebp+0x10));
+  }
+}
+void v2r_post(void)
+{
+  // chanbuf IMMEDIATELY after the voice render (volramp loop output) --
+  // before any other writer can touch it. If this matches voice*cv*lvol but
+  // the FX-call-time .chan tap does not, something rewrites chanbuf between.
+  if (g_vce_pos < g_vce_lo || g_vce_pos > g_vce_hi) return;
+  if (g_fvcv) {
+    const float *cb = (const float*)(uintptr_t)VA_CHANBUF;
+    uint32_t n = g_vce_count; if (n > 320) n = 320;
+    for (uint32_t i = 0; i < 2*n; i++) g_acc_chanv[i] += cb[i];
+  }
+}
 extern void hook_v2r(void);
 __asm__(
   ".text\n.globl hook_v2r\nhook_v2r:\n"
+  "  pushal\n  fnsave g_fpu\n"
+  "  pushl %ebp\n  call v2r_pre\n  addl $4,%esp\n"
+  "  frstor g_fpu\n  popal\n"
   "  call *g_v2r_real\n"
-  "  pushal\n  fnsave g_fpu\n  call snap_dist\n  frstor g_fpu\n  popal\n  ret\n"
+  "  pushal\n  fnsave g_fpu\n  call snap_dist\n  call v2r_post\n  frstor g_fpu\n  popal\n  ret\n"
 );
 // detour @0x40ad76: post-osc, then the overwritten `lea ebp,[ebp-0xb4]`
 extern void hook_postosc(void);
@@ -379,6 +480,18 @@ int main(int argc, char **argv)
     uint8_t*cl=(uint8_t*)(uintptr_t)VA_RONAN_INIT_CALL;
     if(p2[0]==0xff&&p1[0]==0x68&&cl[0]==0xe8){memset(p2,0x90,4);memset(p1,0x90,5);memset(cl,0x90,5);} }
 
+  // Ronan speech PROCESS call: the render driver runs the speech filter on
+  // ch15's chanbuf (cmp cl,0xf @0x40ba95; call 0x40b7ba @0x40baac) between the
+  // voice render and the channel FX -- EVEN with Ronan init nop'd above (the
+  // old "speech silently absent" assumption was wrong: it processes with
+  // uninitialized state). The port has no Ronan; nop the process call so ch15
+  // is the raw voice chain on both sides. Override with C1_RONAN=1 to keep it.
+  if (!getenv("C1_RONAN")) {
+    uint8_t *rp = (uint8_t*)(uintptr_t)0x40baacu;
+    if (rp[0]==0xe8) memset(rp, 0x90, 5);
+    else fprintf(stderr,"[solo] WARNING: no call at ronan process site (%02x)\n",rp[0]);
+  }
+
   // optional FX-return mutes (pair with port-side MUTEREVERB/MUTEDELAY)
   if (getenv("C1_MUTE_REVERB")) {
     uint8_t *s = (uint8_t*)(uintptr_t)VA_RVB_CALL;
@@ -422,7 +535,12 @@ int main(int argc, char **argv)
     snprintf(p,sizeof p,"%s.chan",pfx); g_fvc=fopen(p,"wb");
     snprintf(p,sizeof p,"%s.chanpost",pfx); g_fvcp=fopen(p,"wb");
     snprintf(p,sizeof p,"%s.premix",pfx); g_fvpm=fopen(p,"wb");
-    g_vce_chan = g_solo;  // tap chanbuf for the soloed channel
+    snprintf(p,sizeof p,"%s.chunks",pfx); g_fvchunks=fopen(p,"wb");
+    snprintf(p,sizeof p,"%s.chanpre",pfx); g_fvcpre=fopen(p,"wb");
+    snprintf(p,sizeof p,"%s.chanv",pfx); g_fvcv=fopen(p,"wb");
+    g_vce_chan = g_solo;  // tap chanbuf for the soloed channel...
+    // ...or any channel in a FULL-MIX render (C1_VCE_CH=N without C1_SOLO):
+    if (getenv("C1_VCE_CH")) g_vce_chan = atoi(getenv("C1_VCE_CH"));
     // verify opcodes before patching
     uint8_t *c1=(uint8_t*)(uintptr_t)VA_CHUNK_CALL, *c2=(uint8_t*)(uintptr_t)VA_V2R_CALL;
     uint8_t *po=(uint8_t*)(uintptr_t)VA_POSTOSC,   *pf=(uint8_t*)(uintptr_t)VA_POSTFLT;
@@ -449,6 +567,15 @@ int main(int argc, char **argv)
     int32_t rel = (int32_t)((uintptr_t)&hook_tick - (VA_TICK_CALL + 5));
     memcpy(site+1, &rel, 4);
     fprintf(stderr,"[solo] tick log armed\n");
+  }
+
+  // optional alloc trace
+  if (getenv("C1_ALLOCTRACE")) {
+    uint8_t *site = (uint8_t*)(uintptr_t)VA_ALLOC_SET_CALL;
+    if (site[0] != 0xe8) { fprintf(stderr,"no call at alloc-set site (%02x)\n",site[0]); return 1; }
+    int32_t rel = (int32_t)((uintptr_t)&hook_allocset - (VA_ALLOC_SET_CALL + 5));
+    memcpy(site+1, &rel, 4);
+    fprintf(stderr,"[solo] alloc trace armed\n");
   }
 
   // optional chgPitch trace (all 4 call sites)

@@ -4074,8 +4074,18 @@ struct V2Synth
         COVER("MIDI program change");
         {
           sU8 pgm = *cmd++ & 0x7f;
-          // did the program actually change?
-          if (chans[chan].pgm != pgm)
+          // era <v1 (fr08): the 2000 handler (@0x40be15) has NO same-program
+          // check (every PGM event kills the channel's voices and resets the
+          // controllers, even a reload of the same pgm), and its controller
+          // reset zeroes ctl1-6 then sets ctl7 = 127 (volume back to max).
+          // 2004 (synth.asm ProcessProgramChange:5685) added the same-pgm
+          // early-out and dropped the ctl7 write (volume preserved). Proven
+          // by fr08 @190.12s: pgm2 on ch1 resets ctl7 109->127 in the 2000,
+          // feeding a ctl7->chanvol channel mod => chgain delta => constant
+          // DC offset in the mix from the next ch1 note-on (192.086 s).
+          // (DELTA.md)
+          // did the program actually change? (era <v1: no such check)
+          if (instance.eraV0() || chans[chan].pgm != pgm)
           {
             COVER("MIDI program change real");
             chans[chan].pgm = pgm;
@@ -4091,6 +4101,8 @@ struct V2Synth
           // either way, reset controllers
           for (sInt i=0; i < 6; i++)
             chans[chan].ctl[i] = 0;
+          if (instance.eraV0())
+            chans[chan].ctl[6] = 127; // era <v1: ctl7 (volume) reset to max
         }
         break;
 
@@ -4274,6 +4286,18 @@ private:
       cparaf[dest] = clamp(cparaf[dest] + scale*getmodsource(voice, chan, mod->source), 0.0f, 128.0f);
     }
 
+#ifdef V2_VALIDATE
+    // CHANVTRACE=<chan>: log the modulated chanvol whenever it changes, with
+    // the raw ctl7 and the mod-voice identity (voicemap). Chan-gain hunts.
+    if (getenv("CHANVTRACE") && chan == atoi(getenv("CHANVTRACE"))) {
+      static sF32 last = -1.0f;
+      if (cparaf[0] != last) {
+        last = cparaf[0];
+        fprintf(stderr, "[chanv] ch%d chanvol=%.9g (%08x) ctl7=%d vmap=%d\n",
+                chan, cparaf[0], f2u(cparaf[0]), (int)chans[chan].ctl[6], voicemap[chan]);
+      }
+    }
+#endif
     cwork->set(cpara);
   }
 

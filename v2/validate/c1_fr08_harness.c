@@ -140,6 +140,21 @@ int main(int argc, char **argv)
                        p2[0], p1[0], cl[0]);
     }
 
+    // Ronan speech PROCESS call: the render driver runs the speech filter on
+    // ch15's chanbuf (cmp cl,0xf @0x40ba95; call 0x40b7ba @0x40baac) between
+    // the voice render and the channel FX -- EVEN with init nop'd above (the
+    // old "speech silently absent" assumption was wrong: it processes ch15
+    // with uninitialized state from its first note @118.06s). The port has no
+    // Ronan; nop the process call so ch15 is the raw voice chain on both
+    // sides. Override with C1_RONAN=1 to keep it.
+    if (!getenv("C1_RONAN")) {
+        uint8_t *rp = (uint8_t *)(uintptr_t)0x40baacu;
+        if (rp[0] == 0xe8) {
+            memset(rp, 0x90, 5);
+            fprintf(stderr, "[c1] RONAN ch15 process call nop'd (speech gated)\n");
+        } else fprintf(stderr, "[c1] WARN: no call at ronan process site (%02x)\n", rp[0]);
+    }
+
     // 4) OpenV2M(v2m_ptr, arg2) -- STDCALL, 2 args (ends `ret 0x8`); the demo
     //    passes ([0x594328]=0) as arg2. Called via inline asm so the 2-arg
     //    stdcall stack discipline is exact (callee cleans via ret 8).

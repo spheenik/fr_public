@@ -3615,6 +3615,7 @@ static StereoSample g_mixtap_compr [V2Instance::MAX_FRAME_SIZE]; // after sum co
 // the per-frame snapshot holds the last channel -- valid in the early
 // single-channel region where the first divergence lives.
 static StereoSample g_chantap      [V2Instance::MAX_FRAME_SIZE];
+static StereoSample g_chanposttap  [V2Instance::MAX_FRAME_SIZE]; // post-channel-FX, one channel (VCEFRAME_CH), per-frame absolute
 #define MIXTAP_SNAP(stage, mix, n) \
     memcpy(g_mixtap_##stage, (mix), (n) * sizeof(StereoSample))
 #else
@@ -4332,6 +4333,7 @@ private:
     // chantap/vcetap are UNMASKED accumulators across all voices/channels: reset
     // here, accumulate below.
     memset(g_chantap, 0, nsamples * sizeof(StereoSample));
+    memset(g_chanposttap, 0, nsamples * sizeof(StereoSample));
     memset(g_vcetap_osc,  0, nsamples * sizeof(sF32));
     memset(g_vcetap_flt,  0, nsamples * sizeof(sF32));
     memset(g_vcetap_dist, 0, nsamples * sizeof(sF32));
@@ -4411,12 +4413,10 @@ private:
         fwrite(instance.chanbuf, sizeof(StereoSample), nsamples, cs_post);
       // VCEFRAME .chanpost: this channel's chanbuf AFTER its FX chain (chorus
       // included), accumulated for the per-frame post-channel-FX comparison.
-      static FILE *cp = 0; static int cp_arm = -1, cp_ch = -1;
-      if (cp_arm < 0) { const char *p=getenv("VCEFRAME"); cp_arm=p?1:0;
-        const char *c=getenv("VCEFRAME_CH"); cp_ch=c?atoi(c):-1;
-        if (cp_arm){ char b[600]; snprintf(b,sizeof b,"%s.chanpost",p); cp=fopen(b,"wb"); } }
-      if (cp && chan == cp_ch)
-        fwrite(instance.chanbuf, sizeof(StereoSample), nsamples, cp);
+      static int cp_ch = -2;
+      if (cp_ch == -2) { const char *c=getenv("VCEFRAME_CH"); cp_ch=c?atoi(c):-1; }
+      if (chan == cp_ch)
+        for (sInt i=0;i<nsamples;i++){ g_chanposttap[i].l+=instance.chanbuf[i].l; g_chanposttap[i].r+=instance.chanbuf[i].r; }
 #endif
     }
 
@@ -4472,9 +4472,18 @@ private:
 
     MIXTAP_SNAP(lchc, mix, nsamples);
 
-    // sum compressor
-    compr.render(mix, nsamples);
-    MIXTAP_SNAP(compr, mix, nsamples);
+    // sum compressor. era <v1 (fr08): the 2000 mix path @0x40baf8 ends right
+    // after the lc/hc EQ (`ret` @0x40bb8b) -- there is NO global sum compressor
+    // (it's a v1+ feature with no code in the v0 binary; conv2m defaults it
+    // Off). The port's compressor is a near-no-op when off, but its envelope
+    // follower still drifts by ~1 ULP on louder material, leaving a decaying
+    // transient (ch10: a ctl7 swell trips it -> ~8e-4 ringing down over the
+    // release). Gate it out under eraV0. (DELTA.md)
+    if (!instance.eraV0())
+    {
+      compr.render(mix, nsamples);
+      MIXTAP_SNAP(compr, mix, nsamples);
+    }
 
     DEBUG_PLOT_STEREO(mix, mix, nsamples);
 
@@ -4494,15 +4503,16 @@ private:
           snprintf(b,sizeof b,"%s.flt",p);  vf=fopen(b,"wb");
           snprintf(b,sizeof b,"%s.dist",p); vd=fopen(b,"wb"); }
       }
-      static FILE *vc=0;
-      if (armed<0) {} // (armed set above)
+      static FILE *vc=0, *vcp=0;
       if (armed && !vc) { const char *p=getenv("VCEFRAME"); char b[600];
-        snprintf(b,sizeof b,"%s.chan",p); vc=fopen(b,"wb"); }
+        snprintf(b,sizeof b,"%s.chan",p); vc=fopen(b,"wb");
+        snprintf(b,sizeof b,"%s.chanpostA",p); vcp=fopen(b,"wb"); }
       if (armed){
         if(vo) fwrite(g_vcetap_osc, sizeof(sF32),nsamples,vo);
         if(vf) fwrite(g_vcetap_flt, sizeof(sF32),nsamples,vf);
         if(vd) fwrite(g_vcetap_dist,sizeof(sF32),nsamples,vd);
-        if(vc) fwrite(g_chantap, sizeof(StereoSample),nsamples,vc); // post-volramp voice sum, pre channel-FX
+        if(vc) fwrite(g_chantap, sizeof(StereoSample),nsamples,vc);     // pre channel-FX (absolute)
+        if(vcp) fwrite(g_chanposttap, sizeof(StereoSample),nsamples,vcp); // post channel-FX (absolute, VCEFRAME_CH)
       }
     }
 #endif

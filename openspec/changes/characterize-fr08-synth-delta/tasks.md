@@ -145,12 +145,23 @@
           max|d|=0 (no regression). New tap/mute knobs added: `MUTEREVERB`/
           `MUTEDELAY` (+ `C1_MUTE_REVERB`/`C1_MUTE_DELAY`), `CHANSTREAM`,
           `C1_CHANSTREAM`/`C1_TICKLOG` in the solo probe.
-      **New frontier = ch5 (chords/polyphony), NOT ch10.** ch5 (3-voice chord,
-      modnum=6 = 2 LFO mods + CC2) is bit-exact dry for 7.38 s then diverges at
-      a held-chord re-trigger (`b5 01 7f 02 00` + `95 …` re-noteons). Dry rms
-      0.0137 ⇒ voice/channel chain, not reverb tail. Suspects: v0 retrigger
-      note-off→on gate-clear (@0x40af70) order, multi-LFO/CC2 modmatrix, or
-      `voicemap[chan]` channel-mod source. Speech: RONAN off both sides.
+      **ch5 SOLVED to phase-exact: mid-frame note-on osc deferral.** ch5's
+      residual was a constant 39-sample lag (cross-corr 0.99) at a chord
+      note-on'd mid-frame (sample 325593; 39 = distance to the next 256-frame
+      boundary). The 2000 driver @0x40b95c renders sub-frame chunks and a voice
+      note-on'd mid-frame phase-advances its osc/flt through the partial frame
+      remainder (output muted, curvol=0); the port (=2004) defers it to the next
+      boundary. Gate (eraV0, processMIDI note-on): advance the new voice over the
+      `tickd` unfinished samples into scratch. **ch5 lag → 0 (corr 0.9999),
+      max|d| 0.136 → 0.0033, rms 76×; whole-song 12 s full-mix vs C1 rms
+      0.0185 → 2.0e-4 (92×).** Modern A/B still max|d|=0. Probe knob added:
+      `C1_TICK_LO/HI`.
+      **Remaining ch5 residual (~3%, decaying, phase-exact):** NOT the
+      partial-frame transient (frames 1272-1275 after the note are bit-exact)
+      and NOT an env-state transition (still ATTACK at divergence frame 1276).
+      A bounded filter/dist state diff appearing ~4 frames into the note with no
+      MIDI event between. Next: C1 vce-tap (osc/flt/dist) at frame 1276 to
+      bisect. Speech: RONAN off both sides.
 - [x] 3.5 Line-diff the fingerprint-only (F) functions. → **DONE.** Filter:
       non-moog SVF bit-identical @44100, moog modes 6/7 absent. Reverb: shared
       Freeverb topology + identical gain table. Chorus: shared modulated delay.

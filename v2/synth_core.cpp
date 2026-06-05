@@ -4426,6 +4426,26 @@ extern "C" void synthTestChorusV0(const float *p, float *io, int nsamples)
   md.set(&para);
   md.renderChan((StereoSample *)io, nsamples);
 }
+
+// Validation: run the eraEnvOld envelope (V2Env) vs the genuine 2000
+// syEnvSet/syEnvTick (@0x40a6d1/0x40a759) in c1_env_probe. p = syVEnv
+// {ar,dr,sl,sr,rr,vol}; gates[i] = 0/1 per tick; out[i] = env output (val*gain).
+extern "C" void synthTestEnvV0(const float *p, const unsigned char *gates,
+                               float *out, int n)
+{
+  static V2Instance inst;
+  inst.calcNewSampleRate(44100);
+  inst.srcVersion = 0; // eraEnvOld (<2)
+  static V2Env e;
+  e.init(&inst);
+  e.val = 0.0f;
+  e.state = V2Env::OFF;
+  syVEnv para;
+  para.ar = p[0]; para.dr = p[1]; para.sl = p[2];
+  para.sr = p[3]; para.rr = p[4]; para.vol = p[5];
+  e.set(&para);
+  for (int i=0; i < n; i++) { e.tick(gates[i] != 0); out[i] = e.out; }
+}
 #endif
 
 void __stdcall synthSetSourceVersion(void *pthis, int srcver)

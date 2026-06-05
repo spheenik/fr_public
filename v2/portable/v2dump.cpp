@@ -13,17 +13,26 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef _WIN32
+#include <io.h>
+#define ftruncate _chsize_s
+#define fileno _fileno
+#else
+#include <unistd.h> // ftruncate (trim the auto-mode silence tail)
+#endif
 
 // minimal RIFF/WAVE header, format 3 (IEEE float), patched on close
+struct WavHeader {
+  char riff[4]; uint32_t riffLen; char wave[4];
+  char fmt[4]; uint32_t fmtLen;
+  uint16_t tag, channels; uint32_t rate, bytesPerSec;
+  uint16_t blockAlign, bits;
+  char data[4]; uint32_t dataLen;
+};
+
 static void wavWriteHeader(FILE *f, uint32_t dataBytes)
 {
-  struct {
-    char riff[4]; uint32_t riffLen; char wave[4];
-    char fmt[4]; uint32_t fmtLen;
-    uint16_t tag, channels; uint32_t rate, bytesPerSec;
-    uint16_t blockAlign, bits;
-    char data[4]; uint32_t dataLen;
-  } h;
+  WavHeader h;
   memcpy(h.riff, "RIFF", 4); memcpy(h.wave, "WAVE", 4);
   memcpy(h.fmt, "fmt ", 4);  memcpy(h.data, "data", 4);
   h.riffLen = 36 + dataBytes;
@@ -54,11 +63,14 @@ static bool hasExt(const char *path, const char *ext)
 int main(int argc, char **argv)
 {
   if (argc < 3) {
-    fprintf(stderr, "usage: %s <file.v2m> <out.{wav,f32}> [seconds] [chunkframes]\n", argv[0]);
+    fprintf(stderr, "usage: %s <file.v2m> <out.{wav,f32}> [seconds] [chunkframes]\n"
+                    "  seconds omitted (or \"auto\"): render the whole song, let the\n"
+                    "  reverb/delay tail ring out to silence, trim it\n", argv[0]);
     return 1;
   }
   const char *inPath = argv[1], *outPath = argv[2];
-  double seconds = (argc > 3) ? atof(argv[3]) : 60.0;
+  bool autoLen = (argc <= 3) || (strcmp(argv[3], "auto") == 0);
+  double seconds = autoLen ? 0.0 : atof(argv[3]);
   uint32_t chunk = (argc > 4) ? (uint32_t)atoi(argv[4]) : 4096;
   bool wav = hasExt(outPath, ".wav");
 
@@ -102,14 +114,58 @@ int main(int argc, char **argv)
   enum { CHUNKMAX = 4096 };
   static float buf[2 * CHUNKMAX];
   if (chunk < 1 || chunk > CHUNKMAX) chunk = 4096;
-  uint64_t total = (uint64_t)(seconds * 44100.0);
-  for (uint64_t done = 0; done < total; ) {
-    uint32_t n = (uint32_t)((total - done < (uint64_t)chunk) ? (total - done)
-                                                             : (uint64_t)chunk);
-    p.render(buf, n);
-    fwrite(buf, 2 * sizeof(float), n, o);
-    done += n;
+
+  uint64_t total;
+  if (!autoLen) {
+    // fixed length (deterministic; use for A/B comparisons)
+    total = (uint64_t)(seconds * 44100.0);
+    for (uint64_t done = 0; done < total; ) {
+      uint32_t n = (uint32_t)((total - done < (uint64_t)chunk) ? (total - done)
+                                                               : (uint64_t)chunk);
+      p.render(buf, n);
+      fwrite(buf, 2 * sizeof(float), n, o);
+      done += n;
+    }
+  } else {
+    // whole song + tail (for listening; same policy as the lab harness's
+    // "auto": render while events remain, then ring the reverb/delay tail
+    // out to ~1s below -90 dBFS -- or the caps -- and trim the silence)
+    const float  kSilence    = 3.0e-5f;             // ~ -90 dBFS
+    const uint64_t kSongCap  = 20ull * 60 * 44100;  // runaway/looping songs
+    const uint64_t kTailCap  = 60ull * 44100;       // max tail after song end
+    const uint64_t kQuietNeed = 44100;              // ~1s of quiet = done
+
+    uint64_t song = 0, tail = 0, quiet = 0;
+    total = 0;
+    while (p.isPlaying() && song < kSongCap) {
+      p.render(buf, chunk);
+      fwrite(buf, 2 * sizeof(float), chunk, o);
+      song += chunk;
+    }
+    total = song;
+    while (quiet < kQuietNeed && tail < kTailCap) {
+      p.render(buf, chunk);
+      fwrite(buf, 2 * sizeof(float), chunk, o);
+      tail += chunk;
+      total += chunk;
+      float peak = 0.0f;
+      for (uint32_t i = 0; i < 2 * chunk; i++) {
+        float a = buf[i] < 0 ? -buf[i] : buf[i];
+        if (a > peak) peak = a;
+      }
+      quiet = (peak < kSilence) ? quiet + chunk : 0;
+    }
+    if (quiet) { // trim the detected trailing silence
+      total -= quiet;
+      fflush(o);
+      if (ftruncate(fileno(o), (off_t)((wav ? sizeof(WavHeader) : 0)
+                                       + total * 2 * sizeof(float))) != 0)
+        fprintf(stderr, "warning: could not trim trailing silence\n");
+    }
+    fprintf(stderr, "auto length: song %.1fs + tail %.1fs\n",
+            (double)song / 44100.0, (double)(total - song) / 44100.0);
   }
+
   if (wav)
     wavWriteHeader(o, (uint32_t)(total * 2 * sizeof(float)));
   fclose(o);

@@ -32,8 +32,13 @@
 #ifndef V2_VER_MAX
 #define V2_VER_MAX 6
 #endif
+// Ronan (speech synth): DEFERRED -- a draft port exists (ronan.cpp) but a
+// listening test on josie showed the voice is audibly off vs the original
+// compiled ronan. Default OFF until a speech-enabled reference rendering
+// exists to verify against (tasks 6.1/6.2). Opt in with -DV2_RONAN=1 at your
+// own risk; the speech-off build is the oracle-proven configuration.
 #ifndef V2_RONAN
-#define V2_RONAN 1
+#define V2_RONAN 0
 #endif
 
 namespace v2portable {

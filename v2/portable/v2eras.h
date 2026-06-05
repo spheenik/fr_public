@@ -67,14 +67,26 @@ enum V2Delta {
                            // dist->volramp only)
   DELTA_NO_MASTER_DCF,     // master DC filter absent (mix -> lc/hc EQ direct)
   DELTA_NO_MOOG,           // VCF modes 6/7 (MoogL/H) alias to passthrough
+  DELTA_KEYSYNC_OSC_ONLY,  // noteOn keysync has no full-resync path: ANY
+                           // keysync != 0 only zeros the osc phase counters
+                           // (SYNC_FULL collapses to SYNC_OSC; noise/LFO/
+                           // filter state RESUMES on re-trigger)
+  DELTA_RVB_E_FULLPREC,    // reverb set: e = sqr(64/(revtime+1)) with the
+                           // quotient kept full-precision through the square
+                           // (the 2000 set path ran at x87 PC=64) and no
+                           // SRfclinfreq factor (2004 SR-flexibility, =1.0
+                           // at 44100)
   // --- feature-introduction deltas (anchored by the param tables) ----------
   DELTA_NO_COMP_BOOST,     // channel dcf1/comp/boost/dcf2 + global sum comp
                            // absent (no code in the v0 binary)
   DELTA_NO_AUX_BUSSES,     // AuxA/B busses absent (default-handled: rcv/send
                            // gains canonicalize to 0; lab port verified
                            // bit-exact without an explicit gate)
-  DELTA_NO_RVB_LOWCUT,     // reverb low-cut stage absent (default-handled:
-                           // lowcut=0 makes the 2004 stage an exact no-op)
+  DELTA_NO_RVB_LOWCUT,     // reverb low-cut stage absent (ENGINE-GATED, not
+                           // default-handled: the canonical global defaults
+                           // give pre-v4 files a NONZERO lowcut param, so the
+                           // 2004 hpf stage would be a real extra filter --
+                           // proven by fr08's reverb tail, DELTA.md)
 
   DELTA_COUNT
 };
@@ -124,6 +136,8 @@ inline constexpr V2DeltaRow kDeltas[DELTA_COUNT] = {
   /* DELTA_NO_VOICE_DCF       */ { 1, EV_ASSUMED  },
   /* DELTA_NO_MASTER_DCF      */ { 1, EV_ASSUMED  },
   /* DELTA_NO_MOOG            */ { 1, EV_ASSUMED  },
+  /* DELTA_KEYSYNC_OSC_ONLY   */ { 1, EV_ASSUMED  },
+  /* DELTA_RVB_E_FULLPREC     */ { 1, EV_ASSUMED  },
   /* DELTA_NO_COMP_BOOST      */ { 1, EV_ANCHORED },
   /* DELTA_NO_AUX_BUSSES      */ { 6, EV_ANCHORED },
   /* DELTA_NO_RVB_LOWCUT      */ { 4, EV_ANCHORED },
@@ -141,6 +155,16 @@ constexpr bool oldBehavior(V2Delta d, int behaviorVersion)
        : (kDeltas[d].flipsAt > V2_VER_MAX)  ? true
        : behaviorVersion < (int)kDeltas[d].flipsAt;
 }
+
+// COUPLING: the 2000 oscillator block is one convention, not independent
+// rows. The baked freq constant is ~SRfcobasefrq/4 BECAUSE the v0 renderers
+// advance the phase counter 4x per output sample (tri/saw/pulse box loop,
+// sine freq<<2). If these rows flipped at different versions, pitch would
+// shift by two octaves in the gap. Future evidence must move them together
+// (or decouple them with code, not just data).
+static_assert(kDeltas[DELTA_OSC_FREQ_CONST].flipsAt == kDeltas[DELTA_OSC_BOXFILTER].flipsAt
+           && kDeltas[DELTA_OSC_FREQ_CONST].flipsAt == kDeltas[DELTA_NATIVE_FSIN].flipsAt,
+              "osc freq-constant and the 4x-advance v0 renderers are one convention");
 
 #if V2_VER_MIN == 0 && V2_VER_MAX == 6
 // ledger sanity for the default full-range build

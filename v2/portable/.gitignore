@@ -4,3 +4,6 @@ v2dump
 v2play
 test/mathcheck
 test/twoinstance
+test/tablecheck
+test/loadcheck
+test/forcecheck

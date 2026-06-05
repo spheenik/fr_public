@@ -1,9 +1,13 @@
 #include "v2core.h"
+#include "v2eras.h"
 #include "v2math.h"
 #include <math.h>
 #include <assert.h>
 #include <string.h>
 #include <stdlib.h>
+
+// the behavior-delta ledger (V2Delta ids + oldBehavior); see v2eras.h
+using namespace v2portable;
 
 // TODO:
 // - VU meters?
@@ -622,15 +626,16 @@ struct V2Instance
   static const int MAX_FRAME_SIZE = 280; // in samples
 
   // Era compat (fr08-extraction/DELTA.md): the v2m format version the song
-  // was ORIGINALLY authored as, before any v2mconv upgrade. SRCVER_MODERN
-  // (= the 2004 core, format v6) by default; synthSetSourceVersion() lowers it
-  // for period files, gating the confirmed period DSP behaviors. The envelope
-  // delta is dated to format v2 by kb's own transEnv (v2mconv.cpp); the other
-  // deltas have binary evidence for v0 (fr08) only.
+  // was ORIGINALLY authored as, before any canonicalization upgrade.
+  // SRCVER_MODERN (= the 2004 core, format v6) by default;
+  // synthSetSourceVersion() lowers it for period files. Engine code never
+  // compares srcVersion directly: every behavior question goes through the
+  // v2eras.h ledger -- old(DELTA_X), ONE delta id per call site. The ledger
+  // row carries the flip version + evidence; oldBehavior() constant-folds
+  // every gate in single-version builds (V2_VER_MIN == V2_VER_MAX).
   static const sInt SRCVER_MODERN = 6;
   sInt srcVersion;
-  bool eraEnvOld()  const { return srcVersion < 2; } // env attack/dec/rel scaling
-  bool eraV0()      const { return srcVersion < 1; } // all other fr08-era deltas
+  bool old(V2Delta d) const { return oldBehavior(d, srcVersion); }
 
   // Stuff that depends on the sample rate
   sF32 SRfcsamplesperms;
@@ -749,7 +754,7 @@ struct V2Osc
     // setter re-seeds those voices. keysync noteOns re-init and hit this path
     // with the real srcVersion.)
     nseed = seedMix(instance->userSeed,
-                    instance->eraV0() ? 0u : seeds[idx], idx);
+                    instance->old(DELTA_NOISE_LCG_MSVC) ? 0u : seeds[idx], idx);
     inst = instance;
   }
 
@@ -771,7 +776,8 @@ struct V2Osc
     // in the oversampled render; 2004 computes SRfcobasefrq at runtime and
     // advances once. Same pitch, but the baked constant rounds differently.
     freq = v2_oscfreq(pitch + note - 60.0f,
-                      inst->eraV0() ? fcoscbase_v0 : inst->SRfcobasefrq);
+                      inst->old(DELTA_OSC_FREQ_CONST) ? fcoscbase_v0
+                                                      : inst->SRfcobasefrq);
   }
 
   void set(const syVOsc *para)
@@ -787,7 +793,7 @@ struct V2Osc
     brpt = ftou32(col);
     nfres = 1.0f - sqrtf(col);
 
-    if (inst->eraV0())
+    if (inst->old(DELTA_OSC_BOXFILTER))
     {
       // 2000 syOscSet @0x40a4d2 box-segment coeffs (x87 PC=24, faithful build).
       // down (cnt<brpt, ramp -1->+1):  val = p*(2/col) + (-1-2/col)
@@ -801,35 +807,44 @@ struct V2Osc
 
   void render(sF32 *dest, sInt nsamples)
   {
-    if (inst->eraV0())
-    {
-      // 2000 syOscRender @0x40a585: tri/saw + pulse are 4x-oversampled box
-      // filters, sine uses native fsin, noise uses the MSVC LCG. AUXA/AUXB and
-      // ring don't exist in v0 (modes 6/7 unused; conv2m defaults them off).
-      switch (mode & 7)
-      {
-      case OSC_OFF:     break;
-      case OSC_TRI_SAW: renderTriSaw_v0(dest, nsamples); break;
-      case OSC_PULSE:   renderPulse_v0(dest, nsamples); break;
-      case OSC_SIN:     renderSin_v0(dest, nsamples); break;
-      case OSC_NOISE:   renderNoise_v0(dest, nsamples); break;
-      case OSC_FM_SIN:  renderFMSin(dest, nsamples); break;  // FM shared
-      default:          break;
-      }
-      DEBUG_PLOT(this, dest, nsamples);
-      return;
-    }
-
+    // Per-mode era gates, one delta id per renderer. The _v0 renderers are
+    // faithful ports of the 2000 syOscRender @0x40a585: tri/saw + pulse are
+    // 4x-oversampled box filters, sine uses native fsin (freq<<2 advance),
+    // noise uses the MSVC LCG + 16-bit float gen. FM is shared across eras
+    // (the era difference flows in through DELTA_OSC_FREQ_CONST only).
+    // AUXA/AUXB don't exist before v6 (DELTA_NO_AUX_BUSSES -> silence); ring
+    // is default-off in canonicalized period files.
     switch (mode & 7)
     {
-    case OSC_OFF:     break;
-    case OSC_TRI_SAW: renderTriSaw(dest, nsamples); break;
-    case OSC_PULSE:   renderPulse(dest, nsamples); break;
-    case OSC_SIN:     renderSin(dest, nsamples); break;
-    case OSC_NOISE:   renderNoise(dest, nsamples); break;
-    case OSC_FM_SIN:  renderFMSin(dest, nsamples); break;
-    case OSC_AUXA:    renderAux(dest, inst->auxabuf, nsamples); break;
-    case OSC_AUXB:    renderAux(dest, inst->auxbbuf, nsamples); break;
+    case OSC_OFF:
+      break;
+    case OSC_TRI_SAW:
+      if (inst->old(DELTA_OSC_BOXFILTER)) renderTriSaw_v0(dest, nsamples);
+      else                                renderTriSaw(dest, nsamples);
+      break;
+    case OSC_PULSE:
+      if (inst->old(DELTA_OSC_BOXFILTER)) renderPulse_v0(dest, nsamples);
+      else                                renderPulse(dest, nsamples);
+      break;
+    case OSC_SIN:
+      if (inst->old(DELTA_NATIVE_FSIN)) renderSin_v0(dest, nsamples);
+      else                              renderSin(dest, nsamples);
+      break;
+    case OSC_NOISE:
+      if (inst->old(DELTA_NOISE_LCG_MSVC)) renderNoise_v0(dest, nsamples);
+      else                                 renderNoise(dest, nsamples);
+      break;
+    case OSC_FM_SIN:
+      renderFMSin(dest, nsamples);
+      break;
+    case OSC_AUXA:
+      if (!inst->old(DELTA_NO_AUX_BUSSES))
+        renderAux(dest, inst->auxabuf, nsamples);
+      break;
+    case OSC_AUXB:
+      if (!inst->old(DELTA_NO_AUX_BUSSES))
+        renderAux(dest, inst->auxbbuf, nsamples);
+      break;
     }
 
     DEBUG_PLOT(this, dest, nsamples);
@@ -1338,7 +1353,7 @@ struct V2Env
 
   void set(const syVEnv *para)
   {
-    if (inst->eraEnvOld())
+    if (inst->old(DELTA_ENV_CURVES))
     {
       // era <v2 (fr08): attack = 2^(7 - ar*11/128), and decay/release go
       // through calcfreq (x10 range) -- calcfreq2 (x11) didn't exist yet.
@@ -1430,7 +1445,8 @@ struct V2Env
     // drift vs a port that clamped env2 to exact 0. (ATTACK is unreachable
     // here either way: atd >= 2^-4 > fclowest.) Gate: skip the clamp in
     // DECAY/ATTACK under eraV0. (DELTA.md "syEnvTick clamp placement")
-    if (val <= fclowest && !(inst->eraV0() && (state == DECAY || state == ATTACK)))
+    if (val <= fclowest
+        && !(inst->old(DELTA_ENV_CLAMP_SUSREL) && (state == DECAY || state == ATTACK)))
     {
       val = 0.0f;
       state = OFF;
@@ -1521,10 +1537,23 @@ struct V2Flt
     V2LRC flt;
     V2Moog m;
     // era <v1 (fr08): the 2000 SVF render injects no denormal DC bias.
-    const flcalc dco = inst->eraV0() ? (flcalc)0 : (flcalc)fcdcoffset;
+    const flcalc dco = inst->old(DELTA_NO_DCOFFSET) ? (flcalc)0 : (flcalc)fcdcoffset;
 
+    sInt m7 = mode & 7;
+    // era: VCF modes 6/7 (MoogL/H) post-date the 2000 engine -- alias to
+    // passthrough (DELTA_NO_MOOG). Unreachable from genuine period data (no
+    // period authoring path emits 6/7); gated for ledger completeness and the
+    // forceBehaviorVersion research knob.
+    if (m7 >= MOOGL && inst->old(DELTA_NO_MOOG))
+    {
+      if (dest != src)
+        for (sInt i=0; i < nsamples; i++)
+          dest[i*step] = src[i*step];
+      DEBUG_PLOT_STRIDED(this, dest, step, nsamples);
+      return;
+    }
 
-    switch (mode & 7)
+    switch (m7)
     {
     case BYPASS:
       COVER("VCF bypass");
@@ -1672,7 +1701,7 @@ struct V2LFO
     // era <v1 (fr08): C1 pins rdtsc=0, so the S&H seed must be 0 for the
     // matched-seed A/B (DELTA.md D6). (Re-seeded by the era setter for the
     // synth-init-time voices, as srcVersion isn't set yet at first init.)
-    if (instance->eraV0()) { nseed = 0u; return; }
+    if (instance->old(DELTA_NOISE_LCG_MSVC)) { nseed = 0u; return; }
     // deterministic replacement for the original's libc rand() (the lab
     // matched the asm only because both sides shared one glibc sequence);
     // V2Rand replicates that sequence portably (design D6).
@@ -1690,10 +1719,10 @@ struct V2LFO
     // whenever the frac >= 0.5, which slowly desyncs the integer phase counter
     // and (via LFO->amp-env modulation) drifts curvol over the whole song.
     // era <v1 (fr08): syLFOSet @0x40a965 uses calcfreq*2^31 (no *0.5). The 0.5
-    // compensates for the modern 128-sample control frame; under the eraV0
+    // compensates for the modern 128-sample control frame; under the period
     // 256-frame it must be dropped or the LFO runs at half speed (modulating
     // filter cutoff/pitch/amp -> diverges). per-sample rate stays invariant.
-    sF32 lfomul = inst->eraV0() ? fc32bit : (fc32bit * 0.5f);
+    sF32 lfomul = inst->old(DELTA_FRAME256) ? fc32bit : (fc32bit * 0.5f);
     freq = v2_fistp(calcfreq(para->rate * 0.0078125f) * lfomul);
     cphase = ftou32(para->phase / 128.0f);
 
@@ -1759,12 +1788,13 @@ struct V2LFO
       v = utof23(cntr);
       // era <v1 (fr08): native fsin (syLFO sine @0x40aa28), not the fastsinrc
       // polynomial (same delta as the osc sine; DELTA.md delta 3).
-      v = (inst->eraV0() ? v2_sin(v * fc2pi) : fastsinrc(v * fc2pi)) * 0.5f + 0.5f;
+      v = (inst->old(DELTA_NATIVE_FSIN) ? v2_sin(v * fc2pi)
+                                        : fastsinrc(v * fc2pi)) * 0.5f + 0.5f;
       break;
 
     case S_H:
       COVER("LFO sample+hold");
-      if (inst->eraV0())
+      if (inst->old(DELTA_NOISE_LCG_MSVC))
       {
         // era <v1: S&H uses the MSVC LCG (214013/2531011) and the low-16-bit
         // value extraction (nseed&0xffff)<<16 (syLFO S&H @0x40aa37), not the
@@ -1881,7 +1911,7 @@ struct V2Dist
       // into crush1 at set time (synth.asm:1858-1860; one render multiply).
       // Same product, different association: near a quantizer tie the 1-ULP
       // difference flips the fistp (fr08 ch1 @271.64s, t=-1 vs -2).
-      if (inst->eraV0())
+      if (inst->old(DELTA_CRUSHER_SPLIT_GAIN1))
         crush1 = 32768.0f / x;
       else
         crush1 = gain1 * (32768.0f / x);
@@ -1990,7 +2020,7 @@ private:
   {
     // era <v1 (fr08): native x87 atan (fpatan), not the fastatan polynomial
     // (syDistRenderMono @0x40ab88; DELTA.md delta -- fastatan is post-2000).
-    if (inst->eraV0())
+    if (inst->old(DELTA_NATIVE_FPATAN))
       return gain2 * v2_atanf(in * gain1 + offs);
     return gain2 * fastatan(in * gain1 + offs);
   }
@@ -2004,7 +2034,8 @@ private:
   {
     // era <v1 (fr08): (in*gain1)*crush1 -- two separate 24-bit-rounded
     // multiplies like the 2000 render; crush1 excludes gain1 there (see set).
-    sF32 scaled = inst->eraV0() ? (in * gain1 * crush1) : (in * crush1);
+    sF32 scaled = inst->old(DELTA_CRUSHER_SPLIT_GAIN1) ? (in * gain1 * crush1)
+                                                       : (in * crush1);
     sInt t = (sInt)lrintf(scaled); // ASM uses fistp (round-to-nearest), not truncation
     t = clamp(t * crush2, -0x7fff, 0x7fff) ^ crxor;
     return (sF32)t / 32768.0f;
@@ -2209,7 +2240,7 @@ struct V2Voice
     // voice buffer -> dc filter -> voice buffer
     // era <v1 (fr08): syV2Render @0x40ad4d has NO per-voice DC filter (osc ->
     // flt -> dist -> volramp); the post-voice dcf is post-2000. (DELTA.md)
-    if (!inst->eraV0())
+    if (!inst->old(DELTA_NO_VOICE_DCF))
     {
       dcf.renderMono(voice, voice, nsamples);
       VCETAP_SNAP(dcf, voice, nsamples);
@@ -2220,7 +2251,7 @@ struct V2Voice
     // voice buffer (mono) -> +=output buffer (stereo)
     // original ASM code has chan buffer hardwired as output here. era <v1
     // injects no fcdcoffset in the voice->channel mix (the 2000 loop adds none).
-    const sF32 dco = inst->eraV0() ? 0.0f : fcdcoffset;
+    const sF32 dco = inst->old(DELTA_NO_DCOFFSET) ? 0.0f : fcdcoffset;
     sF32 cv = curvol;
     for (sInt i=0; i < nsamples; i++)
     {
@@ -2302,11 +2333,12 @@ struct V2Voice
     // -- i.e. SYNC_OSC for ANY keysync != 0. syOscInit (the rdtsc noise reseed)
     // is called only at voice INIT, never on noteOn, so a re-triggered voice
     // RESUMES its evolved noise/LFO/filter state. The modern SYNC_FULL re-inits
-    // osc/vcf/dist (reseeding noise to 0 under eraV0) + zeros env.val/curvol;
-    // that decorrelated every re-triggered noise voice from the 2000 (ch5:
-    // rel-rms ~1.41, the equal-power-uncorrelated signature). Collapse FULL->OSC
-    // under eraV0. (DELTA.md)
-    sInt ks = (inst->eraV0() && keysync == SYNC_FULL) ? SYNC_OSC : keysync;
+    // osc/vcf/dist (reseeding noise to 0 in the old era) + zeros env.val/
+    // curvol; that decorrelated every re-triggered noise voice from the 2000
+    // (ch5: rel-rms ~1.41, the equal-power-uncorrelated signature). Collapse
+    // FULL->OSC (DELTA_KEYSYNC_OSC_ONLY). (DELTA.md)
+    sInt ks = (inst->old(DELTA_KEYSYNC_OSC_ONLY) && keysync == SYNC_FULL)
+            ? SYNC_OSC : keysync;
     switch (ks)
     {
     case SYNC_FULL:
@@ -2550,7 +2582,8 @@ struct V2ModDel
     {
       StereoSample x;
 
-      sF32 in = inst->aux2buf[i] + (inst->eraV0() ? 0.0f : fcdcoffset); // era: no DC bias
+      sF32 in = inst->aux2buf[i]
+              + (inst->old(DELTA_NO_DCOFFSET) ? 0.0f : fcdcoffset); // era: no DC bias
       processSample(&x, in, in, 0.0f);
 
       dest[i].l += x.l;
@@ -2569,7 +2602,7 @@ struct V2ModDel
     // straight in (fld [esi]/[esi+4]) with NO denormal bias; 2004 adds
     // fcdcoffset. Through the feedback comb this accumulates, so it must be
     // gated for the matched A/B. (DELTA.md delta 6, channel level.)
-    const sF32 dco = inst->eraV0() ? 0.0f : fcdcoffset;
+    const sF32 dco = inst->old(DELTA_NO_DCOFFSET) ? 0.0f : fcdcoffset;
     sF32 dry = dryout;
     for (sInt i=0; i < nsamples; i++)
       processSample(&chanbuf[i], chanbuf[i].l + dco, chanbuf[i].r + dco, dry);
@@ -2967,7 +3000,7 @@ struct V2Reverb
     // (3f6a7efb -> 3f6a7efc) and seeds the reverb-tail residual. Reproduce the
     // 2000 by computing the quotient+square in double, no SRfclinfreq. (DELTA.md)
     sF32 e;
-    if (inst->eraV0())
+    if (inst->old(DELTA_RVB_E_FULLPREC))
     {
       // The build/render runs x87 at PC=24 (-mpc32), but the 2000 reverb set
       // ran at the default PC=64, so the 64/(revtime+1) quotient is kept
@@ -3002,7 +3035,8 @@ struct V2Reverb
 
     for (sInt i=0; i < nsamples; i++)
     {
-      sF32 in = inbuf[i] * gainin + (inst->eraV0() ? 0.0f : fcdcoffset); // era: no DC bias
+      sF32 in = inbuf[i] * gainin
+              + (inst->old(DELTA_NO_DCOFFSET) ? 0.0f : fcdcoffset); // era: no DC bias
 
       for (sInt ch=0; ch < 2; ch++)
       {
@@ -3034,12 +3068,12 @@ struct V2Reverb
           cur = dv - gaina[j] * dz;
         }
 
-        // low cut and output. era <v1 (fr08): the 2000 reverb render @0x40b435
-        // outputs `dest += cur` with NO low-cut high-pass stage (the lowcut hpf
-        // is v4-added). fr08's reverb lowcut param is nonzero, so the port's hpf
-        // is an EXTRA high-pass not in the binary -- it diverges the reverb tail.
-        // Gate it out under eraV0. (DELTA.md)
-        if (inst->eraV0())
+        // low cut and output. era <v4: the 2000 reverb render @0x40b435
+        // outputs `dest += cur` with NO low-cut high-pass stage (the lowcut
+        // param/stage is v4-added per sounddef.h). fr08's canonicalized lowcut
+        // param is nonzero, so the hpf would be an EXTRA high-pass not in the
+        // period binary -- it diverges the reverb tail. (DELTA.md)
+        if (inst->old(DELTA_NO_RVB_LOWCUT))
           dest[i].ch[ch] += cur;
         else
         {
@@ -3125,8 +3159,15 @@ struct V2Chan
     fxr = (sInt)para->fxroute;
     dist.set(&para->dist);
     chorus.set(&para->chorus);
-    comp.set(&para->comp);
-    boost.set(&para->boost);
+    // comp/boost state is only ever read by their renders, which process()
+    // gates on the same row -- skipping set here is unobservable for old-era
+    // files and lets single-version builds drop the comp/boost code entirely
+    // (version-build-subsetting spec, code elimination).
+    if (!inst->old(DELTA_NO_COMP_BOOST))
+    {
+      comp.set(&para->comp);
+      boost.set(&para->boost);
+    }
   }
 
   void process(sInt nsamples)
@@ -3140,9 +3181,10 @@ struct V2Chan
     // Filters. era <v1 (fr08): the 2000 channel chain @0x40b5cc is ONLY
     // dist + chorus (in fxr order) -- the dcf1/comp/boost/dcf2 stages are all
     // post-2000 (comp/boost are v1 features with no code in v0; dcf1/dcf2 are
-    // added DC filters). Gate them out so the chain matches. (DELTA.md)
-    const bool v0 = inst->eraV0();
-    if (!v0)
+    // added DC filters). One ledger row covers the whole chain
+    // (DELTA_NO_COMP_BOOST, anchored at v1 by the param tables). (DELTA.md)
+    const bool nochain = inst->old(DELTA_NO_COMP_BOOST);
+    if (!nochain)
     {
       dcf1.renderStereo(chan, chan, nsamples);
       CHTAP_SNAP(dcf1, chan, nsamples);
@@ -3156,7 +3198,7 @@ struct V2Chan
     {
       dist.renderStereo(chan, chan, nsamples);
       CHTAP_SNAP(dist, chan, nsamples);
-      if (!v0) { dcf2.renderStereo(chan, chan, nsamples); CHTAP_SNAP(dcf2, chan, nsamples); }
+      if (!nochain) { dcf2.renderStereo(chan, chan, nsamples); CHTAP_SNAP(dcf2, chan, nsamples); }
       chorus.renderChan(chan, nsamples);
       CHTAP_SNAP(chorus, chan, nsamples);
     }
@@ -3166,7 +3208,7 @@ struct V2Chan
       CHTAP_SNAP(chorus, chan, nsamples);
       dist.renderStereo(chan, chan, nsamples);
       CHTAP_SNAP(dist, chan, nsamples);
-      if (!v0) { dcf2.renderStereo(chan, chan, nsamples); CHTAP_SNAP(dcf2, chan, nsamples); }
+      if (!nochain) { dcf2.renderStereo(chan, chan, nsamples); CHTAP_SNAP(dcf2, chan, nsamples); }
     }
 
     // Aux1/2 send (mono)
@@ -3241,7 +3283,7 @@ struct syWRonan
   sU8 mem[64*1024]; // "that should be enough" --synth.asm. :)
 };
 
-#ifdef RONAN
+#if V2_RONAN // ronan.cpp (speech synth), independent compile flag (design D5)
 
 extern "C"
 {
@@ -3410,8 +3452,8 @@ struct V2Synth
 
 
     // era <v1 (fr08): the 2000 driver renders in sub-frame chunks with a
-    // trailing-edge control tick. Modern (>=v1) keeps the whole-frame path below.
-    if (instance.eraV0())
+    // trailing-edge control tick. Modern keeps the whole-frame path below.
+    if (instance.old(DELTA_SUBFRAME_RENDER))
     {
       renderSubFrame(buf, nsamples, buf2, add);
       DEBUG_PLOT_UPDATE();
@@ -3679,7 +3721,7 @@ struct V2Synth
           // DC offset in the mix from the next ch1 note-on (192.086 s).
           // (DELTA.md)
           // did the program actually change? (era <v1: no such check)
-          if (instance.eraV0() || chans[chan].pgm != pgm)
+          if (instance.old(DELTA_PGMCHANGE_V0) || chans[chan].pgm != pgm)
           {
             COVER("MIDI program change real");
             chans[chan].pgm = pgm;
@@ -3695,7 +3737,7 @@ struct V2Synth
           // either way, reset controllers
           for (sInt i=0; i < 6; i++)
             chans[chan].ctl[i] = 0;
-          if (instance.eraV0())
+          if (instance.old(DELTA_PGMCHANGE_V0))
             chans[chan].ctl[6] = 127; // era <v1: ctl7 (volume) reset to max
         }
         break;
@@ -3732,7 +3774,10 @@ struct V2Synth
     // set
     reverb.set(&globals.rvbparm);
     delay.set(&globals.delparm);
-    compr.set(&globals.cprparm);
+    // sum-comp state is only read by its render (gated on the same row in
+    // renderFrame); see V2Chan::set for the elimination rationale
+    if (!instance.old(DELTA_NO_COMP_BOOST))
+      compr.set(&globals.cprparm);
     lcfreq = sqr((globals.vlowcut + 1.0f) / 128.0f);
     hcfreq = sqr((globals.vhighcut + 1.0f) / 128.0f);
   }
@@ -3874,7 +3919,7 @@ private:
       if (chanmap[i] < 0)
         continue;
 
-      if (instance.eraV0())
+      if (instance.old(DELTA_TICK_BEFORE_SET))
       {
         // era <v1 (fr08): the 2000 frame tick runs the voice TICK (env/lfo
         // step + volramp, @0x40ad06) BEFORE the voice SET (@0x40af88). So a
@@ -4071,7 +4116,7 @@ private:
     // parametric lc/hc EQ. The ungated ~20Hz one-pole here was the dominant
     // ch10 residual: +13deg phase / -0.22dB at the 88Hz bass fundamental
     // (the per-harmonic phase fit is exactly 1-126/SR). (DELTA.md)
-    if (!instance.eraV0())
+    if (!instance.old(DELTA_NO_MASTER_DCF))
     {
       dcf.renderStereo(mix, mix, nsamples);
       MIXTAP_SNAP(dcf, mix, nsamples);
@@ -4107,7 +4152,7 @@ private:
     // follower still drifts by ~1 ULP on louder material, leaving a decaying
     // transient (ch10: a ctl7 swell trips it -> ~8e-4 ringing down over the
     // release). Gate it out under eraV0. (DELTA.md)
-    if (!instance.eraV0())
+    if (!instance.old(DELTA_NO_COMP_BOOST))
     {
       compr.render(mix, nsamples);
       MIXTAP_SNAP(compr, mix, nsamples);
@@ -4161,7 +4206,7 @@ void __stdcall synthSetSourceVersion(void *pthis, int srcver)
   // sqrt relationship) AND the volume-ramp coeff (1/256 vs 1/128 = 1/frame).
   // Voices read SRcFrameSize / SRfciframe live, so overriding here (post-init,
   // pre-render) retimes env/LFO/volramp without touching the SR constants.
-  if (inst.eraEnvOld())
+  if (inst.old(DELTA_FRAME256))
   {
     inst.SRcFrameSize = 256;
     inst.SRfciframe   = 1.0f / 256.0f;
@@ -4169,9 +4214,9 @@ void __stdcall synthSetSourceVersion(void *pthis, int srcver)
   // Matched-seed A/B (DELTA.md D6): the C1 ground truth pins rdtsc=0, so all
   // osc-noise / LFO-S&H seeds start at 0. The voices were init'd during
   // synthInit (before srcVersion was set), so re-seed them here; keysync
-  // noteOns re-init through the eraV0() path and seed 0 on their own.
+  // noteOns re-init through the era-gated init path and seed 0 on their own.
   V2Synth *syn = (V2Synth *)pthis;
-  if (inst.eraV0())
+  if (inst.old(DELTA_NOISE_LCG_MSVC))
     for (sInt v=0; v < V2Synth::POLY; v++)
     {
       for (sInt o=0; o < syVV2::NOSC; o++) syn->voicesw[v].osc[o].nseed = 0u;

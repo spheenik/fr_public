@@ -1,12 +1,9 @@
-// v2portable Player implementation: API facade over the forked engine
-// (v2core) + sequencer (v2seq).
-//
-// Current stage (tasks 3.x): plays NEWEST-format (v6) v2m data directly; the
-// native any-version loader (v2load, tasks 4.x) will replace the temporary
-// v6-only path and provide real format-version detection.
+// v2portable Player implementation: API facade over the native loader
+// (v2load) + forked engine (v2core) + sequencer (v2seq).
 
 #include "v2portable.h"
 #include "v2eras.h"
+#include "v2load.h"
 #include "v2seq.h"
 
 #include <string.h>
@@ -70,21 +67,20 @@ Result Player::open(const void *v2mData, size_t length, int forceBehaviorVersion
   if (forceBehaviorVersion >= 0 && !behaviorVersionValid(forceBehaviorVersion))
     return Result::UnsupportedVersion;
 
-  // TEMPORARY (until v2load, tasks 4.x): input must be NEWEST-format (v6)
-  // data; no structural fingerprint yet. Real detection + canonicalization
-  // replaces this block.
-  detectedVersion_ = 6;
-  if (!behaviorVersionValid(detectedVersion_))
-    return Result::UnsupportedVersion;
+  // native loading: fingerprint the format version and canonicalize to the
+  // v6 layout (v2load); the detected version drives the engine's era gates.
+  V2LoadResult lr = v2loadCanonicalize(v2mData, length);
+  detectedVersion_ = lr.version; // reported even on UnsupportedVersion
+  if (lr.result != Result::OK)
+    return lr.result;
+
   im->behaviorVersion = forceBehaviorVersion >= 0 ? forceBehaviorVersion
                                                   : detectedVersion_;
 
-  // own copy: V2MPlayer keeps pointers into the data for the song's lifetime
-  im->song = (uint8_t *)malloc(length);
-  if (!im->song)
-    return Result::BadFile;
-  memcpy(im->song, v2mData, length);
-  im->songLen = length;
+  // the loader's canonical copy is ours; V2MPlayer keeps pointers into it
+  // for the song's lifetime
+  im->song = lr.data;
+  im->songLen = lr.size;
 
   im->seq.Init(1000);
   im->seq.SetSourceVersion(im->behaviorVersion);

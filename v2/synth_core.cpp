@@ -3634,7 +3634,8 @@ struct V2Synth
   sInt chanmap[POLY];   // voice -> chan
   sU32 allocpos[POLY];
   sInt voicemap[CHANS]; // chan -> choice
-  sInt tickd;           // number of finished samples left in mix buffer
+  sInt tickd;           // number of finished samples left in mix buffer (modern path)
+  sInt subRemain;       // eraV0 sub-frame path: samples left in the current control frame
 
   V2ChanInfo chans[CHANS];
   syVV2 voicesv[POLY];
@@ -3749,6 +3750,15 @@ struct V2Synth
     // at the top of synthRender (synth.asm:4773). Same logical base in both cores.
     g_freqlog_synthbase = (char *)this;
 #endif
+
+    // era <v1 (fr08): the 2000 driver renders in sub-frame chunks with a
+    // trailing-edge control tick. Modern (>=v1) keeps the whole-frame path below.
+    if (instance.eraV0())
+    {
+      renderSubFrame(buf, nsamples, buf2, add);
+      DEBUG_PLOT_UPDATE();
+      return;
+    }
 
     // fragment loop - chunk everything into frames.
     while (todo)
@@ -3927,50 +3937,10 @@ struct V2Synth
 #endif
           storeV2Values(usevoice);
           voicesw[usevoice].noteOn(cmd[0], cmd[1]);
-
-          // era <v1 (fr08): the 2000 render driver @0x40b95c renders in
-          // sub-frame chunks (`min(remaining, frame_left)`) and ticks control
-          // only at frame boundaries. A voice noteOn'd MID-frame therefore
-          // renders through the PARTIAL remainder of the current control frame
-          // -- its osc/flt phase advances over those samples (output muted, the
-          // volramp curvol is still 0). The port computes whole frames
-          // atomically (like 2004), deferring the new voice to the next
-          // boundary, so its oscillator starts (next_boundary - noteOn) samples
-          // late -> a fixed time lag (ch5: 39 samples, cross-corr 0.99). Advance
-          // the voice over the `tickd` unfinished samples to match. (DELTA.md)
-          if (instance.eraV0() && tickd > 0 && tickd < instance.SRcFrameSize)
-          {
-            StereoSample scratch[V2Instance::MAX_FRAME_SIZE];
-            memset(scratch, 0, tickd * sizeof(StereoSample));
-            voicesw[usevoice].render(scratch, tickd);
-
-            // ...and the CHANNEL FX (one level up). Both eras SKIP silent
-            // channels in the render loop, but when this note-on ACTIVATES a
-            // previously-silent channel mid-frame (npoly==0), the 2000 renders
-            // that channel's FX over the partial remainder too (@0x40b5cc runs
-            // per sub-frame chunk), advancing the chorus mod-counter /
-            // write-pointer; the port (=2004) defers the whole channel to the
-            // next boundary, leaving the chorus `tickd` samples out of phase.
-            // The voice's output is muted (curvol=0) so the FX input is ~0 --
-            // only the chorus STATE advance matters. (DELTA.md ch5)
-            if (npoly == 0)
-            {
-              V2Chan &cw = chansw[chan];
-              StereoSample z[V2Instance::MAX_FRAME_SIZE];
-              memset(z, 0, tickd * sizeof(StereoSample));
-              if (cw.fxr == V2Chan::FXR_DIST_THEN_CHORUS)
-              {
-                cw.dist.renderStereo(z, z, tickd);
-                cw.chorus.renderChan(z, tickd);
-              }
-              else
-              {
-                cw.chorus.renderChan(z, tickd);
-                cw.dist.renderStereo(z, z, tickd);
-              }
-            }
-          }
-
+          // (era <v1 mid-frame note-on voice/chorus phase is now handled
+          // structurally by renderSubFrame -- the partial chunk after this
+          // event renders the new voice + its channel FX naturally. The earlier
+          // per-event scratch-advance hacks are subsumed and removed.)
           cmd += 2;
           break;
         }
@@ -4297,7 +4267,7 @@ private:
 
     ronanCBTick(&ronan);
     tickd = instance.SRcFrameSize;
-    renderFrame();
+    renderFrame(instance.SRcFrameSize);
 
 #if COVERAGE
     // print coverage updates as they happen
@@ -4316,9 +4286,91 @@ private:
 #endif
   }
 
-  void renderFrame()
+  // era <v1 (fr08): the per-frame CONTROL update only (env/lfo step + volramp +
+  // store, channel store, ronan), WITHOUT renderFrame. The 2000 driver
+  // @0x40b95c runs this when the control-frame counter hits 0 (the TRAILING
+  // edge of the render that filled the frame), then renders the frame's samples
+  // in sub-frame chunks @0x40ba10. Splitting control-tick from render is what
+  // makes the period sub-frame timing exact (see renderSubFrame). (DELTA.md)
+  void controlTick()
   {
-    sInt nsamples = instance.SRcFrameSize;
+    for (sInt i=0; i < POLY; i++)
+    {
+      if (chanmap[i] < 0)
+        continue;
+      // eraV0 order: TICK (env/lfo/volramp) then SET (modmatrix), so a tick
+      // steps with the previous frame's params (DELTA.md TICK-before-SET).
+      voicesw[i].tick();
+      if (voicesw[i].env[0].state == V2Env::OFF)
+      {
+        chanmap[i] = -1;
+        continue;
+      }
+      storeV2Values(i);
+    }
+
+    for (sInt i=0; i < CHANS; i++)
+      storeChanValues(i);
+
+    ronanCBTick(&ronan);
+  }
+
+  // era <v1 sub-frame render: render `todo` samples to buf in chunks that never
+  // cross a 256-control-frame boundary, doing controlTick() at each boundary
+  // (and at the trailing edge before returning, so the next call's render --
+  // and any ProcessMIDI the player runs in between -- sees the pre-event tick).
+  // This is the unifying fix for every "sub-frame" era delta: mid-frame note-on
+  // voice/chorus phase AND frame-aligned control-tick edge. Mirrors the 2000
+  // driver @0x40b95c (frame counter) + @0x40ba10 (per-chunk voices+channels+
+  // global FX). Modern (>=v1) keeps the whole-frame path in render().
+  void renderSubFrame(sF32 *buf, sInt nsamples, sF32 *buf2, bool add)
+  {
+    sInt todo = nsamples;
+    while (todo)
+    {
+      if (subRemain == 0)
+      {
+        controlTick();
+        subRemain = instance.SRcFrameSize;
+      }
+      sInt chunk = min(todo, subRemain);
+
+      renderFrame(chunk); // renders `chunk` samples (channels + global FX) into mixbuf[0..chunk)
+
+      const StereoSample *src = instance.mixbuf;
+      if (!buf2) // interleaved
+      {
+        if (!add)
+          memcpy(buf, src, chunk * sizeof(StereoSample));
+        else
+          for (sInt i=0; i < chunk; i++) { buf[i*2+0] += src[i].l; buf[i*2+1] += src[i].r; }
+        buf += 2*chunk;
+      }
+      else // separate L/R
+      {
+        if (!add)
+          for (sInt i=0; i < chunk; i++) { buf[i] = src[i].l; buf2[i] = src[i].r; }
+        else
+          for (sInt i=0; i < chunk; i++) { buf[i] += src[i].l; buf2[i] += src[i].r; }
+        buf += chunk; buf2 += chunk;
+      }
+
+      todo -= chunk;
+      subRemain -= chunk;
+    }
+    // trailing-edge control tick (matches the 2000: tick + reload happen before
+    // the driver returns, so a boundary-aligned event the player processes next
+    // lands AFTER this tick -- the frame that just closed used pre-event ctls).
+    if (subRemain == 0)
+    {
+      controlTick();
+      subRemain = instance.SRcFrameSize;
+    }
+  }
+
+  void renderFrame(sInt nsamples)
+  {
+    // (eraV0 sub-frame path passes a partial count; modern passes SRcFrameSize)
 
     // clear output buffer
     memset(instance.mixbuf, 0, nsamples * sizeof(StereoSample));

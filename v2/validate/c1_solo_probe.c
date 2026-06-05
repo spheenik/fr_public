@@ -96,14 +96,17 @@ int g_ticklog_n = 0;
 
 void ticklog(uint32_t ebp)
 {
-  if (g_ticklog_n >= 40) return;
+  uint32_t pos = *(uint32_t*)(uintptr_t)0x592de4;
+  const char *lo = getenv("C1_TICK_LO"), *hi = getenv("C1_TICK_HI");
+  if (lo && pos < (uint32_t)strtoul(lo,0,10)) return;
+  if (hi && pos > (uint32_t)strtoul(hi,0,10)) return;
+  if (g_ticklog_n >= 400) return;
   g_ticklog_n++;
   int vc = (int)((ebp - 0x716a18u) / 0x1f0u);
   float out   = *(float*)(uintptr_t)(ebp + 0x124);
   uint32_t st = *(uint32_t*)(uintptr_t)(ebp + 0x128);
   float cur   = *(float*)(uintptr_t)(ebp + 0x0c);
   float ramp  = *(float*)(uintptr_t)(ebp + 0x10);
-  uint32_t pos = *(uint32_t*)(uintptr_t)0x592de4;
   fprintf(stderr, "[tick] pos=%u vc=%d env1.out=%g st=%u cur=%g ramp=%g\n",
           pos, vc, out, st, cur, ramp);
 }

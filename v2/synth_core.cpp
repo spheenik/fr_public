@@ -2574,7 +2574,18 @@ struct V2Voice
       env[i].state = V2Env::ATTACK;
 
     // process sync
-    switch (keysync)
+    // era <v1 (fr08): the 2000 noteOn @0x40aef7 has NO full-resync path. Its
+    // only keysync branch (`mov eax,[ebp+0x20]; or eax; je`) zeros the three
+    // osc phase counters [+0x28]/[+0x70]/[+0xb8] (= osc.cnt) and nothing else
+    // -- i.e. SYNC_OSC for ANY keysync != 0. syOscInit (the rdtsc noise reseed)
+    // is called only at voice INIT, never on noteOn, so a re-triggered voice
+    // RESUMES its evolved noise/LFO/filter state. The modern SYNC_FULL re-inits
+    // osc/vcf/dist (reseeding noise to 0 under eraV0) + zeros env.val/curvol;
+    // that decorrelated every re-triggered noise voice from the 2000 (ch5:
+    // rel-rms ~1.41, the equal-power-uncorrelated signature). Collapse FULL->OSC
+    // under eraV0. (DELTA.md)
+    sInt ks = (inst->eraV0() && keysync == SYNC_FULL) ? SYNC_OSC : keysync;
+    switch (ks)
     {
     case SYNC_FULL:
       COVER("VOICE noteOn sync full");
@@ -3915,6 +3926,24 @@ struct V2Synth
 #endif
           storeV2Values(usevoice);
           voicesw[usevoice].noteOn(cmd[0], cmd[1]);
+
+          // era <v1 (fr08): the 2000 render driver @0x40b95c renders in
+          // sub-frame chunks (`min(remaining, frame_left)`) and ticks control
+          // only at frame boundaries. A voice noteOn'd MID-frame therefore
+          // renders through the PARTIAL remainder of the current control frame
+          // -- its osc/flt phase advances over those samples (output muted, the
+          // volramp curvol is still 0). The port computes whole frames
+          // atomically (like 2004), deferring the new voice to the next
+          // boundary, so its oscillator starts (next_boundary - noteOn) samples
+          // late -> a fixed time lag (ch5: 39 samples, cross-corr 0.99). Advance
+          // the voice over the `tickd` unfinished samples to match. (DELTA.md)
+          if (instance.eraV0() && tickd > 0 && tickd < instance.SRcFrameSize)
+          {
+            StereoSample scratch[V2Instance::MAX_FRAME_SIZE];
+            memset(scratch, 0, tickd * sizeof(StereoSample));
+            voicesw[usevoice].render(scratch, tickd);
+          }
+
           cmd += 2;
           break;
         }

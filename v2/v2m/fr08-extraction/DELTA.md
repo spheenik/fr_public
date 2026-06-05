@@ -377,21 +377,48 @@ The 12 s ch10-solo A/B (C1 vs port, V2_SRCVER=0) was driven to **rms 0.0118 →
 
 Modern path untouched: kkrieger6 / debris_ost asm-vs-cpp A/B still max|d| = 0.
 
-**New residual frontier = ch5 (chords/polyphony), not ch10.** In the 12 s
-window only ch5 + ch10 are active; ch10 is now bit-exact dry. ch5 (3-voice
-chord, modnum=6: TWO LFO mods src=10/11 + CC2 src=2, vs ch10's single LFO mod)
-is **bit-exact for 7.38 s then diverges at a held-chord re-trigger** event
-(`b5 01 7f 02 00` CC1=127/CC2=0 then `95 48 50 4d 50 50 50` noteons of the
-already-held 72/77/80). NOT voice-steal (only 3 allocs all at t=0). Dry ch5
-residual rms 0.0137 ⇒ voice/channel chain, not the reverb tail. Suspects, in
-order: (a) the v0 retrigger/note-off→on path (gate-clear @0x40af70 ordering
-vs the new tick-then-set), (b) multi-LFO/CC2 modmatrix routing, (c) which
-held voice drives the CHANNEL mods (`voicemap[chan]`). Next probe: the same
-chanstream tap on ch5, aligned, to split voice-sum vs channel-FX at 7.38 s.
+## ch5 SOLVED to phase-exact (2026-06-05): mid-frame note-on osc deferral
 
-(The reverb/delay tail itself is now exonerated as a *primary* suspect: the
-ch10 full-vs-dry split showed muting reverb+delay drops ch10 rms 7.5e-5 → the
-tail contributes, but ch5's dry divergence dwarfs it.)
+The ch5 residual was a **constant 39-sample lag** (cross-corr 0.99, zero-lag
+corr ~0) at a chord that note-ons mid-frame at sample 325593. 39 = distance to
+the next 256-control-frame boundary (325632). (Decisive ruling-out first: ch5's
+oscs are pulse+tri/saw, NO noise osc — so the equal-power-uncorrelated look was
+a pure time-shift, not noise/seed.) Root cause:
+
+The 2000 render driver @0x40b95c renders in **sub-frame chunks**
+(`min(remaining, frame_left)`) and ticks control only at frame boundaries. A
+voice note-on'd MID-frame therefore renders through the **partial remainder** of
+the current control frame — its osc/filter phase advances over those samples
+(output muted, the volramp curvol is still 0). The port (like 2004) computes
+whole frames atomically, deferring the new voice to the next boundary, so its
+oscillator starts `(next_boundary − noteOn)` samples late → a fixed lag.
+Frame-aligned note-ons (opening chord @ sample 0) have lag 0 — why ch10 and
+ch5's first 7 s were already bit-exact.
+
+Gate (eraV0, in `processMIDI` note-on after `noteOn`): advance the new voice
+over the `tickd` unfinished samples of the current frame into a scratch buffer
+(`voicesw[i].render(scratch, tickd)`), replaying the exact osc/flt/dist state
+advance. Confirmed by the 2000 noteon order @0x40bd9f (SET 0x40af88 then NoteOn
+0x40aef7 = the port's order) and the C1 tick log (env/curvol identical).
+**Result: ch5 lag → 0 (corr 0.9999); max|d| 0.136 → 0.0033, rms 0.0142 → 1.9e-4
+(76×). Whole-song 12 s full-mix vs C1: rms 0.0185 → 2.0e-4 (92×), rel 0.46%.**
+Modern A/B (kkrieger6/debris_ost) still max|d| 0.
+
+(Also tried+reverted: collapsing SYNC_FULL→SYNC_OSC under eraV0 — the 2000
+noteon's only keysync branch zeros the 3 osc cnt fields, never reseeds — but
+ch5 isn't SYNC_FULL so it had no effect; kept out to avoid dead gating until a
+SYNC_FULL v0 patch is found.)
+
+**Remaining ch5 residual (~3% on the one mid-frame-onset note, DECAYING 3.3%→
+1.2% as it rings out, phase-exact):** a bounded filter/dist state transient from
+the partial-frame advance. First 7 s stay bit-exact; only that note carries it.
+Suspect: a 1-ULP-class difference in how the 4×-oversampled osc box filter / SVF
+state splits across the `tickd`+`SRcFrameSize` boundary vs the 2000's single
+sub-frame chunk, or the dist. Next: render-osc-only vs osc+flt in the scratch
+advance to bisect, or a C1 vce-tap at 325632.
+
+(The reverb/delay tail is exonerated as a *primary* suspect: ch10 full-vs-dry
+split showed the tail contributes only at the 7.5e-5 level.)
 
 ## Final delta list (legacy step-B summary, superseded by the table above)
 

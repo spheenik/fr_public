@@ -425,18 +425,40 @@ recirculates (fb≈0.42, dboffs≈296) and grows over ~3–4 loops, which is why
 first crosses 1e-6 ~4 frames *after* the note onset (frames 1272–1275 of the
 output are bit-exact) even though the cause is at the onset.
 
-**Root cause (same sub-frame class as the voice fix, one level up):** the 2000
-driver renders voices AND channel-FX per sub-frame chunk @0x40ba10, so a
-mid-frame note-on advances the channel chorus's mod-counter / write-pointer /
-feedback over the partial frame remainder. The port (=2004) runs channel-FX
-once per whole frame in `V2Chan::process`, so the chorus state is `tickd`
-samples out of phase. The voice-scratch gate fixed the VOICE phase but not the
-channel-FX phase. The faithful fix is **gated sub-frame rendering** under eraV0
-(render voices+channels in `min(remaining, frame_left)` chunks; tick control +
-global FX only at 256-boundaries) — a moderate `render()`/`renderFrame()`
-refactor that must stay behind eraV0 so the modern whole-frame path (bit-exact
-vs the 2004 asm) is untouched. Deferred: ~0.46 % whole-song, bounded, decaying,
-phase-exact; characterization complete.
+**Root cause + FIX (same sub-frame class as the voice fix, one level up):**
+both eras SKIP silent channels in the render loop (2004 `.chanloop`→`.chanend`;
+2000 @0x40ba51), so a channel's chorus freezes while the channel is silent. But
+when a note-on ACTIVATES a previously-silent channel MID-frame, the 2000 renders
+that channel's FX over the partial sub-frame remainder (channel render @0x40b5cc
+runs per chunk @0x40ba10), advancing the chorus mod-counter / write-pointer; the
+port (=2004) defers the whole channel to the next 256-boundary, leaving the
+chorus `tickd` samples out of phase. The voice-scratch gate fixed the VOICE
+phase; the channel chain needed the same.
+
+Gate (eraV0, `processMIDI` note-on, when `npoly == 0` — the channel was
+silent): advance the channel's dist+chorus over the `tickd` partial-frame
+samples on a zero buffer (the activating voice is muted, curvol=0, so the FX
+input is exactly 0 — only the chorus state advance matters). Channel-level
+analogue of the voice-scratch advance, NOT a full sub-frame refactor.
+
+**RESULT: ch5 lag 0 / corr 1.00000; chorus post-FX chanbuf now max|d|=0; ch5
+DRY (reverb+delay muted) is BIT-EXACT (max|d|=0).** Whole-song 12 s full-mix vs
+C1: rms **0.0185 → 7.8e-5 (237×)**, rel 0.18 %. Modern A/B (kkrieger6/
+debris_ost/josie/pzero) still max|d|=0.
+
+### Status of the two active channels (12 s window, after all fixes)
+- **ch5 (chords + chorus fb): DRY bit-exact.** Its only remaining full-mix
+  contribution (~2.3e-5 rms) is the global reverb/delay TAIL (deterministic send
+  of the bit-exact dry signal; tap aux1/aux2→reverb for the last 1-ULP).
+- **ch10 (mono, no chorus): DRY ~8.25e-4 max** (localized, much smaller rms).
+  Voice + channel FX bit-exact; residual is downstream (master lc/hc EQ / mix /
+  sum-compressor) and value-specific to ch10 (ch5 is bit-exact through the same
+  global stages). Separate 1-ULP-class item.
+
+The per-voice and per-channel DSP is now bit-exact for both channels; the
+sub-0.2 % that remains is in the GLOBAL mix/FX tail. Next-pass tooling:
+`C1_VCEFRAME`/`C1_VCE_LO/HI` (post-osc/flt/dist + post-volramp + post-channel-FX)
+and port `VCEFRAME`/`VCEFRAME_CH`; `MUTEREVERB`/`MUTEDELAY` to split dry vs tail.
 
 (The reverb/delay tail is exonerated as a *primary* suspect: ch10 full-vs-dry
 split showed the tail contributes only at the 7.5e-5 level.)

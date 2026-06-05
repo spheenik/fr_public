@@ -169,12 +169,22 @@
       advances the channel chorus mod-counter/write-pointer over the partial
       frame; the port (=2004) runs channel-FX once per whole frame, leaving the
       chorus `tickd` samples out of phase. The voice-scratch gate fixed the
-      voice phase but not the channel-FX phase. Faithful fix = **gated
-      sub-frame rendering** under eraV0 (a moderate render()/renderFrame()
-      refactor, kept behind eraV0 so the modern whole-frame path stays
-      bit-exact). Deferred: ~0.46% whole-song, bounded/decaying/phase-exact;
-      characterization complete. Tap knobs: `C1_VCEFRAME`/`C1_VCE_LO/HI`,
-      port `VCEFRAME`. Speech: RONAN off both sides.
+      voice phase but not the channel-FX phase.
+      → **FIXED: ch5 DRY now BIT-EXACT.** Both eras skip silent channels, but
+      when a note-on activates a silent channel mid-frame the 2000 advances its
+      channel FX over the partial remainder (chorus mcnt/dbptr) while the port
+      defers to the next boundary. Gate (eraV0, processMIDI note-on, npoly==0):
+      advance the channel dist+chorus over `tickd` zero-input samples. ch5 corr
+      → 1.00000, chorus post-FX max|d|=0, **ch5 dry bit-exact**. Whole-song 12s
+      full-mix vs C1: rms **0.0185 → 7.8e-5 (237×)**, rel 0.18%. Modern A/B
+      (kkrieger6/debris_ost/josie/pzero) still max|d|=0.
+      **Remaining (sub-0.2%, GLOBAL tail, 1-ULP-class):** ch5 full ~2.3e-5 =
+      reverb/delay tail (dry bit-exact); ch10 dry ~8.25e-4 max = master lc/hc
+      EQ / mix / sum-compressor (voice+channel bit-exact, value-specific to
+      ch10). Per-voice and per-channel DSP is bit-exact for both channels.
+      Tooling: `C1_VCEFRAME`/`C1_VCE_LO/HI` + port `VCEFRAME`/`VCEFRAME_CH`
+      (post-osc/flt/dist/volramp/channel-FX taps), `MUTEREVERB`/`MUTEDELAY`.
+      Speech: RONAN off both sides.
 - [x] 3.5 Line-diff the fingerprint-only (F) functions. → **DONE.** Filter:
       non-moog SVF bit-identical @44100, moog modes 6/7 absent. Reverb: shared
       Freeverb topology + identical gain table. Chorus: shared modulated delay.

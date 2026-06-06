@@ -124,28 +124,127 @@
       flip), deterministic across reopens, detected version unchanged;
       force=V2_VER_MAX+1 and 99 -> UnsupportedVersion. PASS.)
 
-## 6. Ronan
+## 6. Ronan + v5 era alignment (candytron oracle)
 
-- [ ] 6.1 Port `ronan.cpp` into `v2/portable/` behind `V2_RONAN`
-      (default on), per-instance state
-      -- DEFERRED by user (2026-06-05): a DRAFT port exists
-      (portable/ronan.cpp + phonemtab.h; __asm -> v2math kernels,
-      per-instance state, V2_RONAN gate) and is deterministic /
-      chunk-invariant / regression-clean (only josie+kkrieger6 ch15
-      affected; fr08 v0 path untouched), BUT a listening test showed the
-      josie voice is audibly off vs the original compiled ronan, and no
-      speech-enabled oracle exists in-repo (validation harness assembles
-      synth.asm RONAN-off; lab ronan.cpp is MSVC __asm). V2_RONAN now
-      DEFAULTS TO 0 (the oracle-proven config). Resume by first building
-      a reference rendering of josie's speech ("its compiled form"),
-      then localizing the port's error against it.
-- [ ] 6.2 Verify `josie.v2m` (and kkrieger6 ch15) speech against the
-      oracle within ε; verify the Ronan-disabled build plays josie with
-      speech silent and contains no phoneme tables
-      -- DEFERRED with 6.1 (needs the speech oracle). Already verified
-      on the disabled build: josie plays bit-exact to the speech-off
-      oracle baseline and the binary contains no phoneme tables / ronan
-      symbols (nm count 0, -9.3KB).
+SCOPE ADDED by user (2026-06-05): align the portable's v5 path and the
+Ronan port against the genuine fr-030 candytron final binary (the
+compiled period synth+ronan that josie was authored for), per the fr08
+C1 playbook. Source: ~/downloads/fr-030_candytron_final.zip (assayed:
+fr030-candytron-final-101.exe, 65536 bytes, PE32, kkrunchy-packed,
+single "kkrunchy" section 0xf000, 2003-08; working copy /tmp/candytron).
+This un-defers 6.1/6.2 by supplying the missing speech oracle.
+
+- [x] 6.0a Unpack the candytron binary: static depack (in-repo kkrunchy
+      sources; packer string "kkrunchy5") or runtime memory dump under
+      Wine; record provenance (zip sha256, "final 1.01", 2003-08) and
+      stash the unpacked image
+      (DONE: Wine here is wow64-only and never exposes the guest at
+      0x400000, so the fr08 live-dump recipe is out. Instead a
+      self-contained 32-bit loader harness `c2_unpack.c` maps the packed
+      exe flat at 0x400000, jumps the kkrunchy stub (entry 0x40fdc3),
+      lets it decompress in-place + run the E8 call-fixup, and dumps the
+      finished image when the post-decompress import resolver faults on
+      the unpatched LoadLibraryA placeholder (dword @0x40ffa2 = 0xffba ->
+      SIGSEGV). Output `/tmp/candytron/unpacked.bin` = 0xb5f000 bytes;
+      verified complete (.text @0x411000 is clean post-fixup x86, ~5.5%
+      nonzero over first 2MB = right for a 64k). Provenance + stub
+      anatomy in v2/v2m/candytron-extraction/{NOTES.md,c2_unpack.c}.)
+- [x] 6.0b Extract the embedded josie v2m (signature/heuristic scan of
+      the unpacked image) and cross-check against the in-repo v5
+      original (da8e5cb / current tree): byte-equality or documented
+      diff
+      (DONE: data-store name `josie_.v2m` @0x4084c; v2m payload @dump
+      0x24bf6 (VA 0x424bf6) behind a 10-byte tag `*VM\0\0\0\0ryg`, stream
+      proper at +10 = `e0 01 00 00` (timediv 480, == repo). NOT
+      byte-identical to repo josie.v2m/josie_data.v2m: header diverges
+      right after timediv (embedded `3228 0300 01..` vs repo `8004 0300
+      02..`) but a large interior body matches (~1.4KB contiguous).
+      => candytron ships a DIFFERENT export of the same song; the 6.0d
+      oracle and 6.2 portable run must both use candytron's own v2m, not
+      the repo copy. Exact payload length + `*VM..ryg` tag semantics
+      deferred to 6.0c. 64KB record window: josie_candytron.v2mc.)
+- [x] 6.0c Locate the synth + ronan code in the unpacked image and
+      build a C2 harness (fr08 C1 playbook): offline render of josie
+      WITH SPEECH, deterministic (rdtsc neutralized / seed pinned),
+      chunk-invariant
+      (RECON DONE, harness TBD -- 2026-06-06. Full entry-point map in
+      candytron-extraction/NOTES.md "6.0c reconnaissance". Synth core
+      localized 0x41dc00..0x41e800 (calcfreq 0x41dc78, 2 rdtsc seed
+      sites 0x41dca8/0x41e32d = determinism patch points, voice init
+      0x41e75b). Synth Init/Open @0x41f7e4 (zeroes ~2MB state @0x4c2ccc,
+      OpenV2M candidate @0x4144c4, inits 32 voices stride 0x228 @0x4c4be0).
+      Control surface: g_player @0xeba32c, g_v2m @0xeba344=0x424c00,
+      sound-cmd dispatcher @0x41cfb4 (cmd2=init+play). KEY FINDING:
+      unlike fr08's clean RenderProxy(buf,n), candytron is werkkzeug3 --
+      the V2 synth is wrapped in operator objects driven by a
+      timeline-synced ring buffer + DirectSound thread. ENGINE NOW
+      FULLY MAPPED (NOTES.md "6.0c engine map"): synthInit(patch,44100)
+      @0x41f7e4, synthSetSampleRate @0x4144c4, synthSetGlobals @0x41fe84,
+      and **synthRender @0x41f8c2** -- confirmed by its x87 PC=24 setup
+      (and ax,0xf0ff; or ax,0x3f; fldcw) and 32-voice loop; it self-ticks
+      the sequencer (@0x41fa2e, countdown @0x4c2e5c). Remaining wiring
+      gap: the patch/globals "song descriptor" [0x6a7fd8]/[0x6a7fdc] is
+      struct-filled by the high-level *VM-container parse (v2m @0x424c00)
+      -- harness must either call that parse or set the ptrs by hand.
+      HARNESS BUILT (c2_render.c): maps image, pins rdtsc, stubs malloc
+      IAT; ONE call to 0x414140 does the whole synth init (parse +
+      synthInit + synthSetGlobals + playerOpen) -- verified correct; then
+      loops synthRender 0x41f8c2. Synth + RONAN SPEECH both initialize and
+      tick (found the phonemes in the v2m: "!kah_m !fao_r !miy_" =
+      "come for me" @v2m+0x9733; 0x6a8900 = the speech sub-player).
+      REMAINING BLOCKER: song is silent -- synthRender ticks only the
+      speech player; the NOTE sequencer (separate obj, the cmd2/g_player
+      path) and the timeline clock (refill 0x413b62 at tempo, which
+      gates playback via the player[0x150] wait flag cleared by 0x41487e)
+      still need wiring. Detail in NOTES.md "6.0c harness".
+      UPDATE 2026-06-06: SOLVED -- josie RENDERS from candytron's synth.
+      Note path = ProcessMIDI @0x41fbdc, driven by refill 0x413b62; driver
+      per 128-frame: set clock [0x6a7598]=cumulative samples, call refill
+      (triggers voices), call synthRender. AUDIO confirmed (rms 0.07..0.35).
+      SOLVED via SOURCE (user pointed to genthree/ = Candytron source):
+      _viruz2.cpp has the exact player (smpldelta=(nexttime-time)*usecs/
+      timediv2, usecs=val*441). c2_oracle.c ports ssInitBase/ssReset/ssTick/
+      ssRender VERBATIM, drives the binary synth VAs + synthSetLyrics
+      @0x414ab7 for RONAN. Authentic render, no speed hacks. USER CONFIRMED
+      embedded josie sounds correct; ronan now wired (render diff 0.738 vs
+      no-ronan). c2_embedded_ronan.wav = demo josie + genuine player +
+      speech. Note: demo-embedded josie (VA 0x424c00) != source josie
+      (gdnum 1 vs 2); render embedded for demo-match. NEXT 6.0d:
+      determinism + chunk-invariance.)
+- [x] 6.0d Render the whole-song speech-enabled ground truth
+      (c2_josie.f32) + determinism/chunk-invariance checks; this is the
+      v5/Ronan oracle
+      (DONE 2026-06-06: c2_oracle.c renders the demo-embedded josie WITH
+      Ronan speech, USER-CONFIRMED correct (music + speech). Determinism
+      + chunk-invariance PASS: identical sha256 across 2 runs and I/O
+      chunk 333/2048/4096 (rdtsc pinned). This IS the v5/Ronan oracle.
+      Use the EMBEDDED josie (josie_embedded.v2m, sha256 6b2b3fc9...) for
+      demo-match; source josie.v2m is a different export (gdnum 2 vs 1).)
+- [ ] 6.0e v5 era assay from the binary: read off every ASSUMED
+      v2eras.h row's state at the candytron era (moog? fastsin/fastatan
+      vs native fsin/fpatan? dcoffset? crusher gain1 fold? voice/master
+      DCFs? keysync? ...) and update thresholds/evidence — a third
+      proven anchor (v5) between the v0 binary and v6 asm; cross-check
+      against the RG2/ViruzII + RG2/Viewer period sources where they
+      disagree
+- [ ] 6.1 Ronan port behind `V2_RONAN`, per-instance state — UN-DEFERRED
+      (2026-06-05) now that 6.0c/d provide the oracle. History: a DRAFT
+      port of the 2004 ronan exists (portable/ronan.cpp + phonemtab.h;
+      __asm -> v2math kernels) and is deterministic / chunk-invariant /
+      regression-clean, but the josie voice was audibly off and
+      V2_RONAN was defaulted to 0 pending an oracle. First step now:
+      diff the period ronan (candytron image + RG2 era sources) against
+      the 2004 ronan.cpp to decide whether the draft port is buggy or
+      simply the wrong-era voice; port/gate per the evidence
+- [ ] 6.2 Align portable vs the C2 oracle: render the ORIGINAL
+      josie.v2m (v5, native loader) and compare vs c2_josie.f32;
+      localize structural divergence to zero with the lab toolkit
+      (CHANSOLO/ledgers/BUSTAP), transcendental-tie residual documented
+      as ε (same rules as the fr08 v0 path); re-verify the
+      Ronan-disabled build still plays josie speech-silent with no
+      phoneme tables in the binary (was verified on the draft: nm
+      count 0, -9.3KB). kkrieger6 ch15 rides as informational (no
+      kkrieger oracle in this change)
 
 ## 7. Subsetting builds
 

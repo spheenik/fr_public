@@ -46,11 +46,21 @@ deterministically.
   report version, play, pull-render float32 stereo, seed control
   (deterministic default 0 replacing the historical rdtsc seeds).
 
-Explicit non-goals (follow-up work, separate changes): hunting period
-binaries (fr-013/019/022/025, candytron, kkrieger betas) to pin the v1–v5
-behavior thresholds and extract a mid-era corpus; bit-exactness to the
-historical x87 renders (structural fidelity with published ε instead);
-replacing the validation lab.
+- **v5/Ronan oracle from the candytron binary** (scope added 2026-06-05):
+  the fr-030 candytron final executable (user-supplied) carries the
+  compiled period synth+ronan that josie (format v5) was authored for.
+  Unpack it, extract+cross-check the embedded josie v2m, build a C2
+  harness (fr08 C1 playbook) rendering josie *with speech* as ground
+  truth, assay the binary against every ASSUMED era-table row (a third
+  proven anchor at v5), and align the portable's v5 path + Ronan port
+  against that oracle.
+
+Explicit non-goals (follow-up work, separate changes): hunting the
+*remaining* period binaries (fr-013/019/022/025, kkrieger betas) to pin
+the rest of the v1–v5 behavior thresholds and extract a mid-era corpus
+(candytron is now in scope, see above); bit-exactness to the historical
+x87 renders (structural fidelity with published ε instead); replacing
+the validation lab.
 
 ## Capabilities
 

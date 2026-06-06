@@ -24,6 +24,15 @@ are format v6. No v1–v5 material exists locally; period binaries
 (fr-013/019/022/025 etc.) could later provide both files and behavioral
 evidence.
 
+UPDATE (2026-06-05): both statements above were overturned during
+implementation. (a) The *converted/* corpus hides true versions — the
+ORIGINALS in-repo (initial checkin da8e5cb + current tree) span v0–v6,
+including josie/kkrieger6 at v5 and period synth sources under
+RG2/ViruzII + RG2/Viewer. (b) A genuine period binary is now in hand:
+fr-030 candytron final (kkrunchy-packed, 2003-08, user-supplied) —
+the compiled v5-era synth+ronan. Scope was extended (see proposal):
+candytron becomes the v5/Ronan oracle and a third proven era anchor.
+
 Constraints:
 - The existing lab (`v2/`, `validate/`, C1 oracle) must remain untouched;
   it is the reference against which the new player is measured.
@@ -50,7 +59,8 @@ Constraints:
   fidelity + fixed ε instead).
 - Pinning the v1–v5 behavior thresholds with binary evidence (follow-up
   research track; this design only provides the slots and override
-  knobs).
+  knobs). AMENDED 2026-06-05: the v5 point specifically is now IN scope
+  via the candytron binary assay (task 6.0e); v1–v4 remain follow-up.
 - Replacing or modifying the validation lab, `tinyplayer`, `in_v2m`, or
   the VSTi.
 - Sample-rate flexibility beyond 44100 Hz in the first iteration (the

@@ -1,5 +1,12 @@
 # fr-08 (year-2000) synth vs final (2004) V2 — behavioral delta
 
+> **Living threshold ledger:** the per-delta *flip versions* and evidence
+> levels are maintained in [`../../portable/v2eras.h`](../../portable/v2eras.h),
+> consumed by the portable player. This document is the v0-side
+> *characterization* (how each delta was found and proven against the
+> year-2000 binary); `v2eras.h` is the authoritative table of which delta
+> flips at which format version. Keep them in sync.
+
 > **STATUS 2026-06-05 (final): fr08 WHOLE SONG (663 s) is BIT-EXACT
 > (max|d| = 0) vs the genuine year-2000 binary**, reverb/delay tail included.
 > The last divergence (a 7.4 s decaying transient at 271.64–279.03 s) was a

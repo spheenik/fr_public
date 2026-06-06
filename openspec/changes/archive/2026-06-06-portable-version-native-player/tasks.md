@@ -309,7 +309,7 @@ This un-defers 6.1/6.2 by supplying the missing speech oracle.
       order). NEXT: per-tick trace of spos/scounter/framecount/wait4on after the
       7.384s reset on both. Oracle tools committed (C2_RTAP/C2_NTAP/C2_RONAN_NOP);
       chanbuf=0x4c1248, ronan process@0x41493c tick@0x4145c4 ws[0x6a88f8].)
-- [ ] 6.2 Align portable vs the C2 oracle: render the ORIGINAL
+- [x] 6.2 Align portable vs the C2 oracle: render the ORIGINAL
       josie.v2m (v5, native loader) and compare vs c2_josie.f32;
       localize structural divergence to zero with the lab toolkit
       (CHANSOLO/ledgers/BUSTAP), transcendental-tie residual documented
@@ -362,6 +362,13 @@ This un-defers 6.1/6.2 by supplying the missing speech oracle.
       family), prime suspect native-sin vs x87 fsin. NO per-channel DSP bug, NO
       voice-alloc bug. Full handover in candytron-extraction/NOTES.md
       "RESUME HERE". NOT yet to-eps.)
+      CLOSED 2026-06-06 (user decision): per-channel DSP, voice, player and
+      voice-stealing are PROVEN bit-exact vs the candytron binary; the
+      residual is the documented native-sin-vs-x87 transcendental razor-tie
+      class (ch3/ch6 late-song, inaudible in listening tests). Treated as ε
+      under the same rules as the fr08 v0 path. The remaining sub-ULP hunt is
+      recorded as a resumable loose end in v2/portable/ACCURACY-LOOSE-ENDS.md
+      (§1), not chased further in this change.
 
 ## 7. Subsetting builds
 
@@ -383,7 +390,7 @@ This un-defers 6.1/6.2 by supplying the missing speech oracle.
 
 ## 8. Determinism and ε publication
 
-- [ ] 8.1 Test driver (`v2/portable/test/`): renders corpus, computes
+- [x] 8.1 Test driver (`v2/portable/test/`): renders corpus, computes
       per-file rms/max|d| vs oracle baselines and output hashes; checked-in
       baseline file
       (driver DONE: test/check.py -- hash layer (anywhere) + eps layer
@@ -402,16 +409,23 @@ This un-defers 6.1/6.2 by supplying the missing speech oracle.
       renders around stolen-voice noteons (localization notes in the
       portable-seq-timing-bug memory) -- explicitly NOT a defect per
       the scope ruling.)
-- [ ] 8.2 Cross-host determinism: render hashes equal on at least two
+- [~] 8.2 Cross-host determinism: render hashes equal on at least two
       hosts/arches (x86_64 + one other available target); document the
       hash contract
       (hash contract implemented + baselines.sha256 checked in; second
-      host/arch run pending -- only x86_64 available this session)
+      host/arch run DEFERRED -- only x86_64 available. The strict-FP design
+      (owned transcendentals, -ffp-contract=off, no FTZ) is built for this and
+      -O0==-O2 is proven (8.3); the empirical aarch64 confirmation is recorded
+      as a loose end in v2/portable/ACCURACY-LOOSE-ENDS.md §6.)
 - [x] 8.3 Optimization-level invariance check (-O0 vs -O2 bit-identical)
       (DONE: all 16 v6 files + native-v0 fr08, 10s renders, -O0 ==
       -O2 bit-exact)
-- [ ] 8.4 Publish the ε table (per-file rms/max|d| for v0 and v6 paths) in
+- [x] 8.4 Publish the ε table (per-file rms/max|d| for v0 and v6 paths) in
       the change docs / portable README
+      (DONE: ε table published in v2/portable/README.md -- v0 fr08 vs C1
+      (660s max 8.5e-7/rms 1.7e-8, 60s 1 ULP/5.7e-9), v6 pzero_new +
+      v2_zeitmaschine_new vs harness_asm = exact 0, v5 josie vs candytron
+      music-bed ~0.009 (per-channel bit-exact). Scope ruling restated.)
       (UNBLOCKED by the 8.1 scope ruling; table content ready: v0 path
       fr08 vs C1 rms 5.7e-9 / max 1 ULP @60s (whole-song in 5.1 note);
       v6 path pzero_new + v2_zeitmaschine_new vs harness_asm exact 0.
@@ -429,14 +443,27 @@ This un-defers 6.1/6.2 by supplying the missing speech oracle.
       secs stays the deterministic A/B mode. Verified: drumtro3 auto =
       173.3s + 9.5s tail, WAV length patched, prefix bit-identical to
       fixed-length renders.)
-- [ ] 9.0b live playback tool `v2play` against ALSA (separate CLI linking
-      libasound; libv2portable stays dependency-free) -- DEFERRED by user
+- [~] 9.0b live playback tool `v2play` against ALSA (separate CLI linking
+      libasound; libv2portable stays dependency-free) -- SCRAPPED by user
+      2026-06-06. Offline rendering is fully covered by `v2dump`; no live-
+      audio consumer exists for this change. No `v2play.c` was ever committed
+      (only `v2dump`), so nothing to remove. Recorded in
+      v2/portable/ACCURACY-LOOSE-ENDS.md "Scrapped / descoped". Revisit in a
+      separate change if an embedding consumer needs ALSA output.
 
 ## 10. Documentation
 
-- [ ] 10.1 `v2/portable/README.md`: API usage, build flags policy
+- [x] 10.1 `v2/portable/README.md`: API usage, build flags policy
       (fast-math/FTZ prohibition), version support matrix, evidence
       legend for the era table, ε table, and the follow-up era-evidence
       research track (period-binary hunts) as future work
-- [ ] 10.2 Update DELTA.md / handover cross-references to point at
+      (DONE: README.md written -- build/subset/flag-policy table, API +
+      v2dump usage, version-support matrix w/ PROVEN/ASSUMED, evidence
+      legend, ε table, test-suite commands, follow-up research track.
+      Cross-links ACCURACY-LOOSE-ENDS.md + v2eras.h. Stale V2_RONAN header
+      comment refreshed to the 6.1-verified state.)
+- [x] 10.2 Update DELTA.md / handover cross-references to point at
       `v2eras.h` as the living threshold ledger
+      (DONE: DELTA.md header now points at v2eras.h as the authoritative
+      flip-version ledger (DELTA.md = v0-side characterization); README
+      links both. NOTES.md handovers already reference v2eras.h.)

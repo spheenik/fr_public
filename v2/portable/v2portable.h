@@ -32,11 +32,10 @@
 #ifndef V2_VER_MAX
 #define V2_VER_MAX 6
 #endif
-// Ronan (speech synth): DEFERRED -- a draft port exists (ronan.cpp) but a
-// listening test on josie showed the voice is audibly off vs the original
-// compiled ronan. Default OFF until a speech-enabled reference rendering
-// exists to verify against (tasks 6.1/6.2). Opt in with -DV2_RONAN=1 at your
-// own risk; the speech-off build is the oracle-proven configuration.
+// Ronan (speech synth): the port is verified against the candytron v5 oracle
+// (task 6.1, user-confirmed by listening: josie speech corr 0.99966). Default
+// remains OFF so the baseline corpus is unaffected and speech-silent songs
+// drop the phoneme tables; opt in with -DV2_RONAN=1 for josie/kkrieger speech.
 #ifndef V2_RONAN
 #define V2_RONAN 0
 #endif

@@ -39,8 +39,8 @@ binding accuracy constraint).
   (validated against the existing lab probes) for all corpus notes
 
 ### Requirement: Cross-host bit-identical output
-Given the same file, seed, and compiled version range, the rendered
-output SHALL be bit-identical across supported hosts and platforms; a
+The rendered output SHALL be bit-identical across supported hosts and
+platforms given the same file, seed, and compiled version range; a
 render hash SHALL serve as the verifiable contract.
 
 #### Scenario: Two hosts, one hash
@@ -49,10 +49,10 @@ render hash SHALL serve as the verifiable contract.
 - **THEN** the output hashes are equal
 
 ### Requirement: Deterministic seeding
-Noise, sample-and-hold, and distortion state that the historical engines
-seeded from `rdtsc` SHALL initialize from a player seed with default 0
-(the C1-oracle reference convention); identical seeds SHALL yield
-identical renders.
+The engine SHALL seed the noise, sample-and-hold, and distortion state
+that the historical engines seeded from `rdtsc` from a player seed with
+default 0 (the C1-oracle reference convention); identical seeds SHALL
+yield identical renders.
 
 #### Scenario: Repeat render
 - **WHEN** the same file is opened and rendered twice with the default

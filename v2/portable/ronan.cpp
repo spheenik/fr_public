@@ -15,13 +15,15 @@
 //    data (idempotently re-decoded from rawphonemes on every init).
 //  - guarded by V2_RONAN (default on, v2portable.h) instead of RONAN
 //
-// STATUS: DEFERRED DRAFT (user decision 2026-06-05). A listening test on
-// josie showed the synthesized voice is audibly off vs the original compiled
-// ronan -- and no speech-enabled oracle exists in-repo to localize the error
-// (the validation harness assembles synth.asm with RONAN off; this lab
-// ronan.cpp original is MSVC __asm). V2_RONAN defaults to 0; integration
-// resumes once a reference rendering of josie's speech exists to verify
-// against (tasks 6.1/6.2).
+// STATUS: WORKING (2026-06-06). The earlier "audibly off" voice was a single
+// porting bug: reset() (called by a CC4 text-select mid-song) must zero the
+// whole sequencer/DSP state like the lab's memset(workspace,0) -- it was only
+// resetting curp/spos, leaving wait4on stuck, so the phoneme sequencer lagged
+// the candytron binary by one syllable for the entire song. Fixed (see reset()).
+// Verified vs the candytron speech oracle (c2_oracle_solo + synthSetLyrics):
+// ch15 speech solo corr 0.99966 (rms 0.0016), whole-song josie corr 0.99916
+// (rms 0.0090 = the music-bed eps floor). V2_RONAN still defaults to 0 (opt-in
+// build flag for the speech synth); enable with -DV2_RONAN=1.
 
 #include "v2portable.h" // V2_RONAN
 
@@ -31,6 +33,7 @@
 #include "v2math.h"
 
 #include <math.h>    // fabsf only (exact); no approximating libm calls
+#include <string.h>  // memset (reset())
 
 namespace Ronan
 {
@@ -299,6 +302,28 @@ using namespace v2portable;
 
 		void reset()
 		{
+			// The lab's reset() does memset(workspace,0): it zeroes ALL sequencer
+			// + DSP state (wait4on/wait4off, framecount/scounter/spos, the filter
+			// delay lines, baseptr/ptr, ...). That memset is ESSENTIAL -- a CC4
+			// text-select calls reset() mid-song and MUST clear wait4on, else the
+			// phoneme sequencer stays stalled and the speech desyncs by a syllable
+			// (candytron josie: portable lagged the binary by one note all song).
+			// The lab kept texts/pitch/framerate/the samplerate block/d_peq1
+			// file-scope, so its memset left them intact; this port relocated them
+			// INTO syWRonan (per-instance), so we save+restore them around the
+			// memset to reproduce the lab's semantics exactly.
+			const char *sv_texts[64];
+			for (sInt i=0; i<64; i++) sv_texts[i]=texts[i];
+			sF32 sv_pitch=pitch; sInt sv_framerate=framerate;
+			sU32 sv_sr=samplerate; sF32 sv_fcm=fcminuspi_sr, sv_fc2=fc2pi_sr;
+			ResDef sv_peq=d_peq1;
+
+			memset((void*)this, 0, sizeof(*this));
+
+			for (sInt i=0; i<64; i++) texts[i]=sv_texts[i];
+			pitch=sv_pitch; framerate=sv_framerate;
+			samplerate=sv_sr; fcminuspi_sr=sv_fcm; fc2pi_sr=sv_fc2; d_peq1=sv_peq;
+
 			for (sInt i=0; i<7; i++) res[i].setdef(rdef[i]);
 			peq1.setdef(d_peq1);
 			SetFrame(phonemes[18],phonemes[18],0,*this); // off

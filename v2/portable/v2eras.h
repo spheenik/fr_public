@@ -115,6 +115,16 @@ enum V2Delta {
                            // Present by v5 (candytron .mode4). Coupled to
                            // DELTA_NATIVE_FSIN for the implementation choice
                            // once present (see v2core renderFMSin_v5).
+  DELTA_NO_CHAN_DCF,       // channel dcf1/dcf2 DC filters absent: the v5
+                           // syChanProcess (genthree _viruz2a.asm == candytron
+                           // binary) is comp -> boost -> dist/chorus -> sends,
+                           // with NO DC filter stage; the dcf1 (pre-comp) and
+                           // dcf2 (post-dist) one-poles are 2004 additions.
+                           // Previously mis-bundled into DELTA_NO_COMP_BOOST
+                           // (whose v1 param anchor only covers comp/boost).
+                           // Root cause of the josie whole-mix DC-decay
+                           // residual (every channel, 2nd sample of first
+                           // note).
 
   DELTA_COUNT
 };
@@ -197,6 +207,10 @@ inline constexpr V2DeltaRow kDeltas[DELTA_COUNT] = {
                                                      // oscjtab mode5 = off),
                                                      // present at v5; flip in
                                                      // v1..v4 unknown
+  /* DELTA_NO_CHAN_DCF        */ { 6, EV_PROVEN   }, // v5 syChanProcess has no
+                                                     // DC filters (source ==
+                                                     // binary); dcf1/dcf2 are
+                                                     // 2004/v6 additions
 };
 
 // Does the OLD (pre-flip) behavior apply at this behavior version?

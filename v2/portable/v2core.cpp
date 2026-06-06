@@ -5,6 +5,7 @@
 #include <assert.h>
 #include <string.h>
 #include <stdlib.h>
+#include <stdio.h> // V2_STEAL voice-allocation tap (debug)
 
 // the behavior-delta ledger (V2Delta ids + oldBehavior); see v2eras.h
 using namespace v2portable;
@@ -3219,16 +3220,22 @@ struct V2Chan
     accumulate(chan, inst->auxbbuf, nsamples, abrcv);
 
     // Filters. era <v1 (fr08): the 2000 channel chain @0x40b5cc is ONLY
-    // dist + chorus (in fxr order) -- the dcf1/comp/boost/dcf2 stages are all
-    // post-2000 (comp/boost are v1 features with no code in v0; dcf1/dcf2 are
-    // added DC filters). One ledger row covers the whole chain
-    // (DELTA_NO_COMP_BOOST, anchored at v1 by the param tables). (DELTA.md)
+    // dist + chorus (in fxr order) -- comp/boost are v1 features with no code
+    // in v0 (DELTA_NO_COMP_BOOST, anchored at v1 by the param tables). The
+    // dcf1/dcf2 DC filters are gated SEPARATELY: the v5 syChanProcess
+    // (genthree _viruz2a.asm == candytron binary) is comp -> boost ->
+    // dist/chorus with NO DC filter stage; dcf1/dcf2 are 2004/v6 additions
+    // (DELTA_NO_CHAN_DCF, proven by the candytron oracle). (DELTA.md)
     const bool nochain = inst->old(DELTA_NO_COMP_BOOST);
+    const bool nodcf   = inst->old(DELTA_NO_CHAN_DCF);
     if (!nochain)
     {
-      dcf1.renderStereo(chan, chan, nsamples);
-      CHTAP_SNAP(dcf1, chan, nsamples);
-      DEBUG_PLOT_STEREO(&dcf1, chan, nsamples);
+      if (!nodcf)
+      {
+        dcf1.renderStereo(chan, chan, nsamples);
+        CHTAP_SNAP(dcf1, chan, nsamples);
+        DEBUG_PLOT_STEREO(&dcf1, chan, nsamples);
+      }
       comp.render(chan, nsamples);
       CHTAP_SNAP(comp, chan, nsamples);
       boost.render(chan, nsamples);
@@ -3238,7 +3245,7 @@ struct V2Chan
     {
       dist.renderStereo(chan, chan, nsamples);
       CHTAP_SNAP(dist, chan, nsamples);
-      if (!nochain) { dcf2.renderStereo(chan, chan, nsamples); CHTAP_SNAP(dcf2, chan, nsamples); }
+      if (!nochain && !nodcf) { dcf2.renderStereo(chan, chan, nsamples); CHTAP_SNAP(dcf2, chan, nsamples); }
       chorus.renderChan(chan, nsamples);
       CHTAP_SNAP(chorus, chan, nsamples);
     }
@@ -3248,7 +3255,7 @@ struct V2Chan
       CHTAP_SNAP(chorus, chan, nsamples);
       dist.renderStereo(chan, chan, nsamples);
       CHTAP_SNAP(dist, chan, nsamples);
-      if (!nochain) { dcf2.renderStereo(chan, chan, nsamples); CHTAP_SNAP(dcf2, chan, nsamples); }
+      if (!nochain && !nodcf) { dcf2.renderStereo(chan, chan, nsamples); CHTAP_SNAP(dcf2, chan, nsamples); }
     }
 
     // Aux1/2 send (mono)
@@ -3380,6 +3387,23 @@ struct V2Synth
   sInt tickd;           // number of finished samples left in mix buffer (modern path)
   sInt subRemain;       // eraV0 sub-frame path: samples left in the current control frame
 
+  // voice-allocation tap (V2_STEAL env): mirror the oracle's [binS] tap so the
+  // portable's chanmap alloc/free/steal events can be diffed against candytron.
+  sU32 dbgsmpl;
+  void pollSteal(const char *tag)
+  {
+    static int on = -1;
+    if (on < 0) { const char *e = getenv("V2_STEAL"); on = e ? 1 : 0; }
+    if (!on) return;
+    static int prev[POLY]; static int init = 0;
+    if (!init) { for (sInt v=0; v<POLY; v++) prev[v]=chanmap[v]; init=1; return; }
+    for (sInt v=0; v<POLY; v++) if (chanmap[v]!=prev[v]) {
+      fprintf(stderr,"[ptbS] smpl=%u %s v=%d chan %d->%d alloc=%u\n",
+              dbgsmpl,tag,v,prev[v],chanmap[v],allocpos[v]);
+      prev[v]=chanmap[v];
+    }
+  }
+
   V2ChanInfo chans[CHANS];
   syVV2 voicesv[POLY];
   V2Voice voicesw[POLY];
@@ -3505,7 +3529,10 @@ struct V2Synth
     {
       // do we need to render a new frame?
       if (!tickd)
+      {
         tick();
+        pollSteal("REND"); // voice frees happen in tick()
+      }
 
       // copy to dest buffer(s)
       const StereoSample *src = &instance.mixbuf[instance.SRcFrameSize - tickd];
@@ -3556,6 +3583,7 @@ struct V2Synth
 
       todo -= nread;
       tickd -= nread;
+      dbgsmpl += nread;
     }
 
     DEBUG_PLOT_UPDATE();
@@ -3810,6 +3838,7 @@ struct V2Synth
         break; // rest ignored
       }
     }
+    pollSteal("MIDI"); // voice steals/allocs happen in note-on handling above
   }
 
   void setGlobals(const sU8 *para)

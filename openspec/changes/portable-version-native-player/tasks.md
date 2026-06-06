@@ -241,8 +241,22 @@ This un-defers 6.1/6.2 by supplying the missing speech oracle.
       unexercised conjecture) + renderFMSin_v5 (integer-mod fistp +
       native fsin, the v5 scheme). Regression: 17/17 baseline hashes
       unchanged, all 5 unit tests PASS.)
-- [ ] 6.1 Ronan port behind `V2_RONAN`, per-instance state — UN-DEFERRED
-      (2026-06-05) now that 6.0c/d provide the oracle. History: a DRAFT
+- [x] 6.1 Ronan port behind `V2_RONAN`, per-instance state — DONE 2026-06-06,
+      USER-CONFIRMED by listening (full 197.6s josie export "sounds awesome").
+      Root cause of the "audibly off" draft: reset() didn't replicate the lab's
+      memset(workspace,0) -- it relocated texts/pitch/framerate/samplerate/d_peq1
+      INTO syWRonan and skipped the memset, so a mid-song CC4 text-select
+      (ronanCBSetCtl(4,0)->reset()) left wait4on stuck -> sequencer stalled ->
+      portable lagged the candytron binary by one syllable all song -> corr~0.13.
+      FIX: reset() save/restores the relocated settings around memset(this,0).
+      Result vs the candytron speech oracle: ch15 speech corr 0.13->0.99966
+      (rms 0.0665->0.0016); whole-song josie corr 0.99916 (rms 0.064->0.0090 =
+      music-bed eps floor). Localized via per-tick workspace trace (binary
+      cleared wait4on@reset, portable didn't). V2_RONAN stays default 0 (opt-in;
+      baselines unaffected). Clean: default+ronan builds OK, 17/17 baselines +
+      5 tests PASS, debug taps reverted. Detail: candytron-extraction/NOTES.md
+      "6.1 DONE". Original task notes below:
+      (2025... ) now that 6.0c/d provide the oracle. History: a DRAFT
       port of the 2004 ronan exists (portable/ronan.cpp + phonemtab.h;
       __asm -> v2math kernels) and is deterministic / chunk-invariant /
       regression-clean, but the josie voice was audibly off and
@@ -250,6 +264,51 @@ This un-defers 6.1/6.2 by supplying the missing speech oracle.
       diff the period ronan (candytron image + RG2 era sources) against
       the 2004 ronan.cpp to decide whether the draft port is buggy or
       simply the wrong-era voice; port/gate per the evidence
+      (IN PROGRESS 2026-06-06, NOTES "6.1 cont.": draft built V2_RONAN=1 +
+      compared vs the genuine oracle ronan (c2_emb_ronan.f32). Whole-song
+      WITH ronan rms 0.064 (better than 0.079 ch15-raw); ch15-solo speech
+      decorrelated (corr ~0.13, dropouts @20-22s) = the "audibly off".
+      VERDICT: NOT wrong-era, NOT an obvious DSP bug. Proven the draft is a
+      FAITHFUL port of the EXACT period source genthree/ronan.cpp: data
+      tables md5-IDENTICAL (rawphonemes/multipliers/syls), and decode/
+      ResDef/Process/SetFrame/noise/init/CC/tick-cadence all match. RULED
+      OUT: kernels (libm-vs-vm byte-neutral), global lag (0.11ms), sequencer
+      freeze (it advances -- 210 ADV/12s, right phonemes+syllables), input
+      absent (excitation present +-0.35). REMAINING SUSPECTS (need a binary
+      ronan trace): (1) ch15 EXCITATION bit-exactness -- never verified, the
+      13/16 solo-bit-exact set excluded ch15; tap the binary chanbuf pre-
+      syRonanProcess vs the portable's; (2) fine phoneme timing / noteon-off
+      sync. NEXT: binary chanbuf + ronan-state taps, same playbook as the
+      voice/steal taps. Draft remains V2_RONAN=0 default; tree clean,
+      17/17 baselines + tests PASS.
+      UPDATE 2026-06-06: chanbuf FOUND (0x4c1248); ch15 EXCITATION VERIFIED
+      BIT-EXACT (corr 0.99999, only ~0.3% gain). Tool: c2_oracle_solo
+      C2_RONAN_NOP=1 (NOPs the ronan call @0x41fac3 so raw ch15 flows to mix).
+      DECISIVE: excitation corr 0.99999 but ronan OUTPUT corr ~0/neg -> the bug
+      is INSIDE ronan processing, NOT the input. Even voiced vowels decorrelate
+      -> phoneme COEFFICIENT trajectory, not noise. ronan addrs: process
+      @0x41493c, tick @0x4145c4, workspace [0x6a88f8] (a_voicing@+0x54). NEXT:
+      tap binary workspace a_voicing/coeffs per frame vs portable to pin
+      sequencer-timing vs coeff-precision. Suspect: ronanCBNoteOn/Off gate
+      timing (wait4on/wait4off). suspect2: high-Q resonant-pole sensitivity.
+      UPDATE2 2026-06-06 (per-frame workspace tap done): BUG LOCALIZED to the
+      phoneme SEQUENCER -- the portable's ronan lags the binary by ONE
+      note/syllable for the whole song -> wrong phoneme everywhere -> corr~0.13.
+      a_voicing in both takes only 2 values (off/voiced) so it's not the vowel
+      amplitude; voiced-segment ONSETS: binary 9.09/9.80/10.34s vs portable
+      9.81/10.45s = portable misses the binary's FIRST voiced segment. ronan
+      note-ons: binary 7.38/8.975/9.69, portable 8.975/9.69 -- portable misses
+      7.38s. The 7.38s is NOT a note (ch15's 1st note is 8.975s on both) -- it's
+      the CC4=0 text-select reset, delivered IDENTICALLY on both sides (CC4=66/
+      CC5=110/CC4=0 @7.384s, same values). Excitation+notes+CCs all match to the
+      sample. YET after the same reset+first-note, binary voices @9.09s but
+      portable @9.81s -- the portable's Tick advances ~0.7s slower (ptr stuck at
+      1). So the bug is in the Tick ADVANCE / reset() / wait-gate interaction (the
+      portable re-stalls after the post-reset note-on; suspect the spos/scounter/
+      framecount reset state OR the ronanCBTick-vs-ronanCBNoteOn within-frame
+      order). NEXT: per-tick trace of spos/scounter/framecount/wait4on after the
+      7.384s reset on both. Oracle tools committed (C2_RTAP/C2_NTAP/C2_RONAN_NOP);
+      chanbuf=0x4c1248, ronan process@0x41493c tick@0x4145c4 ws[0x6a88f8].)
 - [ ] 6.2 Align portable vs the C2 oracle: render the ORIGINAL
       josie.v2m (v5, native loader) and compare vs c2_josie.f32;
       localize structural divergence to zero with the lab toolkit
@@ -273,10 +332,36 @@ This un-defers 6.1/6.2 by supplying the missing speech oracle.
       (completeness addition). VOICE DSP + PLAYER PROVEN BIT-EXACT vs the
       candytron binary (direct voice-array tap 0x4c4be0: osc freq/cnt,
       envelope, volramp all identical; v2seq == genthree _viruz2.cpp). So the
-      josie residual (rms 0.127) is in the per-channel FX / global mix path
-      (CC1-mod aux2/delay sends, master lc/hc EQ, chgain), NOT the voice.
-      Full handover + tooling + NEXT STEP (tap the binary's chanbuf/aux/mixbuf
-      stages) in candytron-extraction/NOTES.md "RESUME HERE". NOT yet to-eps.)
+      josie residual was in the per-channel FX / global mix path, NOT the voice.
+      3RD FIX: DELTA_NO_CHAN_DCF {6,PROVEN} -- the channel dcf1(pre-comp)/
+      dcf2(post-dist) DC filters are absent in v5 syChanProcess (genthree
+      _viruz2a.asm L3450 == binary: comp->boost->dist/chorus->sends, no DC
+      stage); they were mis-bundled under DELTA_NO_COMP_BOOST (whose v1 anchor
+      only covers comp/boost params). Found by global-knockout + per-channel
+      solo bisection (every channel decayed from its note's 2nd sample =
+      one-pole DC signature). josie whole-mix rms 0.127->0.079 (-38%), max
+      0.79->0.70; ch2 solo 0.0164->0.0005. SAFE: corpus 17/17 unchanged
+      (corpus josie is v6-converted), all 5 tests PASS.
+      4TH: solo-tool grid bug (c2_oracle_solo.c C2_SOLO dropped non-solo
+      channels from the nexttime grid -> frame-level rounding drift, a TOOL
+      artifact, NOT a divergence). Fixed to mirror v2seq's solo. After the fix
+      PER-CHANNEL DSP IS PROVEN BIT-EXACT: 13/16 channels solo d_rms=0.00000
+      (whole voice+chorus+comp+boost+dist chain), ch3/ch6 tiny late-song ties,
+      ch15=ronan. => residual is CROSS-CHANNEL only. ch15 ANALYSIS: the oracle
+      routes ch15 through syRonanProcess (silence w/o lyrics) but the portable's
+      V2_RONAN=0 stub leaves ch15's raw voices in -> ~90% of the residual.
+      Proven (reverted measurement): silencing ch15 takes whole-song 0.0788->
+      0.0089 (-89%). TRUE music-bed residual ~0.009. HEADLINE josie number now
+      gated on 6.1 RONAN (route ch15 properly), not on a 6.2 mix bug.
+      5TH: VOICE STEALING PROVEN BIT-IDENTICAL (chanmap alloc taps both sides,
+      committed C2_STEAL/V2_STEAL): all 291 note-on allocations identical vs
+      candytron -> stealing is NOT a divergence source. So the ~0.009 floor is
+      just ch3/ch6 late-song osc-phase razor ties (keysync=0 continuous phase;
+      ch6 bit-exact until a 1-ULP tie at 39.5s, then persists) + sum-comp
+      amplification -- genuine transcendental ε ([[portable-seq-timing-bug]]
+      family), prime suspect native-sin vs x87 fsin. NO per-channel DSP bug, NO
+      voice-alloc bug. Full handover in candytron-extraction/NOTES.md
+      "RESUME HERE". NOT yet to-eps.)
 
 ## 7. Subsetting builds
 

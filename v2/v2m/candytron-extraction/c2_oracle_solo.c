@@ -95,6 +95,20 @@ static void ssReset(){
     synthInit(base.patchmap); synthSetGlobals(base.globals);
     if(!getenv("C2_NORONAN")) synthSetLyrics(base.speechptrs);  // RONAN
 }
+// voice-allocation tap (C2_STEAL): dump chanmap changes (alloc / free / steal)
+// chanmap[32] @0x4c2cdc, allocpos[32] @0x4c2d5c (SYN: data=0x4c2ccc).
+static void pollSteal(const char* tag){
+    static int on=-1; if(on<0){ on=getenv("C2_STEAL")?1:0; }
+    if(!on) return;
+    static int prev[32]; static int init=0;
+    int* cm=(int*)(uintptr_t)0x4c2cdcu; u32* ap=(u32*)(uintptr_t)0x4c2d5cu;
+    if(!init){ for(int v=0;v<32;v++) prev[v]=cm[v]; init=1; return; }
+    for(int v=0;v<32;v++) if(cm[v]!=prev[v]){
+        fprintf(stderr,"[binS] smpl=%u %s v=%d chan %d->%d alloc=%u\n",
+                state.cursmpl,tag,v,prev[v],cm[v],ap[v]);
+        prev[v]=cm[v];
+    }
+}
 static void ssTick(){
     if(!state.running) return;
     state.tick+=state.nexttime-state.time;
@@ -111,7 +125,12 @@ static void ssTick(){
     UPDATENT3(state.gnr,state.gnt,state.gptr+state.gnr,base.gdnum);
     static int g_solo=-2; if(g_solo==-2){const char*e=getenv("C2_SOLO"); g_solo=e?atoi(e):-1;}
     for(int ch=0;ch<16;ch++){ basech*bc=&base.chan[ch]; if(!bc->notenum) continue;
-        if(g_solo>=0 && ch!=g_solo) continue;
+        // solo: mirror v2seq -- run ALL channels' counters + nexttime bookkeeping
+        // (so the timing grid is identical to a full render), then rewind mptr to
+        // discard non-solo emitted MIDI. Skipping the whole channel (the old
+        // `continue`) changed the nexttime grid -> smpldelta subdivision ->
+        // ~frame cumulative-rounding drift = a SOLO ARTIFACT, not a real diff.
+        u8* solo_mptr0=mptr; u32 solo_laststat0=laststat;
         if(state.chan[ch].pcnr<bc->pcnum && state.time==state.chan[ch].pcnt){
             PUTSTAT(0xc0|ch); *mptr++=(state.chan[ch].lastpc+=state.chan[ch].pcptr[3*bc->pcnum]);
             state.chan[ch].pcnr++; state.chan[ch].pcptr++;
@@ -120,6 +139,7 @@ static void ssTick(){
         for(int cn=0;cn<7;cn++){ bcctl*bcc=&bc->ctl[cn];
             if(state.chan[ch].ctl[cn].ccnr<bcc->ccnum && state.time==state.chan[ch].ctl[cn].ccnt){
                 PUTSTAT(0xb0|ch); *mptr++=cn+1; *mptr++=(state.chan[ch].ctl[cn].lastcc+=state.chan[ch].ctl[cn].ccptr[3*bcc->ccnum]);
+                if(ch==15&&getenv("C2_NTAP"))fprintf(stderr,"[binCC] smpl=%u ch15 cc=%d val=%d\n",state.cursmpl,cn+1,state.chan[ch].ctl[cn].lastcc);
                 state.chan[ch].ctl[cn].ccnr++; state.chan[ch].ctl[cn].ccptr++;
                 UPDATENT2(state.chan[ch].ctl[cn].ccnr,state.chan[ch].ctl[cn].ccnt,state.chan[ch].ctl[cn].ccptr,bcc->ccnum); }
             UPDATENT3(state.chan[ch].ctl[cn].ccnr,state.chan[ch].ctl[cn].ccnt,state.chan[ch].ctl[cn].ccptr,bcc->ccnum); }
@@ -132,11 +152,14 @@ static void ssTick(){
         while(state.chan[ch].notenr<bc->notenum && state.time==state.chan[ch].notent){
             PUTSTAT(0x90|ch); *mptr++=(state.chan[ch].lastnte+=state.chan[ch].noteptr[3*bc->notenum]);
             *mptr++=(state.chan[ch].lastvel+=state.chan[ch].noteptr[4*bc->notenum]);
+            if(ch==15&&getenv("C2_NTAP"))fprintf(stderr,"[binN] smpl=%u ch15 note=%d vel=%d\n",state.cursmpl,state.chan[ch].lastnte,state.chan[ch].lastvel);
             state.chan[ch].notenr++; state.chan[ch].noteptr++;
             UPDATENT2(state.chan[ch].notenr,state.chan[ch].notent,state.chan[ch].noteptr,bc->notenum); }
-        UPDATENT3(state.chan[ch].notenr,state.chan[ch].notent,state.chan[ch].noteptr,bc->notenum); }
+        UPDATENT3(state.chan[ch].notenr,state.chan[ch].notent,state.chan[ch].noteptr,bc->notenum);
+        if(g_solo>=0 && ch!=g_solo){ mptr=solo_mptr0; laststat=solo_laststat0; } }
     *mptr++=0xfd;
     synthProcessMIDI(midibuf);
+    pollSteal("MIDI");
     if(getenv("C2_VTAP")){
         static u32 pf[32]={0};
         for(int v=0;v<32;v++){
@@ -152,6 +175,19 @@ static void ssRender(float* outbuf, u32 len){
     if(state.running && !state.silent){
         while(len){ u32 torender=(len>state.smpldelta)?state.smpldelta:len;
             if(torender) synthRender(outbuf,torender);
+            pollSteal("REND");
+            if(getenv("C2_RTAP")){ // ronan workspace tap: a_voicing/a_bypass + f1 coeffs
+                u32 ws=*(u32*)(uintptr_t)0x6a88f8u;
+                if(ws){ float av=*(float*)(uintptr_t)(ws+0x54), ab=*(float*)(uintptr_t)(ws+0x60);
+                    float f1a=*(float*)(uintptr_t)(ws+0x0c),f1b=*(float*)(uintptr_t)(ws+0x10),f1c=*(float*)(uintptr_t)(ws+0x14);
+                    int w0=*(int*)(uintptr_t)(ws+0x150),w1=*(int*)(uintptr_t)(ws+0x154);
+                    fprintf(stderr,"[binR] smpl=%u av=%.7g ab=%.7g w150=%d w154=%d f1=%.6g,%.6g,%.6g\n",state.cursmpl,av,ab,w0,w1,f1a,f1b,f1c); } }
+            if(getenv("C2_STAP")){ // ronan SEQUENCER state tap
+                u32 ws=*(u32*)(uintptr_t)0x6a88f8u;
+                if(ws){ int fc=*(int*)(uintptr_t)(ws+0x128),sp=*(int*)(uintptr_t)(ws+0x12c),sc=*(int*)(uintptr_t)(ws+0x130);
+                    int cs=*(int*)(uintptr_t)(ws+0x134),p2=*(int*)(uintptr_t)(ws+0x14c),w0=*(int*)(uintptr_t)(ws+0x150),w1=*(int*)(uintptr_t)(ws+0x154);
+                    u32 bp=*(u32*)(uintptr_t)(ws+0x140),pt=*(u32*)(uintptr_t)(ws+0x144);
+                    fprintf(stderr,"[binSEQ] smpl=%u w4on=%d w4off=%d fc=%d sc=%d sp=%d syl=%d p2=%d ptr=%d\n",state.cursmpl,w0,w1,fc,sc,sp,cs,p2,(int)(pt-bp)); } }
             if(getenv("C2_CTAP")){ u32 b=0x4c4be0u;
                 float cv=*(float*)(uintptr_t)(b+0x0c), vr=*(float*)(uintptr_t)(b+0x10);
                 u32 cnt=*(u32*)(uintptr_t)(b+0x38);
@@ -177,6 +213,11 @@ int main(int argc,char**argv){
     FILE*f=fopen(img,"rb"); if(!f){fprintf(stderr,"no %s\n",img);return 1;}
     fread((void*)(uintptr_t)IMG_BASE,1,IMG_SIZE,f); fclose(f);
     for(unsigned i=0;i<2;i++){ u8*s=(u8*)(uintptr_t)RDTSC_SITES[i]; if(s[0]==0x0f&&s[1]==0x31){s[0]=0x31;s[1]=0xc0;} }
+    // C2_RONAN_NOP: NOP the syRonanProcess call @0x41fac3 (e8 12 fd ff ff) so
+    // ch15's RAW voice excitation (chanbuf @0x4c1248) flows through syChanProcess
+    // to the mix unmodified -- lets us verify the ronan INPUT vs the portable.
+    if(getenv("C2_RONAN_NOP")){ u8*s=(u8*)(uintptr_t)0x41fac3u;
+        if(s[0]==0xe8){ for(int k=0;k<5;k++) s[k]=0x90; fprintf(stderr,"[c2] ronan call NOPed\n"); } }
     *(u32*)(uintptr_t)IAT_ALLOC=(u32)(uintptr_t)&stub_alloc;
     *(u32*)(uintptr_t)IAT_ALLOC2=(u32)(uintptr_t)&stub_ident;
     *(u32*)(uintptr_t)IAT_FREE=(u32)(uintptr_t)&stub_free;

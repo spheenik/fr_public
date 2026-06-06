@@ -291,3 +291,234 @@ export (== the in-repo josie.v2m). So:
     now defaults to it). Renders IDENTICALLY to the binary-extracted embedded
     v2m (same sha256) -- no extraction needed, it was in-repo all along.
   - genthree/josie.v2m = the dev variant (different tempo map).
+
+## 6.0e — v5 era assay (2026-06-06): every ledger row read off the binary
+
+Method: the genthree `_viruz2a.asm` (candytron's synth source) is
+**byte-identical** to `RG2/ViruzII/synth.asm` and `RG2/Viewer/synth.asm`
+(modulo the license header line), so the three in-repo "period sources"
+collapse to ONE v5-era synth — no v1–v4 anchors from them, and no
+disagreements to reconcile. Source↔binary correspondence verified by 6
+independent signatures in the unpacked image (objdump of unpacked.bin,
+adjust-vma 0x400000): modern LCG `imul 0xbb38435` ×3, native `fsin` osc
+@0x41dfc3 / FM @0x41e094 / LFO @0x41e43b, native `fpatan` dist render
+@0x41e60b, crusher render two-mul `fmuls gain1; fmuls crush1` @0x41e665,
+env decay WITHOUT the LOWEST(0x39000000) runout clamp @0x41e199, modern
+attackmul -0.09375 @0x41dbd4, and NO 2^-18 dcoffset float anywhere in the
+11.4MB image.
+
+### OLD behavior at v5 → row flips pinned at exactly v6 (now EV_PROVEN)
+ENV_CLAMP_SUSREL, NATIVE_FSIN, NATIVE_FPATAN, NO_DCOFFSET,
+CRUSHER_SPLIT_GAIN1, NO_VOICE_DCF, NO_MASTER_DCF (master chain = moddel →
+lc/hc EQ → comp, no DCF stage), NO_MOOG (syFRTab modes 6/7 = bypass; dist
+has only the 5 SVF filter modes), KEYSYNC_OSC_ONLY (no HARDSYNC path, no
+DCF init in noteOn), NO_AUX_BUSSES (osc jtab 6/7 = off; was ANCHORED).
+
+### NEW behavior already at v5 → threshold stays 1/ASSUMED, gap now v1–v4
+OSC_BOXFILTER (OSM convolution, identical casetab structure to 2004),
+NOISE_LCG_MSVC (modern constants + modern shr9|0x40000000 float gen),
+OSC_FREQ_CONST (runtime fcoscbase 261.625..., 1× advance),
+PGMCHANGE_V0 (byte-identical handler to 2004), TICK_BEFORE_SET (SET→TICK),
+SUBFRAME_RENDER (full-frame render + tickd doling), RVB_E_FULLPREC
+(SRfclinfreq factor present; set runs inside synthRender at PC=24).
+
+### Anchored rows cross-checked, all consistent
+ENV_CURVES(2): modern curves/calcfreq2 at v5. FRAME256(2): fcframebase=128.
+NO_COMP_BOOST(1): compressor + bass boost both present. NO_RVB_LOWCUT(4):
+lowcut param + hpf stage present.
+
+### Two structural discoveries (engine edits, not just data)
+1. **Sine eval / phase advance decoupled.** v5 sine = the v0 native-fsin
+   evaluation ([1,2)·2π → fsin) but with 1× advance on the runtime freq.
+   The v2eras static_assert no longer couples NATIVE_FSIN to
+   OSC_FREQ_CONST/BOXFILTER; v2core renderSin_v0 derives its step (freq<<2
+   vs freq) from DELTA_OSC_FREQ_CONST.
+2. **FM osc didn't exist at v0** — NEW ROW DELTA_NO_FM_OSC. The 2000
+   oscjtab (@0x40a565, fr08 depacked.bin, file+0x401000 mapping) maps
+   modes 5/6/7 → OFF; the lab port's "FM shared across eras" was
+   unexercised conjecture. v5 FM (.mode4) = integer phase modulation
+   (mod·fcfmmax·fc32bit → fistp → 32-bit wraparound add) + native fsin —
+   structurally different from 2004's float-add + fastsinrc. Ported as
+   renderFMSin_v5, gated NO_FM_OSC (off) → NATIVE_FSIN (v5 impl) → modern.
+
+Regression after the rewiring: all 17 baselines.sha256 hashes unchanged
+(v6 corpus + fr08-v0-native), mathcheck / twoinstance / tablecheck /
+loadcheck / forcecheck PASS. The edits only change v1–v5 behavior — i.e.
+exactly what 6.2 will validate against c2_josie (native v5 render).
+
+## 6.2 — josie v5 localization (started 2026-06-06)
+
+Method: channel-solo both sides (oracle `C2_SOLO` env in c2_oracle_solo.c;
+portable `V2SEQ_SOLO` already exists, NDEBUG-guarded) + section-by-section
+normalized diff of genthree/_viruz2a.asm (== the v5 binary) vs v2/synth.asm
+(2004). At the very first note onset global FX are ~passthrough (no history),
+so a solo'd channel's early divergence is its own voice/channel path.
+
+### Divergence map
+- First/only divergence at onset is **ch7** (pgm7, first note tick 240 ≈
+  0.235s); ch7 solo reproduces the full-mix early divergence exactly.
+- ch7 pgm7 path: osc1=tri/saw(OSM), osc2=**noise**, VCF band(mode2,resonant),
+  dist=clip(≈passthrough here), channel **chorus** on; boost/comp off.
+
+### BUG FOUND + FIXED: osc/LFO seed source mis-coupled (real v5 era bug)
+The portable keyed the osc-noise + LFO-S&H **seed** choice on
+DELTA_NOISE_LCG_MSVC: old→seed 0, else→the 2004 fixed table {0xdeadbeef,
+0xbaadf00d,0xd3adc0de} (osc) / libc-rand (LFO). But the fixed table is a **v6
+addition** (synth.asm `_OSC_` oscseeds; absent in genthree). v0 AND v5 both
+seed from **rdtsc** (fr08 syOscInit @0x40a + candytron syOscInit @0x41dc99 /
+syLFOInit rdtsc @0x41dca8,0x41e32d) → 0 under the pinned-rdtsc convention.
+At v5 the LCG constants are modern (196314165) but the SEED is still rdtsc(0).
+Coupling broke exactly in v1..v5.
+FIX: new row **DELTA_RDTSC_SEED** (flipsAt 6, EV_PROVEN); 3 seed sites
+(syVOsc::init, V2LFO::init, the era-setter re-seed loop) routed through it.
+Effect: ch7 solo rms|d| 0.00376→0.00236 (-37%); whole-song josie full-mix
+rms|d| 0.163→0.127 (-22%), max|d| 1.31→0.79. v0/v6 baselines UNCHANGED
+(delta only differs from NOISE_LCG in v1..v5), all unit tests PASS.
+
+### Remaining residual (open)
+After the seed fix, ch7 still has a **smooth, monotonic, saturating** diff
+(~+0.043 over ~3 frames ≈ an 18 Hz step response), NOT jagged → not the noise.
+Every section (OSC OSM, VCF SVF, ENV, MODDEL chorus, COMP, BOOST) is identical
+v5↔2004 in source EXCEPT: native fsin/fpatan (gated), moog/aux (v6, gated),
+the seed table (now fixed), env decay-runout (gated), and `%if FIXDENORMALS`
+dcoffset adds — and the candytron build has **no** 2^-18 constant in the image,
+so FIXDENORMALS was OFF (dcoffset correctly gated off at v5). So the residual
+is NOT explained by any source-level section diff found so far. Whole-song
+residual is bounded + section-correlated (rms 0.07..0.16, no growth) → looks
+like accumulated per-voice/channel state/precision (chorus-state or a resonant-
+VCF coefficient razor-tie), each channel likely contributing its own. Next:
+isolate ch7's chorus vs voice (needs editing the v5-LAYOUT chan bytes in the
+v2m — NOT the v6-canonical offsets; v5 chan omits the 4 auxa/b rcv/snd params),
+then sweep the other channels. Tooling left in place: c2_oracle_solo (C2_SOLO),
+V2SEQ_SOLO. (Debug taps were temporary and have been removed; tree is clean.)
+
+### 6.2 ch7 deep-dive (2026-06-06 cont.) — narrowed to per-note osc phase/state
+Stripped ch7 to bare voice in the v2m (both sides; CORRECT v5 layout offsets:
+voice 0-58, chan: chanvol59/reverb60/delay61/fxroute62/boost63/chandist64-67/
+chorus68-74/comp75-83 -- v5 OMITS the 4 v6 auxa/b rcv/snd, so v6-canonical
+offsets are wrong for editing the FILE). Tooling: /tmp/candytron/c2_oracle_solo
+(C2_SOLO env) + V2SEQ_SOLO. Isolation results (ch7 solo, vs c2 oracle):
+- canonicalization VERIFIED correct: raw v5 chan bytes (dist/chorus/comp) ==
+  portable's in-memory v6-canonical values, byte-for-byte. Not the loader.
+- chorus stripped -> divergence UNCHANGED. Not the chorus.
+- osc2(noise) off -> UNCHANGED. Not the noise (for ch7).
+- VCF bypassed -> divergence GREW (band filter was masking it) -> it's the osc.
+- bare osc1->volramp->chanvol (no flt/dist/chorus/comp) -> still diverges,
+  rms 0.0186. Pure voice path.
+- trisaw_flt float->double: ch7 UNCHANGED (and double breaks v6 baselines) ->
+  NOT the OSM coefficient precision.
+- freq formula == v5 asm (pow2((pitch+note-60)/12)*SRfcobasefrq, fistp);
+  SRfcobasefrq=(fcoscbase*fc32bit)*(1/sr)=12740060 == v5 calcNewSampleRate
+  EXACTLY. v2_oscfreq mathcheck-validated vs x87. So integer freq matches.
+- voice-allocation/steal logic: IDENTICAL v5 asm vs 2004 (only data->ebp
+  per-instance addressing differs). Same voice choices.
+- sequencer event timing: v2seq UpdateSampleDelta == c2 oracle EXACTLY
+  (usecs=5000*SR==500000*441, td2=10000*timediv, remainder-carry). Matches.
+KEY OBSERVATION: the FIRST note matches for ~9 periods; a LATER note (new
+onset from silence @0.28s) diverges from its 2nd sample, growing quadratically
+(=linear osc-slope error integrated). oscsync(keysync)=0 for pgm7 -> osc phase
+(cnt) is CONTINUOUS across notes/steals, never reset. So a note's osc phase
+depends on the entire prior voice history; once any prior render differs by a
+hair, the stolen-voice phase diverges and every subsequent note on that voice
+is off. This is a per-note osc-phase/state divergence, bounded + non-growing
+(matches whole-song rms 0.07..0.16, section-correlated) -- the same FAMILY as
+[[portable-seq-timing-bug]]'s stolen-voice observation, now on a true-era v5
+oracle. NOT yet root-caused: needs tapping the BINARY's internal per-voice osc
+buffer (instrument c2_oracle to dump synth voice state @0x4c4be0 stride 0x228)
+to compare osc-for-osc and find which note/voice first desyncs and why (phase
+vs a 1-ULP something in a specific note's render). That binary-tap is the
+clean next step. Banked this session: the DELTA_RDTSC_SEED fix (-22%).
+
+### 6.2 cont. (2026-06-06) — voice DSP EXONERATED via binary tap; +CC6 hicut delta
+User prompt: use the genthree player SOURCE, not a binary reverse. Done:
+- genthree _viruz2.cpp PLAYER is byte-structurally identical to the portable
+  v2seq: same event dispatch (pc/cc/pb/notes, running status), same sub-frame
+  smpldelta render-chunking (ssRender == V2MPlayer::Render), same UpdateSampleDelta
+  (usecs=5000*SR==500000*441, td2=10000*timediv, remainder carry). Player RULED OUT.
+- Direct per-voice tap of the BINARY (voice array 0x4c4be0 stride 0x228;
+  osc1.cnt@+0x38, freq@+0x3c, curvol@+0x0c, volramp@+0x10) vs the portable
+  (voicesw[0]), MATCHED chunk size (C2_CHUNK=4096): osc freq BIT-IDENTICAL
+  (4772130), osc phase cnt IDENTICAL, curvol/volramp IDENTICAL (0.245854303,
+  -6.868e-9). => the VOICE DSP (oscillator + envelope + volramp) is bit-exact
+  vs candytron. The residual is NOT in the voice; it's downstream in the
+  channel/global path (CC1-modulated aux2/delay sends, master lc/hc EQ, chgain).
+  The earlier "bare ch7" test was not truly bare -- the global delay (ch7's
+  CC1->aux2 send, 279 CC1 events) + master EQ were still active.
+
+REAL BEHAVIOR FOUND + FIXED (2nd of the session): **DELTA_CC6_HICUT**
+("FAKE 2: Lowcut!"). v0 (fr08 ProcessControlChange @0x40bded) AND v5 (candytron
+/ all three byte-identical RG2 _viruz2a.asm) map **MIDI CC6 on channel 15** to
+the master high-cut: hcfreq = sqr((val+1)/128), in addition to storing the
+controller. 2004 dropped it. Gated {6, EV_PROVEN}; engine fix in processMIDI
+case 3 (chan==15 && ctrl==6). SAFE: v0/v6 baselines unchanged (fr08 sends no
+ch15/CC6), all tests PASS. NOTE josie's ch15 sends CC4(56)/CC5(24)/CC7(1) but
+**no CC6**, so josie itself doesn't trigger it (whole-song rms unchanged at
+0.127) -- it's a correctness/completeness addition, proven, for v0/v5 files
+that do use it; NOT the josie residual.
+
+NET this session: 2 proven era-table corrections (DELTA_RDTSC_SEED -22% on
+josie; DELTA_CC6_HICUT). Voice DSP proven bit-exact vs candytron. josie residual
+(rms 0.127) now localized to the per-channel FX / global mix path (aux/delay
+sends, master EQ, chgain), NOT the synth voice -- the clean next thread is to
+tap the binary's chanbuf/aux/mix stages (the channel-process + RenderBlock
+path) the same way the voice was tapped.
+
+## ========== RESUME HERE (6.2 handover for a fresh context) ==========
+Goal of group 6.2: drive the portable's native v5 render of josie to (near)
+zero vs the candytron oracle, documenting the transcendental-tie residual as ε.
+
+### Current state (2026-06-06)
+- 6.0e DONE (era assay; v2eras.h has the v5 PROVEN rows + DELTA_NO_FM_OSC).
+- 6.2 IN PROGRESS. josie whole-mix residual vs c2_emb.f32: rms 0.127, max 0.79.
+- TWO proven era-table fixes committed (both: v0/v6 baselines unchanged, tests
+  PASS, only differ in v1..v5):
+  1. DELTA_RDTSC_SEED {6,PROVEN}: osc-noise + LFO-S&H seed is rdtsc(->0) pre-v6,
+     not the 2004 fixed table. -22% on josie (0.163->0.127).
+  2. DELTA_CC6_HICUT {6,PROVEN}: ch15 CC6 -> master hicut sqr((val+1)/128).
+     Correct for v0/v5 but josie sends no ch15 CC6, so 0 effect on josie's #.
+- PROVEN bit-exact vs candytron (direct binary tap, matched chunk size):
+  the VOICE DSP (osc freq/phase cnt, envelope, volramp) AND the PLAYER
+  (v2seq == genthree _viruz2.cpp). So the residual is NOT voice/player.
+- => RESIDUAL IS IN THE PER-CHANNEL FX / GLOBAL MIX PATH: CC1-modulated
+  aux2/delay sends, the channel chain (dist/chorus/comp/boost), master lc/hc
+  EQ, chgain, reverb. NEXT STEP below.
+
+### NEXT STEP
+Tap the BINARY's mix-path stages the same way the voice was tapped, and find
+the first stage that diverges from the portable:
+  - chanbuf (per-channel buffer, post voice-mix, pre channel-FX)
+  - aux1buf/aux2buf (reverb/delay sends), mixbuf (master accumulate)
+  - master lc/hc EQ output (RenderBlock hcfreq/lcfreq one-pole)
+Binary addresses (base 0x400000, from "6.0c engine map"): synth state
+@0x4c2ccc; the mix/aux/chan buffers are in the synth BSS near there -- locate
+chanbuf/aux1buf/aux2buf/mixbuf by disassembling syChanProcess (_V2CHAN_) and
+.RenderBlock in the unpacked image. Compare per-frame against the portable's
+inst->chanbuf/aux1buf/aux2buf/mixbuf (v2core V2Instance). Likely suspects given
+"everything matches by source": a CC1-modulated send/param remap, or a
+master-EQ coefficient. Also re-audit the mod-dest remap for the CC1 mods
+(mod3 dest67=boost.amount, mod4 dest65=aux2/delay-send, mod5 dest13=osc2.vol)
+-- verify the v5->v6 dest remap puts them on the right canonical param.
+
+### TOOLING (all in /tmp/candytron unless noted; rebuild from repo if cleared)
+- Oracle (candytron binary synth + genthree-ported player), with solo + taps:
+  SRC: v2/v2m/candytron-extraction/c2_oracle_solo.c  (committed)
+  BUILD: gcc -m32 -no-pie -O0 c2_oracle_solo.c -o c2_oracle_solo
+  RUN: ./c2_oracle_solo /tmp/candytron/unpacked.bin <v2m> <out.f32> <secs>
+  ENV: C2_SOLO=<ch> (keep only that channel's MIDI), C2_CHUNK=<n> (match the
+       portable's outer chunk, use 4096), C2_VTAP=1 (per-note osc freq/cnt),
+       C2_CTAP=1 (voice0 cnt/curvol/volramp per render chunk), C2_NORONAN=1.
+  Voice array @0x4c4be0 stride 0x228; osc1.cnt@+0x38 freq@+0x3c (syWOsc:
+  mode0/ring4/cnt8/freq12...), curvol@+0x0c volramp@+0x10 (syWV2 head).
+- unpacked.bin: re-derive with c2_unpack.c if /tmp cleared (see "Unpacking").
+- Portable: v2/portable/v2dump <v2m> <out.f32> <secs> <chunk>; env V2SEQ_SOLO=<ch>
+  (NDEBUG-off builds). Detects v5 automatically for genthree/data/josie.v2m.
+- Oracle reference renders: c2_emb.f32 (no-ronan), c2_emb_ronan.f32 (with).
+  Regenerate: C2_NORONAN=1 ./c2_oracle_solo unpacked.bin genthree/data/josie.v2m c2_emb.f32 47
+- v2m INPUT for both = genthree/data/josie.v2m (v5, == demo-embedded, sha
+  5bf17fb8...). NOT genthree/josie.v2m (dev variant, gdnum 2).
+- v5 FILE chan-byte edit offsets (patch7=37016 for pgm7; v5 layout, NOT v6 --
+  v5 OMITS the 4 auxa/b rcv/snd): voice 0-58; chanvol59, reverb/aux1 60,
+  delay/aux2 61, fxroute62, boost63, chandist64-67, chorus68-74, comp75-83,
+  maxpoly84, modnum85, modmatrix 86+ (3 bytes/mod: source,val,dest).
+  osc2.mode@patch7+8, vcf1.mode@patch7+20. (Use to strip stages in BOTH sides.)
+- Compare: python3 numpy rms/max on the two .f32 (interleaved stereo float32).

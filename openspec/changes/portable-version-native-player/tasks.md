@@ -220,13 +220,27 @@ This un-defers 6.1/6.2 by supplying the missing speech oracle.
       chunk 333/2048/4096 (rdtsc pinned). This IS the v5/Ronan oracle.
       Use the EMBEDDED josie (josie_embedded.v2m, sha256 6b2b3fc9...) for
       demo-match; source josie.v2m is a different export (gdnum 2 vs 1).)
-- [ ] 6.0e v5 era assay from the binary: read off every ASSUMED
+- [x] 6.0e v5 era assay from the binary: read off every ASSUMED
       v2eras.h row's state at the candytron era (moog? fastsin/fastatan
       vs native fsin/fpatan? dcoffset? crusher gain1 fold? voice/master
       DCFs? keysync? ...) and update thresholds/evidence — a third
       proven anchor (v5) between the v0 binary and v6 asm; cross-check
       against the RG2/ViruzII + RG2/Viewer period sources where they
       disagree
+      (DONE 2026-06-06: full assay in candytron-extraction/NOTES.md
+      "6.0e". genthree _viruz2a.asm == RG2/ViruzII == RG2/Viewer
+      byte-identical (one v5 source, no disagreements); source==binary
+      verified by 6 disasm signatures. 10 rows OLD at v5 -> flip pinned
+      at exactly v6, EV_PROVEN (env-clamp, fsin, fpatan, dcoffset,
+      crusher-split, voice/master DCF, moog, keysync, aux-busses); 7
+      rows already NEW at v5 -> stay flipsAt 1 ASSUMED, gap narrowed to
+      v1-v4; all 4 anchored rows consistent. Engine edits: sine eval
+      decoupled from the 4x-advance convention (renderSin_v0 step from
+      OSC_FREQ_CONST); NEW ROW DELTA_NO_FM_OSC -- the 2000 oscjtab maps
+      mode 5/6/7 to OFF (no FM at v0; the lab's "FM shared" was
+      unexercised conjecture) + renderFMSin_v5 (integer-mod fistp +
+      native fsin, the v5 scheme). Regression: 17/17 baseline hashes
+      unchanged, all 5 unit tests PASS.)
 - [ ] 6.1 Ronan port behind `V2_RONAN`, per-instance state — UN-DEFERRED
       (2026-06-05) now that 6.0c/d provide the oracle. History: a DRAFT
       port of the 2004 ronan exists (portable/ronan.cpp + phonemtab.h;
@@ -245,6 +259,24 @@ This un-defers 6.1/6.2 by supplying the missing speech oracle.
       phoneme tables in the binary (was verified on the draft: nm
       count 0, -9.3KB). kkrieger6 ch15 rides as informational (no
       kkrieger oracle in this change)
+      (IN PROGRESS 2026-06-06: localization started, candytron-extraction/
+      NOTES.md "6.2". Method: channel-solo both sides (oracle C2_SOLO,
+      portable V2SEQ_SOLO) + per-section asm diff. First onset divergence =
+      ch7. BUG FOUND+FIXED: osc-noise/LFO-S&H seed was coupled to
+      DELTA_NOISE_LCG_MSVC -> 2004 fixed seed table, but v0 AND v5 seed from
+      rdtsc(->0); the table is a v6 add. New row DELTA_RDTSC_SEED {6,PROVEN}
+      decouples it. Whole-song josie rms|d| 0.163->0.127 (-22%), max
+      1.31->0.79; v0/v6 baselines unchanged, tests PASS.
+      2ND FIX: DELTA_CC6_HICUT {6,PROVEN} -- ch15 CC6 -> master hicut
+      (sqr((val+1)/128)); v0(fr08 @0x40bded)+v5 have it, 2004 dropped it.
+      Correct for v0/v5 but josie sends no ch15 CC6 -> 0 effect on josie's #
+      (completeness addition). VOICE DSP + PLAYER PROVEN BIT-EXACT vs the
+      candytron binary (direct voice-array tap 0x4c4be0: osc freq/cnt,
+      envelope, volramp all identical; v2seq == genthree _viruz2.cpp). So the
+      josie residual (rms 0.127) is in the per-channel FX / global mix path
+      (CC1-mod aux2/delay sends, master lc/hc EQ, chgain), NOT the voice.
+      Full handover + tooling + NEXT STEP (tap the binary's chanbuf/aux/mixbuf
+      stages) in candytron-extraction/NOTES.md "RESUME HERE". NOT yet to-eps.)
 
 ## 7. Subsetting builds
 

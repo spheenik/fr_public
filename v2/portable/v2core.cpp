@@ -753,8 +753,11 @@ struct V2Osc
     // here too. (At the first synthInit srcVersion is still MODERN; the era
     // setter re-seeds those voices. keysync noteOns re-init and hit this path
     // with the real srcVersion.)
+    // SEED source (DELTA_RDTSC_SEED, flips at v6) is independent of the LCG
+    // CONSTANTS (DELTA_NOISE_LCG_MSVC): at v5 the LCG is modern but the seed is
+    // still rdtsc (== 0 here). The fixed seeds[] table is a v6 addition.
     nseed = seedMix(instance->userSeed,
-                    instance->old(DELTA_NOISE_LCG_MSVC) ? 0u : seeds[idx], idx);
+                    instance->old(DELTA_RDTSC_SEED) ? 0u : seeds[idx], idx);
     inst = instance;
   }
 
@@ -809,9 +812,11 @@ struct V2Osc
   {
     // Per-mode era gates, one delta id per renderer. The _v0 renderers are
     // faithful ports of the 2000 syOscRender @0x40a585: tri/saw + pulse are
-    // 4x-oversampled box filters, sine uses native fsin (freq<<2 advance),
-    // noise uses the MSVC LCG + 16-bit float gen. FM is shared across eras
-    // (the era difference flows in through DELTA_OSC_FREQ_CONST only).
+    // 4x-oversampled box filters, sine uses native fsin (freq<<2 advance when
+    // DELTA_OSC_FREQ_CONST is old, 1x at v5 -- see renderSin_v0), noise uses
+    // the MSVC LCG + 16-bit float gen. FM doesn't exist at v0 (oscjtab mode 5
+    // = off, DELTA_NO_FM_OSC); once present it is native-fsin/integer-mod
+    // through v5 (renderFMSin_v5) and fastsinrc/float-mod at v6.
     // AUXA/AUXB don't exist before v6 (DELTA_NO_AUX_BUSSES -> silence); ring
     // is default-off in canonicalized period files.
     switch (mode & 7)
@@ -835,7 +840,10 @@ struct V2Osc
       else                                 renderNoise(dest, nsamples);
       break;
     case OSC_FM_SIN:
-      renderFMSin(dest, nsamples);
+      if (inst->old(DELTA_NO_FM_OSC))
+        break; // 2000 oscjtab maps mode 5 to off (no FM renderer in v0)
+      if (inst->old(DELTA_NATIVE_FSIN)) renderFMSin_v5(dest, nsamples);
+      else                              renderFMSin(dest, nsamples);
       break;
     case OSC_AUXA:
       if (!inst->old(DELTA_NO_AUX_BUSSES))
@@ -903,7 +911,12 @@ private:
   {
     COVER("Osc v0 sin");
     sU32 c = cnt;
-    sU32 step = (sU32)freq << 2; // sine advances 4*freq per output sample
+    // v0 advances 4*freq per output sample (the 4x-oversample convention
+    // coupled to the baked freq constant); v5 (candytron .mode2) keeps the
+    // SAME native-fsin evaluation but advances 1x on the runtime-fcoscbase
+    // freq -- the eval and the advance are decoupled (6.0e assay).
+    sU32 step = inst->old(DELTA_OSC_FREQ_CONST) ? ((sU32)freq << 2)
+                                                : (sU32)freq;
     for (sInt i=0; i < nsamples; i++)
     {
       sF32 p = v0_cnt2f(c);
@@ -1278,6 +1291,32 @@ private:
       cnt += freq;
 
       sF32 out = gain * fastsinrc(t);
+      if (ring)
+        dest[i] *= out;
+      else
+        dest[i] = out;
+    }
+  }
+
+  void renderFMSin_v5(sF32 *dest, sInt nsamples)
+  {
+    COVER("Osc v5 FM");
+
+    // candytron-era FM (genthree _viruz2a.asm .mode4, binary @~0x41e07x; same
+    // numbering as 2004 but a different scheme): the modulator is scaled by
+    // fcfmmax*fc32bit and CONVERTED TO AN INTEGER with fistp, then added to a
+    // copy of the phase counter with 32-bit wraparound; the carrier is the
+    // native-fsin sine on the [1,2)*2pi phase (same evaluation as
+    // renderSin_v0). 2004 instead keeps the modulator in float and feeds
+    // fastsinrc. Non-ring REPLACES the buffer (asm stores without fadd),
+    // exactly like the 2004 FM.
+    for (sInt i=0; i < nsamples; i++)
+    {
+      sInt modi = v2_fistp(dest[i] * fcfmmax * fc32bit);
+      sF32 p = v0_cnt2f(cnt + (sU32)modi);
+      cnt += freq;
+
+      sF32 out = gain * v2_sin(p * fc2pi);
       if (ring)
         dest[i] *= out;
       else
@@ -1698,10 +1737,11 @@ struct V2LFO
   {
     cntr = last = 0;
     inst = instance;
-    // era <v1 (fr08): C1 pins rdtsc=0, so the S&H seed must be 0 for the
-    // matched-seed A/B (DELTA.md D6). (Re-seeded by the era setter for the
-    // synth-init-time voices, as srcVersion isn't set yet at first init.)
-    if (instance->old(DELTA_NOISE_LCG_MSVC)) { nseed = 0u; return; }
+    // pre-v6 (fr08 AND candytron v5): LFO S&H seed is rdtsc (== 0 under the
+    // pinned-rdtsc convention). v6 switched to the libc-rand sequence.
+    // (Re-seeded by the era setter for the synth-init-time voices, as
+    // srcVersion isn't set yet at first init.)
+    if (instance->old(DELTA_RDTSC_SEED)) { nseed = 0u; return; }
     // deterministic replacement for the original's libc rand() (the lab
     // matched the asm only because both sides shared one glibc sequence);
     // V2Rand replicates that sequence portably (design D6).
@@ -3676,7 +3716,18 @@ struct V2Synth
           {
             chans[chan].ctl[ctrl - 1] = val;
             if (chan == CHANS-1)
+            {
               ronanCBSetCtl(&ronan, ctrl, val);
+              // era <v6 ("FAKE 2: Lowcut!"): CC6 on the speech channel ALSO
+              // drives the master high-cut, on top of storing the controller.
+              // fr08 @0x40bded + candytron/RG2 _viruz2a.asm; 2004 removed it.
+              // Same form as the global highcut in setGlobals. DELTA_CC6_HICUT;
+              // ch15-only, so invisible to per-channel solos but it sweeps the
+              // whole-mix master EQ in josie. (fr08 v0 stays exact -- it sends
+              // no ch15/CC6.)
+              if (ctrl == 6 && instance.old(DELTA_CC6_HICUT))
+                hcfreq = sqr((val + 1.0f) / 128.0f);
+            }
           }
           else if (ctrl == 120) // CC #120: all sound off
           {
@@ -4216,7 +4267,7 @@ void __stdcall synthSetSourceVersion(void *pthis, int srcver)
   // synthInit (before srcVersion was set), so re-seed them here; keysync
   // noteOns re-init through the era-gated init path and seed 0 on their own.
   V2Synth *syn = (V2Synth *)pthis;
-  if (inst.old(DELTA_NOISE_LCG_MSVC))
+  if (inst.old(DELTA_RDTSC_SEED))
     for (sInt v=0; v < V2Synth::POLY; v++)
     {
       for (sInt o=0; o < syVV2::NOSC; o++) syn->voicesw[v].osc[o].nseed = 0u;

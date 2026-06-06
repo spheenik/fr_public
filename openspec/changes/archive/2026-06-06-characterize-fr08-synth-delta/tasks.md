@@ -1,3 +1,11 @@
+> **CLOSED 2026-06-06 (archived --skip-specs).** Goal achieved: the fr08
+> (year-2000) synth is characterized and proven WHOLE-SONG BIT-EXACT vs the
+> genuine binary (max|d| = 0; see fr08-extraction/DELTA.md). The only open
+> item (2.3, a dsound Wine capture) is an explicit non-goal. The era-delta
+> findings are now the v0 anchor of the portable player's living ledger
+> (v2/portable/v2eras.h). Archived as an investigation record; not synced to
+> main specs.
+
 ## 0. Step A — version-table archaeology (done during exploration)
 
 - [x] 0.1 Recover the param-level changelog from `sounddef.h` version fields +

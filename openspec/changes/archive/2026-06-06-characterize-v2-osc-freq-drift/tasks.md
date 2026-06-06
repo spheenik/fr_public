@@ -1,3 +1,12 @@
+> **CLOSED 2026-06-06 (archived --skip-specs).** Core goal achieved: the
+> oscillator/env/LFO/filter control path is proven BIT-EXACT over the whole
+> song (osc fully exonerated; the pitch/env "drift" traced to a single cause
+> and resolved as part of the V2 whole-song bit-exact solve). DEFERRED as
+> loose ends (genuinely unfinished, not superseded): the freqdiff.py pass/fail
+> regression guard (6.x) and the HANDOVER/BUILD doc updates (7.x) — optional
+> future work, not blocking. Archived as an investigation record; not synced
+> to main specs.
+
 ## 1. Integer ledger — core + asm capture
 
 - [x] 1.1 Define the fixed-width record schema (call ordinal, kind, instance offset,

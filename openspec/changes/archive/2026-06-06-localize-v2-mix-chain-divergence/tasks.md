@@ -1,5 +1,14 @@
 # Tasks
 
+> **CLOSED 2026-06-06 (archived --skip-specs).** The whole-song mix residual
+> that this change's notes left "STUCK ~0.0838" was subsequently SOLVED in the
+> V2 whole-song bit-exact effort (the literal-promotion / association bug
+> classes: moog 1/6 coeffs, allpass + auxa-gain association, etc.) — 5 songs
+> now render whole-song bit-exact, and the portable player proves josie's
+> per-channel chain bit-exact vs the candytron binary. The remaining open
+> localization sub-stages (8.x–16.x) are therefore SUPERSEDED, not unfinished.
+> Archived as an investigation record; not synced to main specs.
+
 ## 1. Per-stage mix tap — C++ core (`V2_VALIDATE`-gated)
 - [x] 1.1 Add five `StereoSample` snapshot buffers (post-reverb, post-delay,
       post-dcf, post-lc/hc, post-compr) and `memcpy` `mixbuf` into each

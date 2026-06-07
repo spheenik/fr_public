@@ -25,6 +25,15 @@ factor by diffing against existing committed contracts.
   - `oracle.h` — the shared C oracle scaffold (mmap@`0x400000` + SIGSEGV-dump + f32
     output) with per-binary `{entry, init, render}` VAs as config; the bespoke synth
     glue stays per-binary.
+- **Added during implementation** (folded into specs/tasks/design as their own
+  requirements): `bufcmp.py` + `era compare` — numpy-accelerated oracle-contract
+  diff (`max|d|`/rms/divergence), superseding the inline diffs and the pure-Python
+  `v2/validate/compare.py`; `tap.py` + `era tap` — static typed read at a VA (the
+  data-side of `era disasm`); and two `oracle.h` extensions for tapping a loaded
+  oracle — typed live reads + env-gated sinks (`oracle_u32`/`oracle_tap_*`) and the
+  signal-chain tap-table lifecycle (`oracle_chan_tap` + `oracle_taps_open/reset/
+  dump/close`). The kkrunchy unpack route was unified under Unicorn (not the native
+  `c2_unpack.c`), so the CLI is `era {detect|unpack|carve|assay|disasm|tap|compare}`.
 - **Migrate the three existing extraction dirs** to consume the toolkit and **delete
   their forked copies**, flybye first (cleanest), verified end-to-end before the others.
 - Each migration step is gated on an existing committed contract — re-run

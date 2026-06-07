@@ -101,7 +101,11 @@ so a new binary is handled without copying a script.
 
 #### Scenario: subcommands cover the pipeline
 - **WHEN** a user invokes the `era` CLI
-- **THEN** it offers `detect`, `unpack`, `carve`, `assay`, `disasm`, and `compare` subcommands operating on a binary, flat image, or render buffers
+- **THEN** it offers `detect`, `unpack`, `carve`, `assay`, `disasm`, `tap`, and `compare` subcommands operating on a binary, flat image, or render buffers
+
+#### Scenario: static data tap
+- **WHEN** a user runs `era tap` with an image, a virtual address, and a type
+- **THEN** it decodes the data at that VA in the static image (u32/i32/f32/f64/u16/u8/hex), distinct from runtime taps which require the `oracle.h` helpers in a render harness
 
 ### Requirement: Shared C oracle scaffold
 

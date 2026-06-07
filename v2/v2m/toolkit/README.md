@@ -13,8 +13,9 @@ used to live in `fr08-extraction/`, `flybye-extraction/`, and `candytron-extract
 | `carve.py`   | `find_v2ms(image)` → embedded v2m spans (the canonical `findv2m3` parser) |
 | `eras.py`    | `assay(image)` → era-delta constants/opcodes present in a synth image |
 | `disasm.py`  | `disasm(image, va, n)` → decoded instructions (image base `0x400000`) |
+| `tap.py`     | `read(image, va, type, n)` → typed data at a VA (static image peek; data-side of disasm) |
 | `bufcmp.py`  | `compare(a, b, eps)` → oracle contract: `max|d|`/rms/divergence (numpy-accelerated) |
-| `era`        | CLI front end: `era {detect|unpack|carve|assay|disasm|compare} <file>` |
+| `era`        | CLI front end: `era {detect|unpack|carve|assay|disasm|tap|compare} <file>` |
 | `oracle.h`   | shared C oracle scaffold (mmap@`0x400000` + fault reporter + rdtsc-pin + f32) |
 
 ## CLI
@@ -26,8 +27,19 @@ used to live in `fr08-extraction/`, `flybye-extraction/`, and `candytron-extract
 ./era carve   <image.bin> --extract i --out song.v2m
 ./era assay   <image.bin>           # era-delta const/opcode report
 ./era disasm  <image.bin> <va> [n]  # disassemble n insns at a VA
+./era tap     <image.bin> <va> [type] [n]  # read typed data at a VA (u32/i32/f32/f64/u16/u8/hex)
 ./era compare <a.f32> <b.f32> [eps] # oracle contract: max|d|, rms, first divergence
 ```
+
+### `era tap` (static) vs `oracle.h` taps (live)
+
+`era tap` is a **static** peek at the unpacked image file — constants, header
+fields, "what value sits at this VA". It is the data-side sibling of `era disasm`.
+It **cannot** read runtime signal-chain data (osc/flt/dist buffers, voice/filter
+workspace) — that is computed inside the running `-m32` oracle and exists only
+during render, so it must be tapped there with the `oracle.h` helpers
+(`oracle_buf`/`oracle_field_f32`/`oracle_tap_*`). A pointer slot the binary fills at
+startup reads as 0 statically.
 
 ## Packer routes (`unpack`)
 

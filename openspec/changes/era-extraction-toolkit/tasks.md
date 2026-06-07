@@ -11,6 +11,7 @@
 - [x] 1.9 Commit the toolkit (inert until imported)
 - [x] 1.10 `bufcmp.py` + `era compare`: numpy-accelerated oracle-contract primitive (max|d|/rms/divergence), superseding inline diffs and the pure-Python `v2/validate/compare.py`
 - [x] 1.11 `oracle.h` tap facility: typed live reads (`oracle_u32`/`_f32_at`/`oracle_buf`/`oracle_field_*`) + env-gated tap sinks (`oracle_tap_*`) for tapping a loaded oracle at chosen positions; replaces per-harness `rd32`/casts/`getenv`+`fwrite` boilerplate
+- [x] 1.12 `tap.py` + `era tap`: static typed read at a VA from an unpacked image (data-side of `era disasm`); documents the static-vs-live boundary (runtime taps stay in `oracle.h`)
 
 ## 2. Migrate flybye end-to-end (cleanest; in-image player)
 

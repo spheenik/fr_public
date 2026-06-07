@@ -96,6 +96,21 @@ int main(int argc, char **argv)
     fprintf(stderr, "[c1014] OpenV2M ok: timediv=%u maxtime=%u gdnum=%u\n",
             rd32(VA_TIMEDIV), rd32(VA_MAXTIME), rd32(VA_GDNUM));
 
+    // channel solo (FR014_SOLO=<ch>): zero notenum for every other channel in
+    // the parsed channel table (notenum[ch] = *(0x477d54 + ch*0x50), from
+    // OpenV2M's build loop). Must run AFTER OpenV2M, BEFORE PlayV2M.
+    const char *soloenv = getenv("FR014_SOLO");
+    if (soloenv) {
+        int solo = atoi(soloenv);
+        fprintf(stderr, "[c1014] notenum table:");
+        for (int ch = 0; ch < 16; ch++) {
+            volatile uint32_t *nn = (volatile uint32_t *)(uintptr_t)(0x477d54u + (uint32_t)ch * 0x50u);
+            fprintf(stderr, " ch%d=%u", ch, *nn);
+            if (ch != solo) *nn = 0;
+        }
+        fprintf(stderr, "\n[c1014] soloed ch%d\n", solo);
+    }
+
     // PlayV2M() -- void; esp-guarded for safety
     __asm__ volatile (
         "movl %%esp, %0\n\t"
@@ -111,12 +126,52 @@ int main(int argc, char **argv)
     float *buf = malloc((size_t)chunk * 2 * sizeof(float));
     render_fn render = (render_fn)(uintptr_t)VA_RENDER;
     volatile uint32_t *playing = (volatile uint32_t *)(uintptr_t)VA_PLAYING;
+    // one-shot voice-workspace dump (FR014_DUMPVOX=<seconds>): read each voice's
+    // 3 oscs (mode@+0, nffrq@+0x14, nfres@+0x18) to compare the binary's parsed
+    // resonance against the portable's. voice base 0x50c184, stride 0x210;
+    // oscs at voice+0x30 / +0x6c / +0xa8.
+    const char *dvenv = getenv("FR014_DUMPVOX");
+    uint64_t dumpvox_at = dvenv ? (uint64_t)(atof(dvenv) * SAMPLE_RATE) : ~0ull;
+    int dumpvox_done = 0;
+
     uint64_t total = 0, tail_left = ~0ull, next_log = 0;
     while (total < max_smp) {
         render(buf, chunk);
         if (fwrite(buf, 2 * sizeof(float), chunk, out) != chunk) {
             fprintf(stderr, "short write\n"); return 1; }
         total += chunk;
+        if (!dumpvox_done && total >= dumpvox_at) {
+            dumpvox_done = 1;
+            fprintf(stderr, "\n[c1014] voice-workspace dump @%.2fs:\n",
+                    (double)total / SAMPLE_RATE);
+            const uint32_t OSCOFF[3] = { 0x30u, 0x6cu, 0xa8u };
+            for (int v = 0; v < 32; v++) {
+                uint32_t vb = 0x50c184u + (uint32_t)v * 0x210u;
+                // whole voice (0x0..0x210) -- print nonzero floats in [1e-4,1e3]
+                // to find curvol/lvol/rvol (env-driven volumes) for the noise voice
+                if (v == 6) {
+                    fprintf(stderr, "  v%-2d nonzero floats:", v);
+                    for (int k = 0; k < 0x210; k += 4) {
+                        float fv = *(volatile float *)(uintptr_t)(vb + (uint32_t)k);
+                        float a = fv < 0 ? -fv : fv;
+                        if (a > 1e-4f && a < 1e3f)
+                            fprintf(stderr, " +%02x=%.4g", k, fv);
+                    }
+                    fprintf(stderr, "\n");
+                }
+                for (int o = 0; o < 3; o++) {
+                    uint32_t ob = vb + OSCOFF[o];
+                    int   mode  = (int)rd32(ob + 0x0u);
+                    float nffrq = *(volatile float *)(uintptr_t)(ob + 0x14u);
+                    float nfres = *(volatile float *)(uintptr_t)(ob + 0x18u);
+                    if (nffrq != 0.0f || nfres != 0.0f) {
+                        uint32_t fb, rb; memcpy(&fb,&nffrq,4); memcpy(&rb,&nfres,4);
+                        fprintf(stderr, "  v%-2d osc%d mode=%d nffrq=%.9g[%08x] nfres=%.9g[%08x]\n",
+                                v, o, mode, nffrq, fb, nfres, rb);
+                    }
+                }
+            }
+        }
         if (total >= next_log) {
             fprintf(stderr, "[c1014] %6.1fs (playing=%u)\r",
                     (double)total / SAMPLE_RATE, *playing);

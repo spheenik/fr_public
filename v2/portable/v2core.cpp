@@ -938,6 +938,11 @@ private:
     // Exact 2000 noise + resonant LRC, traced from syOscRender @0x40a659. Note
     // this is a DIFFERENT recurrence/output from the 2004 V2LRC.step (and uses
     // the MSVC LCG + a 16-bit float gen). nf.{l,b} hold the two filter states.
+#ifndef NDEBUG
+    { static int dbgn=0; if (getenv("V2_NSEED") && dbgn<6) { dbgn++;
+        sU32 fb,rb; memcpy(&fb,&nffrq,4); memcpy(&rb,&nfres,4);
+        fprintf(stderr, "[nseed_v0] nseed=%u nffrq=%.9g[%08x] nfres=%.9g[%08x]\n", nseed, nffrq, fb, nfres, rb); } }
+#endif
     sF32 sl = nf.l, sb = nf.b, f = nffrq, r = nfres;
     sU32 seed = nseed;
     for (sInt i=0; i < nsamples; i++)
@@ -2312,6 +2317,11 @@ struct V2Voice
     // original ASM code has chan buffer hardwired as output here. era <v1
     // injects no fcdcoffset in the voice->channel mix (the 2000 loop adds none).
     const sF32 dco = inst->old(DELTA_NO_DCOFFSET) ? 0.0f : fcdcoffset;
+#ifndef NDEBUG
+    { static int vn=0; if (getenv("V2_VOL") && vn<8) { vn++;
+        fprintf(stderr, "[vol] curvol=%.5f flt0.cfreq=%.5f flt0.res=%.4f flt1.cfreq=%.5f env2.out=%.4f env2.val=%.4f aenv.out=%.4f\n",
+                curvol, vcf[0].cfreq, vcf[0].res, vcf[1].cfreq, env[1].out, env[1].val, env[0].out); } }
+#endif
     sF32 cv = curvol;
     for (sInt i=0; i < nsamples; i++)
     {

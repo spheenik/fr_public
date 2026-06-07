@@ -15,6 +15,9 @@
 
 #include <string.h>
 #include <stdlib.h>
+#ifndef NDEBUG
+#include <stdio.h>
+#endif
 
 namespace v2portable {
 
@@ -341,8 +344,14 @@ V2LoadResult v2loadCanonicalize(const void *v2m, size_t length)
       w[0] = src[0];
       w[1] = src[1];
       w[2] = src[2];
+      unsigned char raw_dest = src[2];
       for (int k = 0; k <= w[2]; k++)
         if (k < kNumPatchParms && kPatchParmVer[k] > vdelta) w[2]++;
+#ifndef NDEBUG
+      if (getenv("V2_MODREMAP"))
+        fprintf(stderr, "[modremap] ver=%d src=%d val=%d raw_dest=%d -> v6_dest=%d\n",
+                ver, w[0], w[1], raw_dest, w[2]);
+#endif
       w += 3;
       src += 3;
     }

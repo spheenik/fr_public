@@ -229,6 +229,92 @@ NOTE: the brullwurfel unpacked image + carved song1 live in scratch (re-unpack
 candytron image re-unpacks from `~/downloads/fr-030_candytron_final.zip`
 (kkrunchy) to `/tmp/candytron/unpacked.bin`.
 
+## 8. v3 (fr014) render oracle — built; one channel (ch8) diverges, OPEN
+
+**Status (2026-06-08): v3 render oracle BUILT & working; v3 is render-validated
+EXCEPT one channel. Root cause NOT yet pinned — engine math proven bit-faithful,
+divergence localized to ch8's amplitude-envelope/voice-volume path. RESUMABLE.**
+
+`../v2m/fr014-extraction/c1_fr014_harness.c` is the first **render** oracle for
+format v3 (previously assay-only, §3). It drives mark&sweep's (fr-014, 2001-12)
+own player on the in-image v3 song (carve 0), rdtsc-pinned, deterministic
+(byte-stable). VAs: OpenV2M 0x40d93d, PlayV2M 0x40da6d, RenderProxy 0x40d7f3
+(stdcall ret8), synthRender 0x40ff6f (sets x87 **PC=24** @0x40ff71), synthInit
+0x40feb2 (SYN@0x50a374 sz 0x1e27b4, 32 voices @0x50c184 stride 0x210),
+playing@0x476af0, rdtsc 0x40e4a0/0x40ead9/0x40ec01. Ronan init (call 0x40df02)
+nop'd. Build: `gcc -m32 -no-pie -O0 c1_fr014_harness.c -o c1_fr014_harness`.
+
+**Result:** portable-v3 vs the v3 binary is corr 0.947 / median sample ratio 1.0
+(most of the mix bit-faithful). The whole divergence is **ch8** (pgm7: three
+full-gain NOISE oscs → HP filter flt0 mode3 → LP flt1 mode1 → BITCRUSHER mode3
+→ vol). Portable ch8 peak **3.19**, binary **0.63** (~5×). Other channels
+bit-exact ~2e-9 or matching ~5e-4.
+
+**What is RULED OUT (all measured, not theorized):**
+- *Loader color misparse* — binary ch8 osc nfres = **1.0**, identical to portable.
+- *Noise seed* — both **0** (rdtsc→0). *nffrq/nfres* — **bit-identical**
+  (`3f790e5f`/`3f800000`, all 3 oscs). *Recurrence* — decoded @0x40e7e1,
+  bit-identical to `renderNoise_v0`. *x87 precision* — binary runs **PC=24** =
+  float32; `double`-precision noise had **ZERO effect** (peak identical 3.1879);
+  the recurrence is intrinsically **bounded** (sim: 1 osc maxes ~4.5, 3
+  correlated oscs sum to ~13 in BOTH). **So this is NOT an x87/precision/
+  marginal-stability problem** — mimicking x87 would not help.
+- *Keysync / noise-filter accumulation* — resetting `nf` on note-on = zero effect.
+- *Master compressor* — bass (<500 Hz, other channels) NOT ducked at 7–8 s.
+- *Static volume* — lvol/rvol = **0.7071** both.
+- *env2→flt0.cutoff mod* — IS mis-applied (portable closes flt0 cfreq→0.143,
+  binary leaves it open ~0.98) but skipping it only moved 3.19→**2.57** (~20%);
+  a contributor, NOT the main cause. (NB the v2load mod-dest remap @v2load.cpp:344
+  produces dest=21=flt0.cutoff for ch8's env2 mod, and that matches both the
+  `kPatchParmVer` table and `../sounddef.h` — so the remap is "correct" by the
+  table yet the binary doesn't close flt0; see open question below. This is §5.)
+
+**LEADING (unconfirmed) hypothesis — amplitude envelope / curvol.** At the ch8
+peak (~7.249 s) the binary's voice `curvol` ≈ **0.118** vs the portable's ≈
+**0.8–0.97** (~7×) — the dominant ~5× factor (osc/filters/bitcrusher just scale
+this). Points to a v3 **amplitude-envelope** behavior (attack/decay curve, or the
+vel→aenv.amplify mod: ch8 mod0 src=0 dest=37) differing from the portable's model.
+`DELTA_ENV_CURVES` is **flipsAt 2 EV_ANCHORED** (an unproven guess) — a candidate
+the oracle now contradicts for ch8.
+
+**TENSION to resolve:** other channels (incl. their envelopes) match at ~5e-4, so
+it is NOT a blanket env-curve error — it is specific to ch8's env params / vel-mod
+regime. **CAVEAT:** the binary voice-field offsets used for the curvol read
+(curvol@+0xc, lvol@+0x1c, rvol@+0x20) were *borrowed from brullwurfel's v5 layout*
+and are NOT verified for fr014 — good enough to see a ~7× gap, NOT to draft a fix.
+
+**HOW TO RESUME (the genuinely-final step):**
+1. Build a **verified fr014 voice-field map**: disasm the env setup (env init
+   0x40e9c2 @ voice +0xe4 (aenv) / +0xfc (env2); filters 0x40e85f @ +0x114/+0x138)
+   to pin the real `curvol`/`val`/`out`/`atd`/`dcf` offsets — same method that
+   pinned the osc fields (nffrq@osc+0x14, nfres@+0x18; osc bases +0x30/+0x6c/+0xa8).
+2. With verified offsets, dump the binary's ch8 **aenv trajectory** (out/val/state
+   + atd/dcf/sul/suf) over 7.2–7.5 s and compare to the portable's `env[0]`
+   (V2_VOL tap already prints curvol/flt0.cfreq/env2.out/aenv.out). Decide:
+   attack-rate, decay-rate, sustain, or the vel→amplify mod.
+3. If the v3 env curve differs: it is a `DELTA_ENV_CURVES`/`DELTA_ENV_CLAMP_SUSREL`
+   era-threshold correction (both currently ANCHORED/PROVEN-at-v5, never v3-proven).
+   Test by adjusting the gate and re-running the oracle; the matching-channels
+   tension MUST stay satisfied (don't regress 0–7 s) and check.py stays 17/17.
+4. The fr014 binary IS the ground truth (the v3 patch played natively); the
+   portable must match it, not the converted-v6 interpretation.
+
+**Reusable taps (dev-only, `#ifndef NDEBUG`, env-gated, output-neutral; committed):**
+- portable `v2core.cpp`: `V2_PATCHDUMP=<ch>` (post-mod voice config + mod matrix),
+  `V2_VCETAP` (per-stage osc/flt/dist/dcf peaks), `V2_NSEED` (noise seed +
+  nffrq/nfres hex), `V2_VOL` (curvol/flt0.cfreq/flt1.cfreq/env2.out/aenv.out).
+- portable `v2load.cpp`: `V2_MODREMAP` (raw v3 dest → remapped v6 dest per mod).
+- harness `c1_fr014_harness.c`: `FR014_DUMPVOX=<sec>` (one-shot voice-workspace
+  float dump for v6), `FR014_SOLO=<ch>` (zero other channels' notenum in the
+  parsed table = binary-side channel solo).
+- Scratch: `era unpack ~/downloads/fr014.zip`'s `mark&sweep.exe` →
+  `/tmp/erascan_recon/fr014/unpacked.bin`; carve 0 = song0.v2m (v3, the divergent
+  song); carve 1 = song1.v2m (v1). Portable solo: `V2SEQ_SOLO=8`.
+
+NOTE: the v3 oracle's first commit message (719fe10) names a "v3 patch param
+parsing (color misparse)" prime suspect — that was **DISPROVEN** afterward
+(binary nfres=1.0); this section supersedes it.
+
 ---
 
 ### Scrapped / descoped

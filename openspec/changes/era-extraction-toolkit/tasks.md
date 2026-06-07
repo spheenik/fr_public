@@ -41,7 +41,7 @@
 - [x] 4.4 Refit `v2/validate/c1_fr08_harness.c` onto `oracle.h`; recompile
 - [x] 4.5 Verify re-render → `max|d| = 0` vs the committed fr08 663 s reference `.f32`
 - [x] 4.6 Commit fr08 migration
-- [ ] 4.7 Retrofit `c1_solo_probe.c` signal-chain taps onto the `oracle_chan_tap` table; verify tap outputs byte-identical (taps ON)
+- [x] 4.7 Retrofit `c1_solo_probe.c` signal-chain taps onto the `oracle_chan_tap` table; verify tap outputs byte-identical (taps ON)
 
 ## 5. Close-out
 

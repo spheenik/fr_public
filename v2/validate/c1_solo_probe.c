@@ -26,6 +26,12 @@
 
 #define IMG_BASE 0x400000u
 #define IMG_SIZE 0x32b000u
+
+// shared signal-chain tap table (open/reset/dump lifecycle); this harness keeps
+// its own mmap/segv/rdtsc scaffold, so only the tap helpers are used from here.
+#define ORACLE_IMG_SIZE IMG_SIZE
+#include "../v2m/toolkit/oracle.h"
+
 #define VA_V2M_DATA  0x415637u
 #define VA_OPEN_V2M  0x4099e3u
 #define VA_PLAY_V2M  0x409b10u
@@ -95,7 +101,20 @@ int g_cs_ch = -1;
 FILE *g_cs_pre = 0, *g_cs_post = 0;
 const uint32_t g_chanfx_real = VA_CHAN_FX;
 
-extern FILE *g_fvc, *g_fvcp; extern int g_vce_chan; extern uint32_t g_vce_count;
+// signal-chain tap table (defined below); the old g_fv* FILE* names are macro
+// aliases of the table entries so the per-binary accumulate-point guards
+// (chanstream_*/snap_premix) keep working unchanged.
+extern oracle_chan_tap g_taps[];
+#define G_NTAPS 8
+#define g_fvo    (g_taps[0].fp)
+#define g_fvf    (g_taps[1].fp)
+#define g_fvd    (g_taps[2].fp)
+#define g_fvc    (g_taps[3].fp)
+#define g_fvcp   (g_taps[4].fp)
+#define g_fvpm   (g_taps[5].fp)
+#define g_fvcpre (g_taps[6].fp)
+#define g_fvcv   (g_taps[7].fp)
+extern int g_vce_chan; extern uint32_t g_vce_count;
 extern float g_acc_chan[640], g_acc_chanpost[640];
 // chunk sidecar (written by chunk_post when armed): per in-window chunk,
 // {pos, count, chanfx_n, chanfx_fired} -- audits the .chan stream construction
@@ -325,16 +344,24 @@ __asm__(
 int   g_vce = 0;
 uint32_t g_vce_lo = 0, g_vce_hi = 0xffffffffu;
 uint32_t g_vce_pos = 0, g_vce_count = 0;
-FILE *g_fvo = 0, *g_fvf = 0, *g_fvd = 0;
 float g_acc_osc[320], g_acc_flt[320], g_acc_dist[320];
-float g_acc_chan[640]; // stereo, post-volramp voice sum (pre channel-FX)
-float g_acc_chanpost[640]; // stereo, chanbuf AFTER channel-FX chain
-float g_acc_premix[640];   // stereo, channel-sum output buffer just before the lc/hc EQ
-FILE *g_fvc = 0, *g_fvcp = 0, *g_fvpm = 0;
-FILE *g_fvchunks = 0;  // chunk sidecar: {pos,count,chanfx_n,chanfx_fired} per chunk
-FILE *g_fvcpre = 0;    // chanbuf BEFORE the voice render (stale-vs-zeroed audit)
-FILE *g_fvcv = 0;      // chanbuf right AFTER the voice render (volramp output)
+float g_acc_chan[640];      // stereo, post-volramp voice sum (pre channel-FX)
+float g_acc_chanpost[640];  // stereo, chanbuf AFTER channel-FX chain
+float g_acc_premix[640];    // stereo, channel-sum output buffer just before lc/hc EQ
 float g_acc_chanpre[640], g_acc_chanv[640];
+// the tap table (forward-declared above); old g_fv* names are macro aliases of
+// these .fp fields. Only the accumulate points stay fr08-specific.
+oracle_chan_tap g_taps[] = {
+  { ".osc",      0, g_acc_osc,      0 },
+  { ".flt",      0, g_acc_flt,      0 },
+  { ".dist",     0, g_acc_dist,     0 },
+  { ".chan",     1, g_acc_chan,     0 },
+  { ".chanpost", 1, g_acc_chanpost, 0 },
+  { ".premix",   1, g_acc_premix,   0 },
+  { ".chanpre",  1, g_acc_chanpre,  0 },
+  { ".chanv",    1, g_acc_chanv,    0 },
+};
+FILE *g_fvchunks = 0;  // chunk sidecar: {pos,count,chanfx_n,chanfx_fired} per chunk
 int g_vce_chan = -1;   // channel to tap chanbuf for (= solo channel)
 const uint32_t g_chunk_real = VA_CHUNK_REAL;
 const uint32_t g_v2r_real   = VA_V2R_REAL;
@@ -369,12 +396,7 @@ void chunk_pre(uint32_t cnt)
 {
   g_vce_count = cnt;
   uint32_t n = cnt > 320 ? 320 : cnt;
-  memset(g_acc_osc, 0, n*4); memset(g_acc_flt, 0, n*4); memset(g_acc_dist, 0, n*4);
-  memset(g_acc_chan, 0, n*8);
-  memset(g_acc_chanpost, 0, n*8);
-  memset(g_acc_premix, 0, n*8);
-  memset(g_acc_chanpre, 0, n*8);
-  memset(g_acc_chanv, 0, n*8);
+  oracle_taps_reset(g_taps, G_NTAPS, n);
   g_chanfx_fired = 0; g_chanfx_n = 0;
   g_chor_calls = 0;   // chorus ledger: per-chunk sample counter
 }
@@ -396,18 +418,11 @@ void chunk_post(void)
   }
   uint32_t n = g_vce_count > 320 ? 320 : g_vce_count;
   if (g_vce_pos >= g_vce_lo && g_vce_pos <= g_vce_hi) {
-    if (g_fvo) fwrite(g_acc_osc,  4, n, g_fvo);
-    if (g_fvf) fwrite(g_acc_flt,  4, n, g_fvf);
-    if (g_fvd) fwrite(g_acc_dist, 4, n, g_fvd);
-    if (g_fvc) fwrite(g_acc_chan, 8, n, g_fvc);
-    if (g_fvcp) fwrite(g_acc_chanpost, 8, n, g_fvcp);
-    if (g_fvpm) fwrite(g_acc_premix, 8, n, g_fvpm);
+    oracle_taps_dump(g_taps, G_NTAPS, n);   // osc/flt/dist/chan/chanpost/premix/chanpre/chanv
     if (g_fvchunks) {
       uint32_t rec[4] = { g_vce_pos, g_vce_count, g_chanfx_n, g_chanfx_fired };
       fwrite(rec, sizeof rec, 1, g_fvchunks);
     }
-    if (g_fvcpre) fwrite(g_acc_chanpre, 8, n, g_fvcpre);
-    if (g_fvcv) fwrite(g_acc_chanv, 8, n, g_fvcv);
   }
   g_vce_pos += g_vce_count;
 }
@@ -426,8 +441,7 @@ __asm__(
 // ch15 chase needs: (a) is the chanbuf zeroed or stale when the voice
 // accumulates into it, (b) what cur/ramp does each sub-frame PIECE really use
 // (no inference from output division). ebp = voice obj at the call site.
-extern FILE *g_fvcpre, *g_fvcv;
-extern float g_acc_chanpre[640], g_acc_chanv[640];
+extern float g_acc_chanpre[640], g_acc_chanv[640];   // g_fvcpre/g_fvcv: tap-table macros
 void v2r_pre(uint32_t ebp)
 {
   if (g_vce_pos < g_vce_lo || g_vce_pos > g_vce_hi) return;
@@ -602,15 +616,8 @@ int main(int argc, char **argv)
     if (lo) g_vce_lo = (uint32_t)strtoul(lo,0,10);
     if (hi) g_vce_hi = (uint32_t)strtoul(hi,0,10);
     char p[600];
-    snprintf(p,sizeof p,"%s.osc",pfx);  g_fvo=fopen(p,"wb");
-    snprintf(p,sizeof p,"%s.flt",pfx);  g_fvf=fopen(p,"wb");
-    snprintf(p,sizeof p,"%s.dist",pfx); g_fvd=fopen(p,"wb");
-    snprintf(p,sizeof p,"%s.chan",pfx); g_fvc=fopen(p,"wb");
-    snprintf(p,sizeof p,"%s.chanpost",pfx); g_fvcp=fopen(p,"wb");
-    snprintf(p,sizeof p,"%s.premix",pfx); g_fvpm=fopen(p,"wb");
+    oracle_taps_open(g_taps, G_NTAPS, pfx);   // .osc/.flt/.dist/.chan/.chanpost/.premix/.chanpre/.chanv
     snprintf(p,sizeof p,"%s.chunks",pfx); g_fvchunks=fopen(p,"wb");
-    snprintf(p,sizeof p,"%s.chanpre",pfx); g_fvcpre=fopen(p,"wb");
-    snprintf(p,sizeof p,"%s.chanv",pfx); g_fvcv=fopen(p,"wb");
     g_vce_chan = g_solo;  // tap chanbuf for the soloed channel...
     // ...or any channel in a FULL-MIX render (C1_VCE_CH=N without C1_SOLO):
     if (getenv("C1_VCE_CH")) g_vce_chan = atoi(getenv("C1_VCE_CH"));

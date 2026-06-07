@@ -1,0 +1,6 @@
+# compiled harness + scratch renders (reproducible from ~/downloads + toolkit)
+c1_fr014_harness
+*.f32
+*.wav
+*.bin
+*.v2m

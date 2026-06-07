@@ -2168,7 +2168,21 @@ struct syVV2
   sF32 oscsync; // 0: none 1: osc 2: full
 };
 
+#ifndef NDEBUG
+// dev-only: report per-stage voice-chain peaks (V2_VCETAP set). Use under a
+// channel solo so only the target channel's voices render. (osc/flt/dist/dcf)
+static inline void vcetap_snap(const char *stage, const sF32 *buf, sInt n)
+{
+  static int on = -1; if (on < 0) { on = getenv("V2_VCETAP") ? 1 : 0; }
+  if (!on) return;
+  sF32 mx = 0.0f;
+  for (sInt i = 0; i < n; i++) { sF32 a = buf[i] < 0 ? -buf[i] : buf[i]; if (a > mx) mx = a; }
+  if (mx > 0.0f) fprintf(stderr, "[vce] %-4s %.5f\n", stage, mx);
+}
+#define VCETAP_SNAP(stage, buf, n) vcetap_snap(#stage, buf, n)
+#else
 #define VCETAP_SNAP(stage, buf, n) ((void)0)
+#endif
 
 struct V2Voice
 {
@@ -3983,6 +3997,9 @@ private:
                 i, vpara->flt[i].mode, vpara->flt[i].cutoff, vpara->flt[i].reso);
         fprintf(stderr,"  dist mode=%.0f ingain=%.0f p1=%.0f p2=%.0f\n",
                 vpara->dist.mode, vpara->dist.ingain, vpara->dist.param1, vpara->dist.param2);
+        fprintf(stderr,"  modnum=%d (dest indices: osc0.pitch=4 osc1.pitch=10 osc2.pitch=16; flt0.cut=21 flt1.cut=24)\n", patch->modnum);
+        for(int i=0;i<patch->modnum;i++){ const V2Mod*m=&patch->modmatrix[i];
+          fprintf(stderr,"    mod%d src=%d val=%d dest=%d\n", i, m->source, m->val, m->dest); }
       } }
 #endif
   }

@@ -233,7 +233,19 @@ unchanged (`check.py` 17/17). The engine already gated on all four
   `ENV_CURVES`/`FRAME256` (`flipsAt 2`) and the comp/lowcut/aux feature rows
   independently corroborated by the converter (`../../v2mconv.cpp` disabled
   `transEnv` targets format<2; `../../sounddef.h` param-version tables).
-- **Not yet done:** a flybye/fr-022 *render-harness oracle* (c1/c2-style) to
-  prove the v1/v5 native render is bit-exact, not merely correct-by-row.
+- **v1 oracle harness BUILT (`c1_flybye_harness.c`)** — maps the image, pins
+  the 3 rdtsc sites, gates Ronan (init @0x40d6c5/cb/e9 + ch15 process @0x4100d3),
+  and calls the genuine 2001 OpenV2M(0x40d61c)/PlayV2M(0x40d74c)/RenderProxy
+  (0x40d4d2) on the embedded v1 song. Renders the whole 138.6 s song. Result vs
+  the portable's native-v1 render:
+    * **first 66 s bit-exact** to ULP/ε (rel-RMS 5e-4 = -66 dB; only diff a
+      ~1e-5 last-bit wobble from 0.04 s). The seven flipsAt-5 edits + every
+      other v1 row are correct here.
+    * **abrupt divergence at t=66.42 s** (frame 2929249): a voice desyncs,
+      ~18% rel-RMS overall (~5 in the diverged region, sustained not growing).
+      NOT Ronan (gating the process call changed nothing). A real, localized
+      v1 fidelity bug the correct-by-row reading missed -- needs the channel-
+      solo / event-trace hunt (BUSTAP/CHANSOLO/NOTETRACE), likely a specific
+      note/PGM/patch-feature event at 66.42 s. **This is the open follow-up.**
 - **Still no period engine for v3 or v2** (v2 has no period file anywhere
   either) — so the exact in-gap flip of the build-date rows stays unpinned.

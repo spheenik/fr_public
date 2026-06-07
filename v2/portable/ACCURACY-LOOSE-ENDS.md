@@ -57,28 +57,43 @@ ws[0x6a88f8]).
 
 ## 3. v1–v4 ASSUMED era-table rows
 
-**Status:** structurally supported and *exercised* (see §4), but the exact
-flip version inside the v1..v4 gap is a documented guess for these rows.
+**Status (updated 2026-06-07):** two more period binaries unpacked and
+assayed — **flybye (fr-013, format v1)** and **fr-022 ein.schlag (embeds a
+v5 export)** — see `../v2m/flybye-extraction/NOTES.md`. The era assay now has
+a five-point build timeline: v0 fr08 (2000) · v1 flybye (2001-12) · v5 fr-022
+(2002-08) · v5 candytron (2003-08) · v6 synth.asm (2004).
 
-The era assay has three PROVEN anchors — v0 (fr08 binary), v5 (candytron
-binary), v6 (`synth.asm`). Ten rows are PROVEN to flip at exactly v6; seven
-rows are NEW already at v5 (so they flip somewhere in v1..v4 — currently
-pinned to flipsAt 1, EV_ASSUMED). The remaining `EV_ASSUMED` rows in
-`v2eras.h`:
+All seven formerly-ASSUMED rows are now resolved (data edits) — the osc-core
+trio by constant scan, the four player/render rows by disassembly. **No
+EV_ASSUMED row remains at flipsAt 1.**
 
-| row | current guess |
+| row | status after flybye/fr-022 |
 | --- | --- |
-| `DELTA_OSC_BOXFILTER`   | v5 = OSM (new) |
-| `DELTA_NOISE_LCG_MSVC`  | v5 = modern LCG + floatgen |
-| `DELTA_OSC_FREQ_CONST`  | v5 = runtime fcoscbase |
-| `DELTA_PGMCHANGE_V0`    | v5 == 2004 byte-for-byte |
-| `DELTA_TICK_BEFORE_SET` | v5 = SET then TICK |
-| `DELTA_SUBFRAME_RENDER` | v5 = full-frame render |
-| `DELTA_RVB_E_FULLPREC`  | v5 = SRfclinfreq factor |
+| `DELTA_OSC_BOXFILTER`   | **fixed → flipsAt 5.** flybye(v1) is OLD (box) — old `flipsAt 1` was WRONG. |
+| `DELTA_NOISE_LCG_MSVC`  | **fixed → flipsAt 5.** flybye(v1) has MSVC LCG; modern absent. |
+| `DELTA_OSC_FREQ_CONST`  | **fixed → flipsAt 5.** flybye(v1) has baked 3185015. |
+| `DELTA_PGMCHANGE_V0`    | **fixed → flipsAt 5.** flybye(v1) disasm @0x410455 == fr08: no early-out + ctl7=127. (NEW already at early-v5 fr-022 — flipped earlier than the rest.) |
+| `DELTA_TICK_BEFORE_SET` | **fixed → flipsAt 5.** flybye render drv @0x40ff83 == fr08: trailing-edge tick. Build-date flip (OLD in early-v5 fr-022). |
+| `DELTA_SUBFRAME_RENDER` | **fixed → flipsAt 5.** same render driver: sub-frame chunks. Build-date flip. |
+| `DELTA_RVB_E_FULLPREC`  | **fixed → flipsAt 5.** syReverbSet @0x40f89e == fr08: no SRfclinfreq. Build-date flip (fr-022 OLD, candytron NEW @0x41f27d). |
 
-**To close it (optional):** the proposal's explicit follow-up — hunt the
-remaining period binaries (fr-013/019/022/025, kkrieger betas) to pin the
-exact v1–v4 thresholds and supply a mid-era oracle. Separate change.
+**The trio is build-date-tied, not format-tied.** fr-022 (v5, 2002-08) and
+candytron (v5, 2003-08) are the SAME format version with OPPOSITE DSP cores
+(fr-022 = old MSVC LCG + baked freq + box; candytron = modern). The flip
+landed in that 12-month gap, and the v2m records only format version — so an
+early-v5 file is genuinely under-specified. `flipsAt 5` is the best proxy
+(OLD v0..v4, NEW v5..v6): correct for every oracle-bearing file and a no-op
+for v0/v5/v6 (check.py still 17/17). The lone unrepresentable case is an
+early-v5 old-core file like fr-022 — rendering it as new-core measures **89%
+relative-RMS / 0.63 correlation** error (dominated by the tonal core, not
+just noise; full breakdown in the extraction NOTES). Getting it right needs a
+build-era signal the file lacks (the `v2eras.h` "model change" option) —
+deferred until/unless early-v5 files enter the corpus.
+
+**To close the rest (optional):** disassemble the flybye synth for the four
+remaining ASSUMED rows, and build a flybye/fr-022 render-harness oracle to
+upgrade the v1/v5 claim from correct-by-row to bit-exact. v3 and v2 still
+have no period engine (fr-022 turned out v5, not the hoped-for v3).
 
 ## 4. v1–v4 originals: structural-only validation (no oracle)
 
@@ -100,10 +115,12 @@ identical bytes across reruns and chunk 4096 vs 333).
 **Caveat — this is a liveness check, not a fidelity check.** Determinism +
 chunk-invariance only proves the renderer is deterministic; it does NOT prove
 the v1–v4 era *behavior* is correct (a renderer that wrongly played everything
-at v6 would pass the same test). There is no period binary for v1–v4, so
-era-fidelity for those eras is currently **unprovable** — no bit-exact ε can be
-measured. If a mid-era binary is found (§3), these files become the comparison
-corpus and the fidelity claim can finally be made.
+at v6 would pass the same test). **v1 now has a period binary** (flybye, §3):
+its era rows are read directly from the image (correct-by-row), and a
+bit-exact ε becomes measurable once a flybye render-harness oracle is built.
+**v2/v3/v4 still have no period engine** (fr-022 is v5), so their era-fidelity
+remains unprovable for now — those files stay liveness-only until a v2/v3/v4
+binary surfaces.
 
 ## 5. CC1 mod-dest remap re-audit (low priority)
 

@@ -160,30 +160,69 @@ struct V2DeltaRow {
 //    the flip is pinned at exactly v6. Citations are genthree/_viruz2a.asm
 //    (== the shipped binary, 6 signatures spot-verified in the unpacked
 //    image) vs v2/synth.asm.
-//  - flipsAt 1 + ASSUMED on the rest: the v5 binary already shows the NEW
-//    behavior, so the flip lies in v1..v4; v1 stays the conservative
-//    default ("existed by v1 unless evidence says otherwise"). Override
-//    with Player::open(..., forceBehaviorVersion) when researching.
+//  - flipsAt 5 + ASSUMED on the osc-core trio (OSC_BOXFILTER, NOISE_LCG_MSVC,
+//    OSC_FREQ_CONST): these were WRONGLY flipsAt 1. The fr-013 flybye binary
+//    (format v1, plays tpinv2.v2m) PROVES them OLD at v1 -- its synth has the
+//    MSVC LCG (214013/2531011 @0x40e7dc) + the baked oscfreq 3185015.0
+//    @0x40e5c0 and NO modern LCG anywhere. So v1 is OLD, not NEW.
+//    But these do NOT flip at a format boundary: the fr-022 ein.schlag binary
+//    embeds a v5 song yet its synth is ALSO old-core (MSVC LCG @0x40da0a,
+//    baked 3185015 @0x40d668, no modern LCG) -- while candytron, ALSO v5,
+//    is modern-core (LCG 0xbb38435 @0x41dff5, runtime fcoscbase). Two v5
+//    binaries, opposite cores: the flip is on the engine BUILD-DATE timeline
+//    (between ms2002 fr-022 and Aug-2003 candytron), and format v5 straddles
+//    it. flipsAt 5 is the best format-version PROXY: OLD for v0..v4 (proven
+//    OLD through early-v5, so the earlier formats are old too) and NEW for
+//    v5..v6 -- which keeps the late-v5 oracle corpus (josie/kkrieger6, both
+//    Aug-2003+/modern-core) bit-exact, exactly as flipsAt 1 did (v5 is NEW
+//    under both). The ONE unrepresentable case is an early-v5 old-core file
+//    like fr-022 itself: a format-version model cannot render it correctly.
+//    Stays ASSUMED because the value is a proxy, not a real format threshold.
+//  - flipsAt 5 + ASSUMED on the player/render rows (PGMCHANGE_V0,
+//    TICK_BEFORE_SET, SUBFRAME_RENDER, RVB_E_FULLPREC): also WRONGLY flipsAt 1.
+//    Disassembled in flybye (v1) -- its player/render code is byte-for-byte
+//    structurally identical to fr08 (v0), so all four are OLD at v1
+//    (flybye-extraction/NOTES.md "disassembly" section):
+//      * PGMCHANGE_V0   : handler @0x410455 == fr08 @0x40be15 -- no same-prog
+//                         early-out + writes ctl7=127 (f3aab07faa @0x410482).
+//      * SUBFRAME_RENDER+TICK_BEFORE_SET: render driver @0x40ff83 == fr08
+//                         @0x40b95c -- min(todo,framectr) sub-frame chunks +
+//                         control TICK at the chunk's trailing edge.
+//      * RVB_E_FULLPREC : syReverbSet @0x40f89e == fr08 @0x40b2d0 -- e =
+//                         sqr(64/(t+1)), NO SRfclinfreq factor, no PC change.
+//    Threshold like the trio: three of the four (TICK/SUBFRAME/RVB_E) are STILL
+//    old in early-v5 fr-022 (render driver @0x40f2ae; reverb has no SRfclinfreq
+//    @0x40ec88) and only flip in late-v5 candytron (reverb SRfclinfreq fmul
+//    @0x41f27d) -- the same BUILD-DATE flip as the trio, so flipsAt 5 is the
+//    proxy and early-v5 fr-022 is the unrepresentable case. PGMCHANGE_V0 is the
+//    exception: it is already NEW in early-v5 fr-022 (no ctl7=127), so it
+//    flipped earlier (v2..v5, by 2002); flipsAt 5 is still correct at every
+//    known point (v0/v1 old, v5 new) but the exact gap flip is unpinned.
+//    All four keep v5 NEW, so the oracle corpus is unchanged (check.py 17/17).
+//    Override with Player::open(..., forceBehaviorVersion) when researching.
+//
+// No EV_ASSUMED row remains at flipsAt 1: every v1..v4 row is now either
+// PROVEN/ANCHORED or a documented flipsAt-5 build-date proxy.
 inline constexpr V2DeltaRow kDeltas[DELTA_COUNT] = {
   /* DELTA_ENV_CURVES         */ { 2, EV_ANCHORED },
   /* DELTA_FRAME256           */ { 2, EV_ANCHORED },
   /* DELTA_ENV_CLAMP_SUSREL   */ { 6, EV_PROVEN   }, // v5 state_dec: no LOWEST
                                                      // runout (binary @0x41e199)
-  /* DELTA_OSC_BOXFILTER      */ { 1, EV_ASSUMED  }, // v5 = OSM (new)
-  /* DELTA_NOISE_LCG_MSVC     */ { 1, EV_ASSUMED  }, // v5 = modern LCG+floatgen
+  /* DELTA_OSC_BOXFILTER      */ { 5, EV_ASSUMED  }, // build-date flip, see below
+  /* DELTA_NOISE_LCG_MSVC     */ { 5, EV_ASSUMED  }, // build-date flip, see below
   /* DELTA_NATIVE_FSIN        */ { 6, EV_PROVEN   }, // v5 osc/LFO/FM = native
                                                      // fsin (binary @0x41dfc3/
                                                      // 0x41e43b/0x41e094)
   /* DELTA_NATIVE_FPATAN      */ { 6, EV_PROVEN   }, // v5 overdrive render =
                                                      // native fpatan @0x41e60b
-  /* DELTA_OSC_FREQ_CONST     */ { 1, EV_ASSUMED  }, // v5 = runtime fcoscbase
+  /* DELTA_OSC_FREQ_CONST     */ { 5, EV_ASSUMED  }, // build-date flip, see below
   /* DELTA_NO_DCOFFSET        */ { 6, EV_PROVEN   }, // no 2^-18 constant in the
                                                      // whole v5 image/source
   /* DELTA_CRUSHER_SPLIT_GAIN1*/ { 6, EV_PROVEN   }, // v5 render = two muls
                                                      // @0x41e665; set unfolded
-  /* DELTA_PGMCHANGE_V0       */ { 1, EV_ASSUMED  }, // v5 == 2004 byte-for-byte
-  /* DELTA_TICK_BEFORE_SET    */ { 1, EV_ASSUMED  }, // v5 = SET then TICK
-  /* DELTA_SUBFRAME_RENDER    */ { 1, EV_ASSUMED  }, // v5 = full-frame render
+  /* DELTA_PGMCHANGE_V0       */ { 5, EV_ASSUMED  }, // flybye disasm, see below
+  /* DELTA_TICK_BEFORE_SET    */ { 5, EV_ASSUMED  }, // flybye disasm, see below
+  /* DELTA_SUBFRAME_RENDER    */ { 5, EV_ASSUMED  }, // flybye disasm, see below
   /* DELTA_NO_VOICE_DCF       */ { 6, EV_PROVEN   }, // no DCF code in v5 at all
   /* DELTA_NO_MASTER_DCF      */ { 6, EV_PROVEN   }, // v5 master: moddel -> EQ
                                                      // -> comp, no DCF stage
@@ -192,7 +231,7 @@ inline constexpr V2DeltaRow kDeltas[DELTA_COUNT] = {
   /* DELTA_KEYSYNC_OSC_ONLY   */ { 6, EV_PROVEN   }, // v5 noteOn: oks!=0 only
                                                      // zeros osc counters, no
                                                      // HARDSYNC path
-  /* DELTA_RVB_E_FULLPREC     */ { 1, EV_ASSUMED  }, // v5 = SRfclinfreq factor,
+  /* DELTA_RVB_E_FULLPREC     */ { 5, EV_ASSUMED  }, // flybye disasm, see below; v5
                                                      // set at PC=24
   /* DELTA_NO_COMP_BOOST      */ { 1, EV_ANCHORED },
   /* DELTA_NO_AUX_BUSSES      */ { 6, EV_PROVEN   }, // was ANCHORED; v5 osc

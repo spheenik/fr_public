@@ -45,6 +45,6 @@
 
 ## 5. Close-out
 
-- [ ] 5.1 Confirm no forked copies of `unpack`/`findv2m`/`disasm`/`erascan` remain outside `toolkit/`
-- [ ] 5.2 Update `era-hunt-manifest.md` sweep plan to reference the `era` CLI instead of per-dir scripts
-- [ ] 5.3 Smoke-test the full pipeline on one *unmigrated* queued binary (e.g. fr-022 party): `era detect` + `era unpack` + `era carve` + `v2dump`/`v2load` version readout — proving the toolkit handles a new binary without a dir fork
+- [x] 5.1 Confirm no forked copies of `unpack`/`findv2m`/`disasm`/`erascan` remain outside `toolkit/`
+- [x] 5.2 Update `era-hunt-manifest.md` sweep plan to reference the `era` CLI instead of per-dir scripts
+- [x] 5.3 Smoke-test the full pipeline on one *unmigrated* queued binary (e.g. fr-022 party): `era detect` + `era unpack` + `era carve` + `v2dump`/`v2load` version readout — proving the toolkit handles a new binary without a dir fork

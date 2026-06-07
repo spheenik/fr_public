@@ -82,15 +82,23 @@ bbbbe30ff04b09e5e559b5dc78fef11d5320c30c0a21b2af95ea111ca2c414ec  fr-minus-03-2.
 
 ## Sweep plan (per binary)
 
-1. Unpack: ryg aPLib stub → `flybye-extraction/unpack.py` (unicorn static
-   route); kkrunchy → `candytron-extraction/c2_unpack.c` route.
-2. Carve embedded v2m(s): `fr08-extraction/findv2m3.py`; format-detect with
-   `portable/v2dump`.
-3. Era assay: `flybye-extraction/erascan.py` (constant/opcode rows) + the
-   voice-pool loop bound (`cmp dl,0x10/0x20/0x40` after the per-voice tick
-   call — see flybye-extraction NOTES "pool size" table for the four known
-   shapes).
-4. Where a row flips inside a gap: disassemble the signature-less rows
-   (PGMCHANGE/TICK/SUBFRAME/RVB_E patterns, NOTES "disassembly" section).
-5. New-format embedded songs (v2! v3! v4!) → c1-style render harness → new
-   oracle; update `v2eras.h` thresholds + evidence.
+All offline steps run through the shared `toolkit/` (`v2/v2m/toolkit/`, the
+`era` CLI); see its README. The aPLib and kkrunchy unpack routes are unified
+under Unicorn (`era unpack` auto-dispatches by detected packer).
+
+1. Unpack: `era detect <exe>` then `era unpack <exe> <out.bin>` (aPLib + kkrunchy
+   both via the Unicorn route; `none` passes through; `ruletool`/fr011 is
+   detect-only).
+2. Carve embedded v2m(s): `era carve <out.bin>` (+ `--extract i --out song.v2m`);
+   format-detect with `portable/v2dump`.
+3. Era assay: `era assay <out.bin>` (constant/opcode rows) + the voice-pool loop
+   bound (`cmp dl,0x10/0x20/0x40` after the per-voice tick call — see
+   flybye-extraction NOTES "pool size" table for the four known shapes).
+4. Where a row flips inside a gap: `era disasm <out.bin> <va> [n]` on the
+   signature-less rows (PGMCHANGE/TICK/SUBFRAME/RVB_E patterns, NOTES
+   "disassembly" section). `era tap <out.bin> <va> [type]` reads static data
+   (constants/header fields) at a position.
+5. New-format embedded songs (v2! v3! v4!) → c1-style render harness on
+   `toolkit/oracle.h` (mmap+segv+rdtsc scaffold, `oracle_*` live taps,
+   `oracle_chan_tap` signal-chain table) → new oracle; diff with
+   `era compare a.f32 b.f32` (max|d|); update `v2eras.h` thresholds + evidence.

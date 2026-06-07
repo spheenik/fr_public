@@ -236,16 +236,80 @@ unchanged (`check.py` 17/17). The engine already gated on all four
 - **v1 oracle harness BUILT (`c1_flybye_harness.c`)** — maps the image, pins
   the 3 rdtsc sites, gates Ronan (init @0x40d6c5/cb/e9 + ch15 process @0x4100d3),
   and calls the genuine 2001 OpenV2M(0x40d61c)/PlayV2M(0x40d74c)/RenderProxy
-  (0x40d4d2) on the embedded v1 song. Renders the whole 138.6 s song. Result vs
-  the portable's native-v1 render:
-    * **first 66 s bit-exact** to ULP/ε (rel-RMS 5e-4 = -66 dB; only diff a
-      ~1e-5 last-bit wobble from 0.04 s). The seven flipsAt-5 edits + every
-      other v1 row are correct here.
-    * **abrupt divergence at t=66.42 s** (frame 2929249): a voice desyncs,
-      ~18% rel-RMS overall (~5 in the diverged region, sustained not growing).
-      NOT Ronan (gating the process call changed nothing). A real, localized
-      v1 fidelity bug the correct-by-row reading missed -- needs the channel-
-      solo / event-trace hunt (BUSTAP/CHANSOLO/NOTETRACE), likely a specific
-      note/PGM/patch-feature event at 66.42 s. **This is the open follow-up.**
+  (0x40d4d2) on the embedded v1 song. Renders the whole 138.6 s song. First
+  diff vs the portable's native-v1 render: first 66 s bit-exact to ULP/ε
+  (rel-RMS 5e-4; only a ~1e-5 last-bit wobble), then an **abrupt divergence
+  at t=66.42 s** (NOT Ronan; recurring in dense sections, reconverging in
+  the 73–74 s lull). Hunted and SOLVED — see the next section. With the fix
+  the **whole song is bit-exact**, closing the v1 oracle.
 - **Still no period engine for v3 or v2** (v2 has no period file anywhere
   either) — so the exact in-gap flip of the build-date rows stays unpinned.
+
+## The 66.42 s hunt: the voice-pool size is a build-era row (SOLVED)
+
+Tooling: `c1_flybye_solo.c` (this dir) — the fr08 `c1_solo_probe.c`
+methodology re-addressed for flybye: a ProcessMIDI detour (call site
+@0x40d4b8 → PM @0x4101ea, midibuf @0x478a88) for `C1_SOLO=N` channel solo,
+plus `C1_ALLOCTRACE=1` at the allocator's voice-SET call (@0x4103dd →
+0x40f0e8; edx=slot ecx=chan esi→note,vel; pos clock @0x477d50). Portable
+side: the existing `V2_STEAL` chanmap tap + `evlist.py` (this dir), a v2m
+event lister with the player's exact 64-bit tick→sample walk.
+
+The trail, in order:
+
+1. Divergence onset frame 2929243 ≈ 141 samples after a 5-channel note-on
+   burst at smp 2929102 (tick 74400). FFT of the diff: dominated by 49 Hz
+   (G1) + 196 Hz (G2) — the ch1/ch8 unison walking bass.
+2. Alloc-trace diff: **all 784 allocations before the event match exactly**
+   (slot, chan). The first diverging allocation IS the divergence sample:
+   alloc 785 (ch10 n72 @2929102) — the 2001 engine picks **slot 10**, the
+   portable picks **slot 16**.
+3. Slot 16 is the tell: the 2001 tick/alloc loops bound at **16 voices**
+   (`cmp dl,0x10` @0x41000b; steal scan `cmp bl,0x10` @0x410393). Pool
+   exhausted → the 2001 allocator STEALS the oldest gate-off voice (slot
+   10 = ch9's releasing n79, allocpos 730); the 2004-derived portable
+   (`POLY = 64`) finds "free" voice 16 — which doesn't exist in the period
+   engine — and lets the release ring. Allocation choices cascade apart
+   from there whenever the section is dense; exactly the observed
+   divergence profile.
+
+### Pool size across every period binary
+
+| build | date | format | pool | tell |
+| --- | --- | --- | --- | --- |
+| fr08 | 2000 | v0 | **16** | `cmp dl,0x10` @0x40b9e4 |
+| flybye | 2001-12 | v1 | **16** | @0x41000b / steal @0x410393 |
+| fr-022 | 2002-08 | early v5 | **32** | `cmp dl,0x20` @0x40f322 |
+| candytron | 2003-08 | late v5 | **32** | @0x41f96a |
+| synth.asm | 2004 | v6 | **64** | `%define POLY 64` |
+
+16 → 32 → 64 on the build-date timeline; **both v5 binaries agree on 32**
+(unlike the osc trio), so the format proxy is clean at the 32→64 flip
+(`DELTA_POLY_32`, flipsAt 6, PROVEN). The 16→32 growth falls in the
+binary-less v2..v4 gap (`DELTA_POLY_16`, flipsAt 5, ASSUMED proxy — same
+shape as PGMCHANGE_V0: correct at every known point, in-gap flip unpinned).
+Fix: the two rows in `v2eras.h` + the four allocator scans in `v2core.cpp`
+(npoly count, find-free, both steal loops) bound by
+`voicePoolSize(srcVersion)`; arrays stay at 64.
+
+### Verification
+
+- Portable with the era pool (16 at v1): **whole 144.5 s flybye song
+  bit-exact** vs the binary's own render — rel-RMS 4.0e-5, max|d| 1.5e-4,
+  zero samples > 1e-3. (The residual is the ambient last-bit wobble; its
+  worst spot, a ~1e-4 swell at 34.36 s, predates and is unrelated to the
+  allocator.) The bounded-allocator implementation renders bit-identical
+  to a wholesale POLY=16 build, confirming the equivalence argument
+  (voices past the pool are never allocated; all other voice loops skip
+  chanmap == -1 entries).
+- `test/check.py` 17/17, baselines unchanged (corpus = v6-converted + v0
+  fr08; fr08's 2640 allocations never saturate 16).
+- josie (v5 original): bit-identical at pool 32 vs 64 — never saturates;
+  also rules the pool out as the cause of the open josie-vs-candytron
+  native-v5 residual.
+- kkrieger6 (v5 original): **first saturates 32 voices at 102.47 s** — its
+  native-v5 render changes under the era pool (rel-RMS 0.48 from there on
+  vs the old 64-voice render), per the binary evidence toward
+  period-correct. No oracle is contradicted: its bit-exact proof was the
+  CONVERTED v6 file (pool 64, unchanged), and no v5-era engine that plays
+  kkrieger6 exists.

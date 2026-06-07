@@ -637,6 +637,11 @@ struct V2Instance
   static const sInt SRCVER_MODERN = 6;
   sInt srcVersion;
   bool old(V2Delta d) const { return oldBehavior(d, srcVersion); }
+  // era voice-pool bound (16/32/64, DELTA_POLY_16/32): the ALLOCATOR never
+  // scans voices past this, which is provably equivalent to the period
+  // engine's smaller pool -- unallocated voices keep chanmap == -1 and every
+  // other voice loop skips those. Arrays stay sized for the 2004 POLY = 64.
+  sInt voicePool() const { return voicePoolSize(srcVersion); }
 
   // Stuff that depends on the sample rate
   sF32 SRfcsamplesperms;
@@ -3611,8 +3616,15 @@ struct V2Synth
 
           // calculate current polyphony for this channel
           const V2Sound *sound = getpatch(chans[chan].pgm);
+          // era pool bound (DELTA_POLY_16/32): the 2000/2001 engines scan 16
+          // voices, the 2002/2003 builds 32, the 2004 asm 64. When a dense
+          // song saturates the period pool, the original STEALS where a
+          // 64-voice scan would open a fresh voice -- allocation choices
+          // diverge (proven by the flybye 66.42s alloc-trace hunt,
+          // flybye-extraction/NOTES.md).
+          const sInt pool = instance.voicePool();
           sInt npoly = 0;
-          for (sInt i=0; i < POLY; i++)
+          for (sInt i=0; i < pool; i++)
             npoly += (chanmap[i] == chan);
 
 
@@ -3625,7 +3637,7 @@ struct V2Synth
           {
             // if we haven't reached polyphony limit yet, try to find a free voice
             // first.
-            for (sInt i=0; i < POLY; i++)
+            for (sInt i=0; i < pool; i++)
             {
               if (chanmap[i] < 0)
               {
@@ -3661,7 +3673,7 @@ struct V2Synth
           {
             COVER("SYN replace voice gate off");
             sU32 oldest = curalloc;
-            for (sInt i=0; i < POLY; i++)
+            for (sInt i=0; i < pool; i++)
             {
               if ((chanmap[i] & chanmask) == chanfind && !voicesw[i].gate && allocpos[i] < oldest)
               {
@@ -3676,7 +3688,7 @@ struct V2Synth
           {
             COVER("SYN replace voice oldest");
             sU32 oldest = curalloc;
-            for (sInt i=0; i < POLY; i++)
+            for (sInt i=0; i < pool; i++)
             {
               if ((chanmap[i] & chanmask) == chanfind && allocpos[i] < oldest)
               {

@@ -125,6 +125,21 @@ enum V2Delta {
                            // Root cause of the josie whole-mix DC-decay
                            // residual (every channel, 2nd sample of first
                            // note).
+  DELTA_POLY_16,           // voice pool is 16, not bigger. The pool size is
+                           // the first VALUE-typed era difference (16/32/64
+                           // across builds), expressed as two composed bool
+                           // rows -- see voicePoolSize() below. When a dense
+                           // song saturates the period pool, the old engine
+                           // STEALS the oldest gate-off voice where a bigger
+                           // pool opens a fresh one: allocation choices (and
+                           // thus steal-cut release tails + reused-voice
+                           // state) diverge. Root cause of the flybye 66.42s
+                           // divergence (first >16-voice moment of the song;
+                           // alloc trace: 2001 steals slot 10, the 64-voice
+                           // port opened voice 16).
+  DELTA_POLY_32,           // voice pool is 32, not 64. Both v5 binaries agree
+                           // (unlike the osc trio) so the format proxy is
+                           // clean at this flip; 64 is the 2004 value.
 
   DELTA_COUNT
 };
@@ -250,6 +265,25 @@ inline constexpr V2DeltaRow kDeltas[DELTA_COUNT] = {
                                                      // DC filters (source ==
                                                      // binary); dcf1/dcf2 are
                                                      // 2004/v6 additions
+  /* DELTA_POLY_16            */ { 5, EV_ASSUMED  }, // pool 16 PROVEN at v0
+                                                     // (fr08 tick loop cmp
+                                                     // dl,0x10 @0x40b9e4) and
+                                                     // v1 (flybye @0x41000b,
+                                                     // steal scan @0x410393);
+                                                     // already 32 at EARLY-v5
+                                                     // fr-022 (2002-08), so the
+                                                     // 16->32 growth happened
+                                                     // in the v2..v4 gap --
+                                                     // unpinned, flipsAt 5 is
+                                                     // the same proxy as
+                                                     // PGMCHANGE_V0 (correct at
+                                                     // every known point)
+  /* DELTA_POLY_32            */ { 6, EV_PROVEN   }, // pool 32 at BOTH v5
+                                                     // binaries (fr-022 cmp
+                                                     // dl,0x20 @0x40f322,
+                                                     // candytron @0x41f96a);
+                                                     // 64 in the 2004 asm
+                                                     // (%define POLY 64)
 };
 
 // Does the OLD (pre-flip) behavior apply at this behavior version?
@@ -264,6 +298,22 @@ constexpr bool oldBehavior(V2Delta d, int behaviorVersion)
        : (kDeltas[d].flipsAt > V2_VER_MAX)  ? true
        : behaviorVersion < (int)kDeltas[d].flipsAt;
 }
+
+// The era voice-pool size, composed from the two POLY rows (the ledger's
+// first value-typed difference: 16 in 2000/2001, 32 in 2002/2003, 64 in
+// 2004). Engine arrays stay sized for 64; the ALLOCATOR never scans past
+// this bound, which is provably equivalent to a smaller pool (voices that
+// are never allocated keep chanmap == -1, and every other voice loop skips
+// those). Constant-folds exactly like the boolean gates.
+constexpr int voicePoolSize(int behaviorVersion)
+{
+  return oldBehavior(DELTA_POLY_16, behaviorVersion) ? 16
+       : oldBehavior(DELTA_POLY_32, behaviorVersion) ? 32
+       : 64;
+}
+
+static_assert(kDeltas[DELTA_POLY_16].flipsAt <= kDeltas[DELTA_POLY_32].flipsAt,
+              "voice pool growth must be monotonic (16 -> 32 -> 64)");
 
 // COUPLING: the 2000 oscillator block is one convention, not independent
 // rows. The baked freq constant is ~SRfcobasefrq/4 BECAUSE the v0 renderers
@@ -297,6 +347,11 @@ static_assert(oldBehavior(DELTA_NO_DCOFFSET, 5), "v5 has no dcoffset");
 static_assert(!oldBehavior(DELTA_OSC_BOXFILTER, 5), "v5 osc is OSM already");
 static_assert(oldBehavior(DELTA_NO_FM_OSC, 0), "v0 has no FM osc mode");
 static_assert(!oldBehavior(DELTA_NO_FM_OSC, 5), "v5 has the FM osc mode");
+// voice-pool endpoints (flybye/fr-022/candytron disassembly + 2004 asm)
+static_assert(voicePoolSize(0) == 16, "v0 pool is 16 (fr08)");
+static_assert(voicePoolSize(1) == 16, "v1 pool is 16 (flybye)");
+static_assert(voicePoolSize(5) == 32, "v5 pool is 32 (fr-022 AND candytron)");
+static_assert(voicePoolSize(6) == 64, "v6 pool is 64 (synth.asm)");
 #endif
 
 // behavior version a Player resolves to: forced override (research knob) or

@@ -3,9 +3,10 @@
 This file collects the open threads that would push the portable player
 *closer to the historical hardware renders* than it already is. **None of
 them is a defect.** The player is structurally faithful, deterministic, and
-chunk-invariant across all supported eras (v0–v6); the two endpoint eras are
+chunk-invariant across all supported eras (v0–v6); three eras are now
 bit-exact against their genuine binaries (v0 vs the year-2000 fr08 binary,
-v6 vs the 2004 `synth.asm`). What is left is sub-perceptual: in listening
+**v1 vs the 2001 flybye binary — whole song, 2026-06-07**, v6 vs the 2004
+`synth.asm`). What is left is sub-perceptual: in listening
 tests the differences are not audible. These are recorded here so the work
 is *resumable*, not because it is *required*.
 
@@ -65,7 +66,12 @@ a five-point build timeline: v0 fr08 (2000) · v1 flybye (2001-12) · v5 fr-022
 
 All seven formerly-ASSUMED rows are now resolved (data edits) — the osc-core
 trio by constant scan, the four player/render rows by disassembly. **No
-EV_ASSUMED row remains at flipsAt 1.**
+EV_ASSUMED row remains at flipsAt 1.** The follow-up render oracle
+(`c1_flybye_harness.c`) then upgraded v1 from correct-by-row to **whole-song
+bit-exact**, catching one row no static read had found: the **voice-pool
+size** (16 in 2000/2001, 32 in both 2002/2003 v5 binaries, 64 in the 2004
+asm) — now `DELTA_POLY_16`/`DELTA_POLY_32` + era-bounded allocator scans
+(the 66.42 s hunt, flybye-extraction NOTES).
 
 | row | status after flybye/fr-022 |
 | --- | --- |
@@ -90,10 +96,12 @@ just noise; full breakdown in the extraction NOTES). Getting it right needs a
 build-era signal the file lacks (the `v2eras.h` "model change" option) —
 deferred until/unless early-v5 files enter the corpus.
 
-**To close the rest (optional):** disassemble the flybye synth for the four
-remaining ASSUMED rows, and build a flybye/fr-022 render-harness oracle to
-upgrade the v1/v5 claim from correct-by-row to bit-exact. v3 and v2 still
-have no period engine (fr-022 turned out v5, not the hoped-for v3).
+**Done since:** the flybye render-harness oracle was built
+(`c1_flybye_harness.c`) and the v1 claim is now **bit-exact, whole song**
+(rel-RMS 4.0e-5, max|d| 1.5e-4, zero samples >1e-3) after the voice-pool fix.
+**To close the rest (optional):** v3 and v2 still have no period engine
+(fr-022 turned out v5, not the hoped-for v3), so the in-gap flips
+(including the 16→32 pool growth) stay proxied at flipsAt 5.
 
 ## 4. v1–v4 originals: structural-only validation (no oracle)
 
@@ -115,12 +123,14 @@ identical bytes across reruns and chunk 4096 vs 333).
 **Caveat — this is a liveness check, not a fidelity check.** Determinism +
 chunk-invariance only proves the renderer is deterministic; it does NOT prove
 the v1–v4 era *behavior* is correct (a renderer that wrongly played everything
-at v6 would pass the same test). **v1 now has a period binary** (flybye, §3):
-its era rows are read directly from the image (correct-by-row), and a
-bit-exact ε becomes measurable once a flybye render-harness oracle is built.
-**v2/v3/v4 still have no period engine** (fr-022 is v5), so their era-fidelity
-remains unprovable for now — those files stay liveness-only until a v2/v3/v4
-binary surfaces.
+at v6 would pass the same test). **v1 is now oracle-proven** (flybye, §3):
+the embedded tpinv2 (byte-identical to the repo `tpinv2.v2m`) renders
+whole-song bit-exact against the 2001 binary itself. **v2/v3/v4 still have
+no period engine** (fr-022 is v5), so their era-fidelity remains unprovable
+for now — those files stay liveness-only until a v2/v3/v4 binary surfaces.
+Note kkrieger6's *native-v5* render changed with the era voice pool (it
+saturates 32 voices at 102.47 s; josie never does) — evidence-backed but
+oracle-less, since no period engine that plays kkrieger6 exists.
 
 ## 5. CC1 mod-dest remap re-audit (low priority)
 

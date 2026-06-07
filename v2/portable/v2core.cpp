@@ -3969,6 +3969,22 @@ private:
     }
 
     voice->set(vpara);
+
+#ifndef NDEBUG
+    // dev-only: dump a channel's post-modulation voice config once (V2_PATCHDUMP=ch)
+    { static int pd=-2; if(pd==-2){const char*e=getenv("V2_PATCHDUMP"); pd=e?atoi(e):-1;}
+      static int shown[16]={0};
+      if(pd>=0 && chan==pd && chan<16 && !shown[chan]){ shown[chan]=1;
+        fprintf(stderr,"[patch ch%d pgm%d] routing=%.0f fltbal=%.0f oscsync=%.0f panning=%.0f transp=%.0f\n",
+                chan, chans[chan].pgm, vpara->routing, vpara->fltbal, vpara->oscsync, vpara->panning, vpara->transp);
+        for(int i=0;i<syVV2::NOSC;i++) fprintf(stderr,"  osc%d mode=%.0f ring=%.0f pitch=%.1f detune=%.1f color=%.0f gain=%.0f\n",
+                i, vpara->osc[i].mode, vpara->osc[i].ring, vpara->osc[i].pitch, vpara->osc[i].detune, vpara->osc[i].color, vpara->osc[i].gain);
+        for(int i=0;i<syVV2::NFLT;i++) fprintf(stderr,"  flt%d mode=%.0f cutoff=%.0f reso=%.0f\n",
+                i, vpara->flt[i].mode, vpara->flt[i].cutoff, vpara->flt[i].reso);
+        fprintf(stderr,"  dist mode=%.0f ingain=%.0f p1=%.0f p2=%.0f\n",
+                vpara->dist.mode, vpara->dist.ingain, vpara->dist.param1, vpara->dist.param2);
+      } }
+#endif
   }
 
   void storeChanValues(sInt chan)

@@ -1,0 +1,8 @@
+# compiled harnesses + scratch renders (reproducible from ~/downloads + toolkit)
+c2_oracle
+c2_oracle_solo
+c2_render
+*.f32
+*.wav
+*.bin
+*.v2m

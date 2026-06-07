@@ -162,30 +162,72 @@ the result to close 8.2.
 
 ## 7. Portable v5 vs the brullwurfel v5 oracle (~0.148 residual)
 
-The brullwurfel (fr-028, 2002-09) render oracle is built and validated
-(`../v2m/brullwurfel-extraction/c3_oracle.c` + NOTES). Rendering song1 (= the
-fr08 ".the .product" song re-exported to v5) through brullwurfel's OWN synth vs
-the portable v5 path (same v2m, 60 s):
+**Status (2026-06-07): LOCALIZED + PROVEN a real brullwurfel→candytron
+modern-core sub-era delta. Documented as an unrepresentable early-modern-core
+case (mirrors §3's early-v5 case). The portable is NOT at fault — it is
+bit-exact against its candytron reference.**
 
-- envelope correlation **0.9994**, **identical peak** — structurally validated;
-- but a **sample-level residual rms-diff/rms ≈ 0.148** remains (the portable v5
-  render is not bit-exact against this binary).
+The brullwurfel (fr-028, 2002-09) render oracle (`../v2m/brullwurfel-extraction/
+c3_oracle.c` + NOTES) renders song1 (= the fr08 ".the .product" song re-exported
+to v5) through brullwurfel's OWN synth. Against the portable v5 path (same v2m,
+60 s): envelope correlation **0.9994**, **identical peak**, but a sample-level
+**rms-diff/rms ≈ 0.148** — not bit-exact. The hunt (channel-solo bisection +
+three-way oracle + patch dump + image constant-scan) ran it all the way down:
 
-This is NOT the closed josie ε (§1, ~0.009): it's ~16×larger. The likely cause
-is that **brullwurfel is the EARLIEST modern-core build (2002-09)** while the
-portable's v5 reference is the later **candytron (2003-08)** — there may be a v5
-*sub-era* DSP delta (within the modern core, between Sep-2002 and Aug-2003) that
-the ledger doesn't yet model. Candytron itself is bit-exact-ish vs the portable
-(the josie ε), so the residual is specific to the early-modern-core build.
+**1. Channel-solo (`C3_SOLO`/`V2SEQ_SOLO`).** The whole 0.148 collapses onto a
+single channel, **ch1** (rms-diff 0.01665 of the 0.0167 total; every other
+channel is bit-exact at ~2e-9 or silent in the first 60 s). ch1 is silent until
+~36 s, then diverges from its very first sample — *not* an accumulating drift.
 
-**To localize (next):** TAP the per-voice signal chain with the toolkit
-`oracle.h`/`oracle_chan_tap` (osc out / flt out / dist out / premix) on a single
-solo'd channel, brullwurfel-c3 vs portable, and bisect which DSP stage diverges
-— same playbook as the fr08/candytron channel-solo hunts. Decide afterward
-whether it warrants a new era row or stays a documented early-v5 ε.
+**2. Three-way oracle (the decisive test).** Rendering song1 ch1 through
+candytron's OWN engine too (`c2_oracle_solo` + `/tmp/candytron/unpacked.bin`):
+
+| pair | peak A / B | rms-diff | verdict |
+| --- | --- | --- | --- |
+| portable vs candytron (2003) | 0.383627 / 0.383627 | 1.2e-09 | **BIT-EXACT** (1 ULP) |
+| candytron (2003) vs brullwurfel (2002) | 0.383627 / 0.170289 | 1.67e-02 | the divergence |
+| portable vs brullwurfel (2002) | 0.383627 / 0.170289 | 1.67e-02 | same divergence |
+
+So the portable reproduces candytron to the last ULP; **both** the portable and
+candytron diverge from brullwurfel identically. The 0.148 is a genuine v5
+sub-era delta between the earliest modern core (Sep-2002) and candytron
+(Aug-2003), not a portable defect.
+
+**3. Root cause: ch1's full-gain NOISE oscillator.** ch1's patch (pgm1, serial
+filters) is `osc0/osc1 = PULSE` at gain 39/47 and **`osc2 = OSC_NOISE` at full
+gain 127**, through a high-resonance serial filter (flt0 mode3 cutoff102
+reso106). The two builds' ch1 renders are **decorrelated (corr 0.16)** with all
+energy in a ~3.5 kHz resonant band — the signature of *differing noise* shaped by
+the same resonant filter (the quiet pulses are identical and supply the residual
+0.16 correlation). c3 is byte-stable across runs, so the noise is deterministic,
+just build-specific.
+
+**4. Mechanism: same LCG, different seed.** Both unpacked images contain the
+SAME modern noise LCG (196314165 / 907633515 — brullwurfel @0x4369, candytron
+@0x1441b) *and* the MSVC LCG, so `DELTA_NOISE_LCG_MSVC` is correct (both NEW).
+The decorrelation is therefore a **different per-voice noise seed** feeding the
+same LCG (identical generator + different start = fully decorrelated). At v5 the
+seed is `seedMix(userSeed, rdtsc→0, idx)`; brullwurfel's early-modern build seeds
+it differently from candytron, and the v2m carries no build-era signal to tell
+the two apart.
+
+**Disposition:** unrepresentable early-modern-core sub-era case, same shape as
+§3's early-v5-old-core (fr-022/fr-027). The portable models candytron, the later
+canonical v5, bit-exact; noise-seed divergence between builds is the irreducible
+class already noted for rdtsc seeding. NOT promoted to an era row (no
+early-modern file in the corpus to serve, and a noise *seed* — unlike the LCG
+constant — is not a behavior the v2m can carry). Re-open only if an early-modern
+noise-heavy v2m enters the corpus AND brullwurfel's exact seed init is decoded
+(disasm the syOsc noise-mode seed at the brullwurfel noise-gen site).
+
+Tooling added this session: `C3_SOLO` in `c3_oracle.c` (mirrors `C2_SOLO`/
+`V2SEQ_SOLO`); `V2_PATCHDUMP=<ch>` in `v2core.cpp` `storeV2Values` (dev-only,
+`#ifndef NDEBUG`, dumps a channel's post-mod voice config). check.py 17/17.
 
 NOTE: the brullwurfel unpacked image + carved song1 live in scratch (re-unpack
-`~/downloads/fr-028.zip` via `../v2m/toolkit/era`; song1 is carve index 1).
+`~/downloads/fr-028.zip` via `../v2m/toolkit/era`; song1 is carve index 1). The
+candytron image re-unpacks from `~/downloads/fr-030_candytron_final.zip`
+(kkrunchy) to `/tmp/candytron/unpacked.bin`.
 
 ---
 

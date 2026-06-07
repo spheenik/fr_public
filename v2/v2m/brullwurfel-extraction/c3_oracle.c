@@ -128,7 +128,9 @@ static void ssTick(){
         state.tpq=state.gptr[9*base.gdnum+state.gnr]; state.gnr++;
         UPDATENT2(state.gnr,state.gnt,state.gptr+state.gnr,base.gdnum); }
     UPDATENT3(state.gnr,state.gnt,state.gptr+state.gnr,base.gdnum);
+    static int g_solo=-2; if(g_solo==-2){const char*e=getenv("C3_SOLO"); g_solo=e?atoi(e):-1;}
     for(int ch=0;ch<16;ch++){ basech*bc=&base.chan[ch]; if(!bc->notenum) continue;
+        u8* solo_mptr0=mptr; u32 solo_laststat0=laststat;  // C3_SOLO: mirror v2seq/c2 -- run all counters, rewind non-solo emitted MIDI
         if(state.chan[ch].pcnr<bc->pcnum && state.time==state.chan[ch].pcnt){
             PUTSTAT(0xc0|ch); *mptr++=(state.chan[ch].lastpc+=state.chan[ch].pcptr[3*bc->pcnum]);
             state.chan[ch].pcnr++; state.chan[ch].pcptr++;
@@ -151,7 +153,8 @@ static void ssTick(){
             *mptr++=(state.chan[ch].lastvel+=state.chan[ch].noteptr[4*bc->notenum]);
             state.chan[ch].notenr++; state.chan[ch].noteptr++;
             UPDATENT2(state.chan[ch].notenr,state.chan[ch].notent,state.chan[ch].noteptr,bc->notenum); }
-        UPDATENT3(state.chan[ch].notenr,state.chan[ch].notent,state.chan[ch].noteptr,bc->notenum); }
+        UPDATENT3(state.chan[ch].notenr,state.chan[ch].notent,state.chan[ch].noteptr,bc->notenum);
+        if(g_solo>=0 && ch!=g_solo){ mptr=solo_mptr0; laststat=solo_laststat0; } }
     *mptr++=0xfd;
     synthProcessMIDI(midibuf);
     if(state.nexttime==(u32)-1) state.running=0;

@@ -15,13 +15,14 @@ is unpacking.
   SizeOfImage 0xb5f000, ImageBase 0x400000, entry RVA 0xfdc3. Packer marker
   string `kkrunchy5` + `MZfarbrauschPE`.
 
-## Unpacking (c2_unpack.c)
+## Unpacking (`../toolkit/era unpack`)
 
 Wine on this host is wow64-only (no pure 32-bit prefix) and never exposes the
 guest at 0x400000, so the fr08 live-wine dump recipe (`dump5.py`) does not
-apply. Instead `c2_unpack.c` is a self-contained 32-bit loader: it maps the
-packed exe flat at 0x400000, jumps to the depacker stub (0x40fdc3), and lets
-kkrunchy decompress in-place. The stub layout (objdump-confirmed):
+apply. The toolkit runs the depacker stub under Unicorn: it flat-loads the
+packed exe at 0x400000 (matching the native loader below), jumps to the stub
+(0x40fdc3), and lets kkrunchy decompress in-place. The stub layout
+(objdump-confirmed, originally via the retired `c2_unpack.c` native loader):
 
 - `mov ebp,0x410000` work area; range-coder source ptr `[ebp]=0x4000d4`
   (packed stream begins at file off 0xd4, right after the minimal headers).
@@ -32,13 +33,15 @@ kkrunchy decompress in-place. The stub layout (objdump-confirmed):
   0x40feaf doing `call DWORD PTR ds:0x40ffa2` / `ds:0x40ffa6`.
 
 The dword at 0x40ffa2 is the unpatched LoadLibraryA placeholder `0x0000ffba`;
-in a real process the loader fills it, here `call ds:0x40ffa2` jumps to 0xffba
-→ SIGSEGV. **Decompression + the E8 fixup are already complete by then**, so
-the harness's SIGSEGV handler dumps the finished image. No PEB/import faking
-needed — we only ever wanted the decompressed image, not a running demo.
+in a real process the loader fills it, here `call ds:0x40ffa2` jumps to 0xffba.
+**Decompression + the E8 fixup are already complete by then**, so this is the
+finish signal: the toolkit catches the instruction FETCH from the unmapped
+0xffba (the exact analogue of the native loader's SIGSEGV) and dumps the
+finished image. No PEB/import faking needed — we only ever wanted the
+decompressed image, not a running demo. The Unicorn route reproduces the
+native `c2_unpack.c` image byte-for-byte (stop @0xffba either way).
 
-    gcc -m32 -no-pie -O0 c2_unpack.c -o c2_unpack
-    ./c2_unpack fr030-candytron-final-101.exe unpacked.bin   # -> 0xb5f000 bytes
+    ../toolkit/era unpack fr030-candytron-final-101.exe unpacked.bin   # -> 0xb5f000 bytes
 
 Verified complete: `.text` @0x411000 disassembles as clean post-fixup x86
 (standard prologues/`call`/`ret`); nonzero density ~5.5% over the first 2 MB

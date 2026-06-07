@@ -13,18 +13,14 @@
 //   malloc 0x411013 via IAT [0x42003c](1,size)->ptr , [0x420050](ptr)->ptr
 //   rdtsc seeds        0x41dca8, 0x41e32d   (0f31 -> 31c0)
 
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
 #include <stdint.h>
-#include <sys/mman.h>
-#define __USE_GNU 1
-#include <signal.h>
-#include <ucontext.h>
-#include <unistd.h>
 
 #define IMG_BASE 0x400000u
 #define IMG_SIZE 0xb5f000u
+
+// shared native oracle scaffold (mmap@0x400000 + fault reporter + rdtsc-pin + f32)
+#define ORACLE_IMG_SIZE IMG_SIZE
+#include "../toolkit/oracle.h"
 
 #define VA_V2M       0x424c00u
 #define VA_G_V2M     0xeba344u
@@ -35,19 +31,6 @@
 #define IAT_FREE     0x420038u
 static const uint32_t RDTSC_SITES[] = { 0x41dca8u, 0x41e32du };
 
-static void segv(int sig, siginfo_t *si, void *uc_) {
-    ucontext_t *uc = (ucontext_t*)uc_;
-    unsigned eip = uc->uc_mcontext.gregs[REG_EIP];
-    fprintf(stderr, "[c2] SIG%d fault_addr=%p eip=0x%08x\n", sig, si->si_addr, eip);
-    // show bytes at eip if mapped in image
-    if (eip>=IMG_BASE && eip<IMG_BASE+IMG_SIZE) {
-        unsigned char *p=(unsigned char*)(uintptr_t)eip;
-        fprintf(stderr, "[c2]   bytes: %02x %02x %02x %02x %02x %02x\n",
-                p[0],p[1],p[2],p[3],p[4],p[5]);
-    }
-    _exit(42);
-}
-
 // stdcall stubs for the demo's malloc IAT
 static void * __attribute__((stdcall)) stub_alloc(int one, int size){ (void)one; return calloc(1, size?size:1); }
 static void * __attribute__((stdcall)) stub_ident(void *p){ return p; }
@@ -57,23 +40,11 @@ static uint32_t rd32(uint32_t va){ return *(volatile uint32_t*)(uintptr_t)va; }
 
 int main(int argc, char **argv){
     const char *path = argc>1?argv[1]:"/tmp/candytron/unpacked.bin";
-    struct sigaction sa; memset(&sa,0,sizeof sa);
-    sa.sa_sigaction=segv; sa.sa_flags=SA_SIGINFO;
-    sigaction(SIGSEGV,&sa,NULL); sigaction(SIGBUS,&sa,NULL); sigaction(SIGILL,&sa,NULL); sigaction(SIGFPE,&sa,NULL);
-
-    void *p = mmap((void*)(uintptr_t)IMG_BASE, IMG_SIZE, PROT_READ|PROT_WRITE|PROT_EXEC,
-                   MAP_PRIVATE|MAP_ANONYMOUS|MAP_FIXED, -1, 0);
-    if (p!=(void*)(uintptr_t)IMG_BASE){ fprintf(stderr,"mmap failed %p\n",p); return 1; }
-    FILE *f=fopen(path,"rb"); if(!f){fprintf(stderr,"open %s\n",path);return 1;}
-    size_t n=fread((void*)(uintptr_t)IMG_BASE,1,IMG_SIZE,f); fclose(f);
-    fprintf(stderr,"[c2] loaded %zu bytes\n",n);
-
-    // pin rdtsc -> deterministic
-    for (unsigned i=0;i<sizeof(RDTSC_SITES)/sizeof(RDTSC_SITES[0]);i++){
-        uint8_t *s=(uint8_t*)(uintptr_t)RDTSC_SITES[i];
-        if(s[0]==0x0f&&s[1]==0x31){ s[0]=0x31; s[1]=0xc0; fprintf(stderr,"[c2] rdtsc @0x%x pinned\n",RDTSC_SITES[i]); }
-        else fprintf(stderr,"[c2] WARN no rdtsc @0x%x (%02x %02x)\n",RDTSC_SITES[i],s[0],s[1]);
-    }
+    oracle_install_faults();
+    { struct sigaction sa; memset(&sa,0,sizeof sa); sa.sa_sigaction=oracle_segv;
+      sa.sa_flags=SA_SIGINFO; sigaction(SIGFPE,&sa,NULL); }  // c2 also traps SIGFPE
+    oracle_map_image(path, IMG_SIZE);
+    oracle_pin_rdtsc(RDTSC_SITES, sizeof(RDTSC_SITES)/sizeof(RDTSC_SITES[0]));
 
     // populate malloc IAT slots
     *(uint32_t*)(uintptr_t)IAT_ALLOC  = (uint32_t)(uintptr_t)&stub_alloc;

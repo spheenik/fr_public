@@ -22,12 +22,12 @@
 
 ## 3. Migrate candytron (ported player + synth-only ABI)
 
-- [ ] 3.1 Repoint candytron unpack/carve/assay to the toolkit; delete forks
-- [ ] 3.2 Verify unpack (kkrunchy route) → byte-compare to `/tmp/candytron/unpacked.bin`
-- [ ] 3.3 Verify carve → byte-identical to the committed candytron `.v2m`(s)
-- [ ] 3.4 Refit `c2_oracle.c`, `c2_oracle_solo.c`, `c2_render.c` onto `oracle.h`; recompile
-- [ ] 3.5 Verify re-render → `max|d| = 0` vs the committed candytron C2 reference `.f32`
-- [ ] 3.6 Commit candytron migration
+- [x] 3.1 Repoint candytron unpack/carve/assay to the toolkit; delete forks (c2_unpack.c)
+- [x] 3.2 Verify unpack (kkrunchy route) → byte-compare to `/tmp/candytron/unpacked.bin`
+- [x] 3.3 Verify carve → byte-identical to the candytron josie carve (`/tmp`; none committed in-dir)
+- [x] 3.4 Refit `c2_oracle.c`, `c2_oracle_solo.c`, `c2_render.c` onto `oracle.h`; recompile
+- [x] 3.5 Verify re-render → `max|d| = 0` vs the committed candytron C2 reference `.f32`
+- [x] 3.6 Commit candytron migration
 
 ## 4. Migrate fr08 (harness lives in v2/validate/)
 

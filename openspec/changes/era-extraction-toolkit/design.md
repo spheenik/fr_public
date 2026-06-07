@@ -52,11 +52,31 @@ scaffold is common.
 `detect_packer(exe)` reads PE section names: `rygs and`+`packer.` → `aplib`,
 single `kkrunchy` → `kkrunchy`, `ruletool`+`resultat` → `ruletool`, normal
 `.text/.rdata/...` → `none`. `unpack(exe)` dispatches: `aplib` → the proven
-unicorn stub-emulation (today's `unpack.py`, unchanged logic), `kkrunchy` → the
-`c2_unpack.c` mmap+SIGSEGV route, `none` → identity (carve the file directly,
-e.g. zeitmaschine), `ruletool` → **raise NotImplemented** with a clear message.
-*Alternative considered:* entropy/heuristic detection — rejected; section names
-are an exact, zero-ambiguity signature here and already verified across all 13.
+unicorn stub-emulation (today's `unpack.py`, unchanged logic), `kkrunchy` →
+**also Unicorn** (honoring "Unicorn on all parts"), `none` → identity (carve the
+file directly, e.g. zeitmaschine), `ruletool` → **raise NotImplemented** with a
+clear message. *Alternative considered:* entropy/heuristic detection — rejected;
+section names are an exact, zero-ambiguity signature here and already verified
+across all 13.
+
+**Refinement during implementation (kkrunchy under Unicorn).** The two stubs need
+different emulation strategies — branched inside `_emulate_stub` by packer, each
+matching its proven native route byte-for-byte:
+- *Initial load.* aPLib: headers + per-section raw→va placement (== native
+  `unpack.py`). kkrunchy: **flat-load the whole file** at base (== native
+  `c2_unpack.c`); kkrunchy reads pointers from the header-gap bytes that proper PE
+  loading would zero, so a sectioned load makes it call through a null pointer.
+- *Region cap.* A decompressor over the ~12 MB candytron image touches enough
+  scattered pages that per-4 KB on-demand mapping blows QEMU's section cap (1024 →
+  `phys_section_add` assertion). kkrunchy coalesces data maps into 1 MB blocks;
+  aPLib keeps per-page (its 3 MB image never approaches the cap).
+- *Finish signal.* aPLib halts via invalid-instruction at the OEP within the image.
+  kkrunchy, with everything mapped, would instead run zeros forever — so it stops on
+  an instruction **FETCH from unmapped memory**, which is the depacked OEP's call
+  through the unresolved-import placeholder (`0x40ffa2` → `0xffba`). This is the
+  exact analogue of the native loader's SIGSEGV-on-import, and stops at the *same*
+  address `0xffba`. Verified: kkrunchy-via-Unicorn == native `c2_unpack.c` image,
+  byte-identical. `c2_unpack.c` is retired.
 
 ### D2 — One Python package, one CLI, thin modules
 `toolkit/{packers,carve,eras,disasm}.py` importable as functions, fronted by an

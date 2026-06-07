@@ -6,19 +6,16 @@
 // Build: gcc -m32 -no-pie -O0 c2_oracle.c -o c2_oracle
 // Run:   ./c2_oracle [unpacked.bin] [josie.v2m] [out.f32] [seconds]
 
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
 #include <stdint.h>
-#include <sys/mman.h>
-#define __USE_GNU 1
-#include <signal.h>
-#include <ucontext.h>
-#include <unistd.h>
 typedef uint8_t u8; typedef uint32_t u32; typedef int32_t s32; typedef uint64_t u64;
 
 #define IMG_BASE 0x400000u
 #define IMG_SIZE 0xb5f000u
+
+// shared native oracle scaffold (mmap@0x400000 + fault reporter + rdtsc-pin + f32)
+#define ORACLE_IMG_SIZE IMG_SIZE
+#include "../toolkit/oracle.h"
+
 static const u32 RDTSC_SITES[] = { 0x41dca8u, 0x41e32du };
 #define IAT_ALLOC 0x42003cu
 #define IAT_ALLOC2 0x420050u
@@ -30,10 +27,6 @@ static const u32 RDTSC_SITES[] = { 0x41dca8u, 0x41e32du };
 #define VA_synthProcessMIDI 0x41fbdcu // (midibuf) stdcall ret4
 #define VA_synthRender     0x41f8c2u  // (buf, smp, buf2, add) stdcall ret16
 
-static void segv(int sig, siginfo_t *si, void *uc_){
-    ucontext_t *uc=(ucontext_t*)uc_; unsigned eip=uc->uc_mcontext.gregs[REG_EIP];
-    fprintf(stderr,"[c2] SIG%d addr=%p eip=0x%08x\n",sig,si->si_addr,eip); _exit(42);
-}
 static void* __attribute__((stdcall)) stub_alloc(int one,int size){(void)one;return calloc(1,size?size:1);}
 static void* __attribute__((stdcall)) stub_ident(void*p){return p;}
 static void  __attribute__((stdcall)) stub_free(void*p){free(p);}
@@ -206,13 +199,11 @@ int main(int argc,char**argv){
     const char*v2m=argc>2?argv[2]:"/home/spheenik/projects/scene/fr_public/genthree/data/josie.v2m";
     const char*outp=argc>3?argv[3]:"/tmp/candytron/c2_josie.f32";
     u32 secs=argc>4?atoi(argv[4]):45;
-    struct sigaction sa; memset(&sa,0,sizeof sa); sa.sa_sigaction=segv; sa.sa_flags=SA_SIGINFO;
-    sigaction(SIGSEGV,&sa,NULL); sigaction(SIGBUS,&sa,NULL); sigaction(SIGFPE,&sa,NULL);
-    void*p=mmap((void*)(uintptr_t)IMG_BASE,IMG_SIZE,PROT_READ|PROT_WRITE|PROT_EXEC,MAP_PRIVATE|MAP_ANONYMOUS|MAP_FIXED,-1,0);
-    if(p!=(void*)(uintptr_t)IMG_BASE){fprintf(stderr,"mmap fail\n");return 1;}
-    FILE*f=fopen(img,"rb"); if(!f){fprintf(stderr,"no %s\n",img);return 1;}
-    fread((void*)(uintptr_t)IMG_BASE,1,IMG_SIZE,f); fclose(f);
-    for(unsigned i=0;i<2;i++){ u8*s=(u8*)(uintptr_t)RDTSC_SITES[i]; if(s[0]==0x0f&&s[1]==0x31){s[0]=0x31;s[1]=0xc0;} }
+    oracle_install_faults();
+    { struct sigaction sa; memset(&sa,0,sizeof sa); sa.sa_sigaction=oracle_segv;
+      sa.sa_flags=SA_SIGINFO; sigaction(SIGFPE,&sa,NULL); }  // c2 also traps SIGFPE
+    oracle_map_image(img, IMG_SIZE);
+    oracle_pin_rdtsc(RDTSC_SITES, sizeof(RDTSC_SITES)/sizeof(RDTSC_SITES[0]));
     // C2_RONAN_NOP: NOP the syRonanProcess call @0x41fac3 (e8 12 fd ff ff) so
     // ch15's RAW voice excitation (chanbuf @0x4c1248) flows through syChanProcess
     // to the mix unmodified -- lets us verify the ronan INPUT vs the portable.

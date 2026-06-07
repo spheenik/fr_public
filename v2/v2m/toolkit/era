@@ -1,0 +1,91 @@
+#!/usr/bin/env python3
+"""era -- unified CLI for the era-extraction toolkit.
+
+  era detect  <exe>                      -> aplib | kkrunchy | ruletool | none
+  era unpack  <exe> <out.bin>            -> depack to a flat image
+  era carve   <image.bin>                -> list embedded v2m spans
+  era carve   <image.bin> --extract I --out song.v2m
+  era assay   <image.bin>                -> era-delta const/opcode report
+  era disasm  <image.bin> <va> [n]       -> disassemble n insns at a VA
+"""
+
+import sys
+import os
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import packers
+import carve
+import eras
+import disasm as disasm_mod
+
+
+def cmd_detect(args):
+    print(packers.detect_packer(args[0]))
+
+
+def cmd_unpack(args):
+    if len(args) < 2:
+        sys.exit("usage: era unpack <exe> <out.bin>")
+    image = packers.unpack(args[0], args[1])
+    stop = getattr(packers._emulate_stub, "last_stop", None)
+    if stop:
+        print("stub stop: %s eip=%#x" % (stop[0], stop[1]), file=sys.stderr)
+    print("unpacked %d bytes -> %s" % (len(image), args[1]))
+
+
+def cmd_carve(args):
+    extract_i = None
+    out = None
+    pos = []
+    i = 0
+    while i < len(args):
+        if args[i] == "--extract":
+            extract_i = int(args[i + 1]); i += 2
+        elif args[i] == "--out":
+            out = args[i + 1]; i += 2
+        else:
+            pos.append(args[i]); i += 1
+    data = open(pos[0], "rb").read()
+    spans = carve.find_v2ms(data)
+    if extract_i is not None:
+        if not out:
+            sys.exit("--extract requires --out")
+        open(out, "wb").write(carve.extract(data, spans[extract_i]))
+        print("extracted span %d (%d bytes) -> %s" % (extract_i, spans[extract_i]["size"], out))
+        return
+    print("valid non-overlapping songs:", len(spans))
+    for i, h in enumerate(spans):
+        print("  [%d] off=%#x end=%#x size=%d timediv=%d maxtime=%d active=%d psize=%d spsize=%d" % (
+            i, h["start"], h["end"], h["size"], h["timediv"], h["maxtime"],
+            h["active"], h["psize"], h["spsize"]))
+
+
+def cmd_assay(args):
+    data = open(args[0], "rb").read()
+    print(eras.format_report(data))
+
+
+def cmd_disasm(args):
+    if len(args) < 2:
+        sys.exit("usage: era disasm <image.bin> <va> [n]")
+    data = open(args[0], "rb").read()
+    va = int(args[1], 16)
+    n = int(args[2]) if len(args) > 2 else 60
+    print(disasm_mod.format_lines(disasm_mod.disasm(data, va, n)))
+
+
+CMDS = {"detect": cmd_detect, "unpack": cmd_unpack, "carve": cmd_carve,
+        "assay": cmd_assay, "disasm": cmd_disasm}
+
+
+def main():
+    if len(sys.argv) < 2 or sys.argv[1] not in CMDS:
+        sys.exit("usage: era {%s} <args...>" % "|".join(CMDS))
+    try:
+        CMDS[sys.argv[1]](sys.argv[2:])
+    except NotImplementedError as e:
+        sys.exit("era: %s" % e)
+
+
+if __name__ == "__main__":
+    main()

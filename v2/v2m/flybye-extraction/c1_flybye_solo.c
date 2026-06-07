@@ -20,14 +20,14 @@
 // Build: gcc -m32 -no-pie -O2 -mstackrealign c1_flybye_solo.c -o c1_flybye_solo
 // Run:   C1_ALLOCTRACE=1 ./c1_flybye_solo /tmp/fr013/unpacked.bin out.f32 70
 
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
 #include <stdint.h>
-#include <sys/mman.h>
 
 #define IMG_BASE 0x400000u
 #define IMG_SIZE 0x2ef000u
+
+// shared native oracle scaffold (mmap@0x400000 + rdtsc-pin + f32)
+#define ORACLE_IMG_SIZE IMG_SIZE
+#include "../toolkit/oracle.h"
 #define VA_V2M       0x41bd9du
 #define VA_OPEN_V2M  0x40d61cu
 #define VA_PLAY_V2M  0x40d74cu
@@ -110,16 +110,8 @@ int main(int argc, char **argv)
   unsigned secs    = (argc>3)?(unsigned)atoi(argv[3]):70;
   const char *se = getenv("C1_SOLO"); g_solo = se ? atoi(se) : -1;
 
-  void *p = mmap((void*)(uintptr_t)IMG_BASE, IMG_SIZE,
-                 PROT_READ|PROT_WRITE|PROT_EXEC,
-                 MAP_PRIVATE|MAP_ANONYMOUS|MAP_FIXED, -1, 0);
-  if (p != (void*)(uintptr_t)IMG_BASE) { fprintf(stderr,"mmap failed\n"); return 1; }
-  FILE *f = fopen(path,"rb"); if (!f) { fprintf(stderr,"open %s\n",path); return 1; }
-  fread((void*)(uintptr_t)IMG_BASE,1,IMG_SIZE,f); fclose(f);
-
-  for (unsigned i=0;i<3;i++){ uint8_t*s=(uint8_t*)(uintptr_t)RDTSC_SITES[i];
-    if(s[0]==0x0f&&s[1]==0x31){s[0]=0x31;s[1]=0xc0;}
-    else { fprintf(stderr,"no rdtsc @0x%x\n",RDTSC_SITES[i]); return 1; } }
+  oracle_map_image(path, IMG_SIZE);
+  oracle_pin_rdtsc(RDTSC_SITES, sizeof(RDTSC_SITES)/sizeof(RDTSC_SITES[0]));
 
   // Ronan init nops (== c1_flybye_harness)
   { uint8_t*a2=(uint8_t*)0x40d6c5u; uint8_t*a1=(uint8_t*)0x40d6cbu; uint8_t*cl=(uint8_t*)0x40d6e9u;

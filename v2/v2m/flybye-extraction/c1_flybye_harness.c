@@ -9,7 +9,7 @@
 // Build (32-bit, no-pie so 0x400000 is free; the synth sets its own x87 CW):
 //   gcc -m32 -no-pie -O0 c1_flybye_harness.c -o c1_flybye_harness
 // Run:
-//   ./unpack.py flybye.exe /tmp/fr013/unpacked.bin     # once
+//   ../toolkit/era unpack flybye.exe /tmp/fr013/unpacked.bin   # once
 //   ./c1_flybye_harness /tmp/fr013/unpacked.bin out.f32 4096 200
 //
 // Entry points (flybye-extraction/NOTES.md; addresses are byte-identical in
@@ -22,33 +22,14 @@
 //   playing flag @0x477318, paused @0x47731c
 //   rdtsc seeds  @0x40e604 / 0x40ea9e / 0x40ebcc  (0f31 -> 31c0, seed=0)
 
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
 #include <stdint.h>
-#include <sys/mman.h>
-#define __USE_GNU 1
-#include <signal.h>
-#include <ucontext.h>
-#include <unistd.h>
-
-static void segv(int sig, siginfo_t *si, void *uc_)
-{
-    ucontext_t *uc = (ucontext_t *)uc_;
-    unsigned eip = uc->uc_mcontext.gregs[REG_EIP];
-    unsigned esp = uc->uc_mcontext.gregs[REG_ESP];
-    fprintf(stderr, "[c1fb] SIG%d fault=%p eip=0x%08x esp=0x%08x\n",
-            sig, si->si_addr, eip, esp);
-    if (eip >= 0x400000u && eip < 0x6ef000u) {
-        unsigned char *p = (unsigned char *)(uintptr_t)eip;
-        fprintf(stderr, "[c1fb]   bytes: %02x %02x %02x %02x %02x %02x\n",
-                p[0], p[1], p[2], p[3], p[4], p[5]);
-    }
-    _exit(42);
-}
 
 #define IMG_BASE 0x400000u
 #define IMG_SIZE 0x2ef000u            // flybye unpacked.bin = 3076096 bytes
+
+// shared native oracle scaffold (mmap@0x400000 + fault reporter + rdtsc-pin + f32)
+#define ORACLE_IMG_SIZE IMG_SIZE
+#include "../toolkit/oracle.h"
 
 #define VA_V2M       0x41bd9du        // embedded v1 song (timediv 480)
 #define VA_OPEN_V2M  0x40d61cu
@@ -75,30 +56,10 @@ int main(int argc, char **argv)
     uint64_t max_smp    = ((argc > 4) ? (uint64_t)atoi(argv[4]) : 200u) * SAMPLE_RATE;
     if (!chunk) chunk = 4096u;
 
-    struct sigaction sa; memset(&sa, 0, sizeof sa);
-    sa.sa_sigaction = segv; sa.sa_flags = SA_SIGINFO;
-    sigaction(SIGSEGV, &sa, NULL);
-
-    void *p = mmap((void *)(uintptr_t)IMG_BASE, IMG_SIZE,
-                   PROT_READ | PROT_WRITE | PROT_EXEC,
-                   MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
-    if (p != (void *)(uintptr_t)IMG_BASE) {
-        fprintf(stderr, "mmap @0x%x failed (got %p)\n", IMG_BASE, p); return 1;
-    }
-    FILE *f = fopen(path, "rb");
-    if (!f) { fprintf(stderr, "cannot open %s\n", path); return 1; }
-    size_t n = fread((void *)(uintptr_t)IMG_BASE, 1, IMG_SIZE, f);
-    fclose(f);
-    fprintf(stderr, "[c1fb] loaded %zu bytes at 0x%x\n", n, IMG_BASE);
-
-    for (unsigned i = 0; i < sizeof(RDTSC_SITES)/sizeof(RDTSC_SITES[0]); i++) {
-        uint8_t *s = (uint8_t *)(uintptr_t)RDTSC_SITES[i];
-        if (s[0] == 0x0f && s[1] == 0x31) { s[0] = 0x31; s[1] = 0xc0; }
-        else fprintf(stderr, "[c1fb] WARN no rdtsc @0x%x (%02x %02x)\n",
-                     RDTSC_SITES[i], s[0], s[1]);
-    }
-    fprintf(stderr, "[c1fb] rdtsc pinned -> seed 0; timediv@v2m=%u\n",
-            rd32(VA_V2M));
+    oracle_install_faults();
+    oracle_map_image(path, IMG_SIZE);
+    oracle_pin_rdtsc(RDTSC_SITES, sizeof(RDTSC_SITES) / sizeof(RDTSC_SITES[0]));
+    fprintf(stderr, "[c1fb] timediv@v2m=%u\n", rd32(VA_V2M));
 
     // Skip the RONAN (speech) init inside OpenV2M -- a 2-arg stdcall whose body
     // hits null IAT thunks (-> call to 0). nop the two arg pushes + the call,

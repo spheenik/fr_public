@@ -12,13 +12,13 @@
 
 ## 2. Migrate flybye end-to-end (cleanest; in-image player)
 
-- [ ] 2.1 Repoint flybye unpack/carve/assay/disasm to the toolkit; delete the forked scripts
-- [ ] 2.2 Verify: re-run unpack → byte-compare flat image to the captured `/tmp/fr013/unpacked.bin`
-- [ ] 2.3 Verify: re-run carve → byte-identical to committed `flybye_embedded.v2m` (and `fr022_embedded.v2m`)
-- [ ] 2.4 Verify: re-run assay → same const/opcode rows as `NOTES.md`
-- [ ] 2.5 Refit `c1_flybye_harness.c` (and `c1_flybye_solo.c`) onto `oracle.h`; recompile
-- [ ] 2.6 Verify: re-render → `max|d| = 0` vs the committed flybye reference `.f32`
-- [ ] 2.7 Commit flybye migration (own commit = own rollback point)
+- [x] 2.1 Repoint flybye unpack/carve/assay/disasm to the toolkit; delete the forked scripts
+- [x] 2.2 Verify: re-run unpack → byte-compare flat image to the captured `/tmp/fr013/unpacked.bin`
+- [x] 2.3 Verify: re-run carve → byte-identical to committed `flybye_embedded.v2m` (and `fr022_embedded.v2m`)
+- [x] 2.4 Verify: re-run assay → same const/opcode rows as `NOTES.md`
+- [x] 2.5 Refit `c1_flybye_harness.c` (and `c1_flybye_solo.c`) onto `oracle.h`; recompile
+- [x] 2.6 Verify: re-render → `max|d| = 0` vs the committed flybye reference `.f32`
+- [x] 2.7 Commit flybye migration (own commit = own rollback point)
 
 ## 3. Migrate candytron (ported player + synth-only ABI)
 

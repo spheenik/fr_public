@@ -17,12 +17,12 @@ period engine had ever pinned (see `../../portable/ACCURACY-LOOSE-ENDS.md`
 
 Source zips: scene.org releases, in the user's `~/downloads/`. The exes are
 **not** committed (copyrighted demo binaries); reproduce the analysis with
-`unpack.py` against your own copies. flybye plays a v1 song; ein.schlag's
+`../toolkit/era` against your own copies. flybye plays a v1 song; ein.schlag's
 final embeds a v5 song. With the fr08 (v0, 2000) and candytron (v5, 2003-08)
 anchors this gives a five-point build timeline: 2000 → 2001-12 → 2002-08 →
 2003-08 → 2004.
 
-## Unpacking (`unpack.py`)
+## Unpacking (`../toolkit/era unpack`)
 
 Both exes use ryg's `rygs and packer.` aPLib stub (3 sections; section[0]
 "rygs and" is the zero-rawsize in-place decompression target at RVA 0x1000,
@@ -34,13 +34,13 @@ unicorn, let the stub decompress in place. It halts with
 `UC_ERR_INSN_INVALID` when it jumps to the unresolved OEP — decompression is
 already complete (imports are never patched, we only want the image).
 
-    pip install unicorn            # 2.1.4
-    ./unpack.py flybye.exe  flybye_unpacked.bin   # 0x2ef000, ~5.6M instrs, 5.0% nonzero
-    ./unpack.py fr-022.exe  fr022_unpacked.bin    # 0x340000, ~5.7M instrs, 3.3% nonzero
+    pacman -S python-unicorn       # 2.1.4
+    ../toolkit/era unpack flybye.exe  flybye_unpacked.bin   # 0x2ef000, ~5.6M instrs, 5.0% nonzero
+    ../toolkit/era unpack fr-022.exe  fr022_unpacked.bin    # 0x340000, ~5.7M instrs, 3.3% nonzero
 
 Both images disassemble as clean post-OEP x86 in the synth region.
 
-## Embedded V2Ms (`../fr08-extraction/findv2m3.py`)
+## Embedded V2Ms (`../toolkit/era carve`)
 
 Carved with the structural scanner, version detected by the portable loader
 (`v2dump`), and confirmed by parsing globSize + the patch offset table:
@@ -64,7 +64,7 @@ match a repo copy). Notes:
   it is a second v5 binary, not the v3 oracle originally hoped for. (The v3
   era therefore still has NO period engine.)
 
-## Era assay (`erascan.py`)
+## Era assay (`../toolkit/era assay`)
 
 Read each constant/opcode-decidable row straight out of the synth region.
 Synth region located by the rdtsc cluster + native fpatan:

@@ -13,7 +13,8 @@ used to live in `fr08-extraction/`, `flybye-extraction/`, and `candytron-extract
 | `carve.py`   | `find_v2ms(image)` → embedded v2m spans (the canonical `findv2m3` parser) |
 | `eras.py`    | `assay(image)` → era-delta constants/opcodes present in a synth image |
 | `disasm.py`  | `disasm(image, va, n)` → decoded instructions (image base `0x400000`) |
-| `era`        | CLI front end: `era {detect|unpack|carve|assay|disasm} <file>` |
+| `bufcmp.py`  | `compare(a, b, eps)` → oracle contract: `max|d|`/rms/divergence (numpy-accelerated) |
+| `era`        | CLI front end: `era {detect|unpack|carve|assay|disasm|compare} <file>` |
 | `oracle.h`   | shared C oracle scaffold (mmap@`0x400000` + fault reporter + rdtsc-pin + f32) |
 
 ## CLI
@@ -25,6 +26,7 @@ used to live in `fr08-extraction/`, `flybye-extraction/`, and `candytron-extract
 ./era carve   <image.bin> --extract i --out song.v2m
 ./era assay   <image.bin>           # era-delta const/opcode report
 ./era disasm  <image.bin> <va> [n]  # disassemble n insns at a VA
+./era compare <a.f32> <b.f32> [eps] # oracle contract: max|d|, rms, first divergence
 ```
 
 ## Packer routes (`unpack`)

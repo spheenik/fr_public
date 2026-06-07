@@ -9,6 +9,7 @@
 - [x] 1.7 `era` CLI: front `detect|unpack|carve|assay|disasm` over the modules
 - [x] 1.8 `oracle.h`: shared C scaffold — `oracle_map_image`, fault reporter, rdtsc seed-pin helper, f32 stereo writer; per-binary VAs/sites/driving stay in the harness
 - [x] 1.9 Commit the toolkit (inert until imported)
+- [x] 1.10 `bufcmp.py` + `era compare`: numpy-accelerated oracle-contract primitive (max|d|/rms/divergence), superseding inline diffs and the pure-Python `v2/validate/compare.py`
 
 ## 2. Migrate flybye end-to-end (cleanest; in-image player)
 

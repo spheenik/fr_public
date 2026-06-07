@@ -75,6 +75,25 @@ The toolkit SHALL disassemble a flat image at a given virtual address (image bas
 - **WHEN** the disassembler is given an image, a virtual address, and an instruction count
 - **THEN** it prints that many decoded instructions starting at the file offset for that VA
 
+### Requirement: Buffer comparison contract primitive
+
+The toolkit SHALL provide the oracle-contract verification primitive — compare two
+interleaved-stereo float32 render buffers and report sample-count match, signal
+level, `max|d|`, rms, count over tolerance, and first divergence — fast enough for
+whole-song renders, replacing the inline diffs and the pure-Python lab `compare.py`.
+
+#### Scenario: bit-exact buffers
+- **WHEN** two byte-identical f32 buffers are compared with eps 0
+- **THEN** it reports `max|d| = 0` and a MATCH verdict (exit 0)
+
+#### Scenario: divergent or mismatched buffers
+- **WHEN** two buffers differ, or differ in length
+- **THEN** it reports the first divergence point (or a length mismatch) and a DIVERGE verdict (exit non-zero)
+
+#### Scenario: whole-song scale
+- **WHEN** comparing a multi-minute render (tens of millions of floats)
+- **THEN** the comparison completes in well under a second (numpy-accelerated, array fallback)
+
 ### Requirement: Unified extraction CLI
 
 The toolkit SHALL expose a single command-line front end covering the offline stages
@@ -82,7 +101,7 @@ so a new binary is handled without copying a script.
 
 #### Scenario: subcommands cover the pipeline
 - **WHEN** a user invokes the `era` CLI
-- **THEN** it offers `detect`, `unpack`, `carve`, `assay`, and `disasm` subcommands operating on a binary or flat image
+- **THEN** it offers `detect`, `unpack`, `carve`, `assay`, `disasm`, and `compare` subcommands operating on a binary, flat image, or render buffers
 
 ### Requirement: Shared C oracle scaffold
 

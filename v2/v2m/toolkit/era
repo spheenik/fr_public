@@ -7,6 +7,7 @@
   era carve   <image.bin> --extract I --out song.v2m
   era assay   <image.bin>                -> era-delta const/opcode report
   era disasm  <image.bin> <va> [n]       -> disassemble n insns at a VA
+  era compare <a.f32> <b.f32> [eps]      -> oracle contract: max|d|, rms, divergence
 """
 
 import sys
@@ -17,6 +18,7 @@ import packers
 import carve
 import eras
 import disasm as disasm_mod
+import bufcmp
 
 
 def cmd_detect(args):
@@ -74,8 +76,17 @@ def cmd_disasm(args):
     print(disasm_mod.format_lines(disasm_mod.disasm(data, va, n)))
 
 
+def cmd_compare(args):
+    if len(args) < 2:
+        sys.exit("usage: era compare <a.f32> <b.f32> [eps]")
+    eps = float(args[2]) if len(args) > 2 else 0.0
+    res = bufcmp.compare(args[0], args[1], eps)
+    print(bufcmp.format_report(res))
+    sys.exit(0 if res["match"] else 1)
+
+
 CMDS = {"detect": cmd_detect, "unpack": cmd_unpack, "carve": cmd_carve,
-        "assay": cmd_assay, "disasm": cmd_disasm}
+        "assay": cmd_assay, "disasm": cmd_disasm, "compare": cmd_compare}
 
 
 def main():

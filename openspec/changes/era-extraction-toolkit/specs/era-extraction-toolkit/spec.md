@@ -137,6 +137,10 @@ the per-binary positions, not the read/sink boilerplate.
 - **WHEN** a harness opens a tap bound to an environment variable
 - **THEN** writes to that tap stream to its file only if the variable is set, and are a no-op otherwise
 
+#### Scenario: signal-chain tap-table lifecycle
+- **WHEN** a harness declares a table of channel taps and runs the open/reset/accumulate/dump/close lifecycle
+- **THEN** the scaffold opens each tap prefix-gated, accumulates the per-binary buffers, and dumps mono/stereo frames per chunk — leaving only the accumulate point (where the live buffer feeds each tap) in the harness
+
 ### Requirement: Migration preserves committed contracts
 
 Migrating an existing extraction dir onto the toolkit SHALL preserve every committed

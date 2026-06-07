@@ -81,6 +81,15 @@ This replaces each harness's own `rd32`, scattered `*(float*)(uintptr_t)va` cast
 and `if(getenv("X")){fopen;…fwrite;…}` boilerplate (the `osc`/`flt`/`dist`/`premix`
 signal-chain dumps and the `VTAP`/`RTAP`/`STAP` state probes).
 
+**Signal-chain tap table.** Dumping several DSP points each render chunk is the same
+four steps per tap — open, reset, dump, close — differing only by `{name, mono/stereo,
+accumulator}`; only the *accumulate point* (where the live buffer feeds the
+accumulator) is per-binary, since it sits in the render control flow. Declare a table
+of `oracle_chan_tap` and the lifecycle is one call each: `oracle_taps_open(T, n,
+getenv("PFX"))` (no-op if unset), `oracle_taps_reset` / `oracle_tap_add(&T[i], buf, n)`
+/ `oracle_taps_dump` per chunk, `oracle_taps_close`. This collapses the ~9×
+fopen/memset/fwrite/fclose lines (e.g. in `c1_solo_probe.c`) to a table + four calls.
+
 ## Dependencies
 
 `python-unicorn` (2.1.4) and `python-capstone` (5.0.7) — on Arch: `pacman -S

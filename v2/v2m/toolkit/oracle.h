@@ -176,4 +176,61 @@ static inline void oracle_tap_f32(oracle_tap *t, const float *b, size_t n)    { 
 static inline void oracle_tap_va(oracle_tap *t, uint32_t va, size_t bytes)    { if (t->fp) fwrite((const void *)(uintptr_t)va, 1, bytes, t->fp); }
 static inline void oracle_tap_close(oracle_tap *t)                            { if (t->fp) { fclose(t->fp); t->fp = NULL; } }
 
+// --- signal-chain tap TABLE: the open/reset/dump/close lifecycle ------------
+// Dumping several DSP-chain points each render chunk (osc/flt/dist/chan/premix)
+// is the same four steps per tap -- only the ACCUMULATE point (where the live
+// buffer feeds the accumulator) is per-binary, because that sits in the render
+// control flow. Declare a table of descriptors; the lifecycle is shared:
+//
+//   static float a_osc[320], a_flt[320], a_premix[640];
+//   static oracle_chan_tap T[] = {
+//       { ".osc",    0, a_osc,    NULL },   // 0 = mono, 1 = stereo
+//       { ".flt",    0, a_flt,    NULL },
+//       { ".premix", 1, a_premix, NULL },
+//   };
+//   enum { NT = sizeof T / sizeof T[0] };
+//   oracle_taps_open(T, NT, getenv("C1_VTRACE"));     // once; no-op if env unset
+//   ... per chunk:
+//     oracle_taps_reset(T, NT, n);
+//     ... at the osc point:  oracle_tap_add(&T[0], oracle_buf(VA_OSC), n);
+//     ... at the premix pt:  oracle_tap_add(&T[2], oracle_bufptr(VA_OUTPTR), n);
+//     oracle_taps_dump(T, NT, n);
+//   oracle_taps_close(T, NT);                          // once
+typedef struct {
+    const char *suffix;   // file is "<prefix><suffix>", e.g. ".osc"
+    int         stereo;   // 0 = 1 float/frame, 1 = 2 floats/frame
+    float      *acc;      // accumulator (>= max_frames * (stereo?2:1) floats)
+    FILE       *fp;       // opened by oracle_taps_open iff prefix non-NULL
+} oracle_chan_tap;
+
+static inline size_t oracle__tap_w(const oracle_chan_tap *t) { return t->stereo ? 2 : 1; }
+
+static void oracle_taps_open(oracle_chan_tap *t, int n, const char *prefix) {
+    char p[1024];
+    if (!prefix) return;
+    for (int i = 0; i < n; i++) {
+        snprintf(p, sizeof p, "%s%s", prefix, t[i].suffix);
+        t[i].fp = fopen(p, "wb");
+        if (!t[i].fp) fprintf(stderr, "[oracle] tap: cannot open %s\n", p);
+    }
+}
+static void oracle_taps_reset(oracle_chan_tap *t, int n, size_t frames) {
+    for (int i = 0; i < n; i++)
+        if (t[i].fp) memset(t[i].acc, 0, frames * oracle__tap_w(&t[i]) * sizeof(float));
+}
+// accumulate `frames` worth of `src` into this tap (the per-binary tap point)
+static inline void oracle_tap_add(oracle_chan_tap *t, const float *src, size_t frames) {
+    if (!t->fp) return;
+    size_t k = frames * oracle__tap_w(t);
+    for (size_t i = 0; i < k; i++) t->acc[i] += src[i];
+}
+static void oracle_taps_dump(oracle_chan_tap *t, int n, size_t frames) {
+    for (int i = 0; i < n; i++)
+        if (t[i].fp) fwrite(t[i].acc, sizeof(float) * oracle__tap_w(&t[i]), frames, t[i].fp);
+}
+static void oracle_taps_close(oracle_chan_tap *t, int n) {
+    for (int i = 0; i < n; i++)
+        if (t[i].fp) { fclose(t[i].fp); t[i].fp = NULL; }
+}
+
 #endif // ORACLE_H

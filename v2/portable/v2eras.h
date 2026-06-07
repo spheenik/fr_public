@@ -209,12 +209,24 @@ struct V2DeltaRow {
 //    old in early-v5 fr-022 (render driver @0x40f2ae; reverb has no SRfclinfreq
 //    @0x40ec88) and only flip in late-v5 candytron (reverb SRfclinfreq fmul
 //    @0x41f27d) -- the same BUILD-DATE flip as the trio, so flipsAt 5 is the
-//    proxy and early-v5 fr-022 is the unrepresentable case. PGMCHANGE_V0 is the
-//    exception: it is already NEW in early-v5 fr-022 (no ctl7=127), so it
-//    flipped earlier (v2..v5, by 2002); flipsAt 5 is still correct at every
-//    known point (v0/v1 old, v5 new) but the exact gap flip is unpinned.
-//    All four keep v5 NEW, so the oracle corpus is unchanged (check.py 17/17).
+//    proxy and early-v5 fr-022 is the unrepresentable case. TICK_BEFORE_SET,
+//    SUBFRAME_RENDER, RVB_E_FULLPREC stay flipsAt-5 proxies; the 2026-06-07
+//    era-gap sweep CONFIRMED them (old-core through fr-027 v5 2002-07, new at
+//    fr-028 brullwurfel 2002-09 -- so fr-027 joins fr-022 as an early-v5
+//    old-core unrepresentable case).
+//    PGMCHANGE_V0 is NO LONGER in this group: the sweep PINNED it at v4 (v3
+//    fr014/fr-022party OLD with ctl7=127, v4 fr019 NEW with the same-program
+//    early-out) -> now flipsAt 4 EV_PROVEN, both sides at the one MS2002 party.
+//    These keep v5 NEW, so the oracle corpus is unchanged (check.py 17/17).
 //    Override with Player::open(..., forceBehaviorVersion) when researching.
+//  - era-gap sweep (2026-06-07, v2m/era-gap-sweep + brullwurfel-extraction):
+//    PINNED two more rows that had no period binary before. NO_FM_OSC: oscjtab
+//    mode5 = OFF at v0/v3, fsin FM renderer at v4 (fr019 @0x4282a1) -> flipsAt 4
+//    EV_PROVEN (was the last flipsAt-1 ASSUMED). POLY_16: pool 32 PROVEN at v3
+//    (fr014 @0x410030), not just early-v5 -> tightened from the flipsAt-5 proxy
+//    to flipsAt 3 (the 16->32 growth is v2 or v3; no v2 binary exists, so the
+//    exact flip keeps a 1-version gap and the row stays ASSUMED). The brullwurfel
+//    (fr-028, 2002-09) v5 oracle re-confirmed the whole v5 row set.
 //
 // No EV_ASSUMED row remains at flipsAt 1: every v1..v4 row is now either
 // PROVEN/ANCHORED or a documented flipsAt-5 build-date proxy.
@@ -235,7 +247,14 @@ inline constexpr V2DeltaRow kDeltas[DELTA_COUNT] = {
                                                      // whole v5 image/source
   /* DELTA_CRUSHER_SPLIT_GAIN1*/ { 6, EV_PROVEN   }, // v5 render = two muls
                                                      // @0x41e665; set unfolded
-  /* DELTA_PGMCHANGE_V0       */ { 5, EV_ASSUMED  }, // flybye disasm, see below
+  /* DELTA_PGMCHANGE_V0       */ { 4, EV_PROVEN   }, // PINNED v4 (era-gap sweep):
+                                                     // v3 OLD ctl7=127 (fr014
+                                                     // @0x41045d, fr-022party
+                                                     // @0x41019d), v4 NEW no-
+                                                     // ctl7 same-prog early-out
+                                                     // (fr019 @0x429f00). Both
+                                                     // sides proven at the one
+                                                     // MS2002 party.
   /* DELTA_TICK_BEFORE_SET    */ { 5, EV_ASSUMED  }, // flybye disasm, see below
   /* DELTA_SUBFRAME_RENDER    */ { 5, EV_ASSUMED  }, // flybye disasm, see below
   /* DELTA_NO_VOICE_DCF       */ { 6, EV_PROVEN   }, // no DCF code in v5 at all
@@ -257,27 +276,31 @@ inline constexpr V2DeltaRow kDeltas[DELTA_COUNT] = {
                                                      // hicut; 2004 dropped it
   /* DELTA_RDTSC_SEED         */ { 6, EV_PROVEN   }, // v0 & v5 rdtsc(->0); the
                                                      // fixed seed table is v6
-  /* DELTA_NO_FM_OSC          */ { 1, EV_ASSUMED  }, // absent at v0 (PROVEN:
-                                                     // oscjtab mode5 = off),
-                                                     // present at v5; flip in
-                                                     // v1..v4 unknown
+  /* DELTA_NO_FM_OSC          */ { 4, EV_PROVEN   }, // PINNED v4 (era-gap sweep):
+                                                     // oscjtab mode5 = OFF at
+                                                     // v0/v3 (fr08, fr014, fr-
+                                                     // 022party), = fsin FM
+                                                     // renderer at v4 (fr019
+                                                     // @0x4282a1). Monotonic
+                                                     // (off thru v3) => flybye
+                                                     // v1 also no-FM, consistent
+                                                     // with its bit-exact oracle
   /* DELTA_NO_CHAN_DCF        */ { 6, EV_PROVEN   }, // v5 syChanProcess has no
                                                      // DC filters (source ==
                                                      // binary); dcf1/dcf2 are
                                                      // 2004/v6 additions
-  /* DELTA_POLY_16            */ { 5, EV_ASSUMED  }, // pool 16 PROVEN at v0
-                                                     // (fr08 tick loop cmp
-                                                     // dl,0x10 @0x40b9e4) and
-                                                     // v1 (flybye @0x41000b,
-                                                     // steal scan @0x410393);
-                                                     // already 32 at EARLY-v5
-                                                     // fr-022 (2002-08), so the
-                                                     // 16->32 growth happened
-                                                     // in the v2..v4 gap --
-                                                     // unpinned, flipsAt 5 is
-                                                     // the same proxy as
-                                                     // PGMCHANGE_V0 (correct at
-                                                     // every known point)
+  /* DELTA_POLY_16            */ { 3, EV_ASSUMED  }, // pool 16 PROVEN at v0
+                                                     // (fr08 @0x40b9e4) + v1
+                                                     // (flybye @0x41000b, steal
+                                                     // @0x410393); pool 32
+                                                     // PROVEN at v3 (fr014
+                                                     // @0x410030, era-gap sweep)
+                                                     // -- much earlier than the
+                                                     // old flipsAt-5 proxy. Flip
+                                                     // is v2 or v3 (no v2 binary
+                                                     // exists); set to 3, v2
+                                                     // unobserved. Stays ASSUMED
+                                                     // for that 1-version gap.
   /* DELTA_POLY_32            */ { 6, EV_PROVEN   }, // pool 32 at BOTH v5
                                                      // binaries (fr-022 cmp
                                                      // dl,0x20 @0x40f322,

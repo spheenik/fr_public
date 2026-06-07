@@ -99,9 +99,21 @@ deferred until/unless early-v5 files enter the corpus.
 **Done since:** the flybye render-harness oracle was built
 (`c1_flybye_harness.c`) and the v1 claim is now **bit-exact, whole song**
 (rel-RMS 4.0e-5, max|d| 1.5e-4, zero samples >1e-3) after the voice-pool fix.
-**To close the rest (optional):** v3 and v2 still have no period engine
-(fr-022 turned out v5, not the hoped-for v3), so the in-gap flips
-(including the 16→32 pool growth) stay proxied at flipsAt 5.
+
+**Update 2026-06-07 (era-gap sweep — `../v2m/era-gap-sweep-results` in memory,
++ `../v2m/brullwurfel-extraction/`):** 11 more period binaries unpacked/assayed,
+giving the FIRST v3 and v4 engines. Three rows moved off the flipsAt-5 proxy:
+- `DELTA_PGMCHANGE_V0` → **flipsAt 4 EV_PROVEN** (v3 fr014/fr-022party OLD
+  ctl7=127; v4 fr019 NEW same-prog early-out — both sides at the MS2002 party).
+- `DELTA_NO_FM_OSC` → **flipsAt 4 EV_PROVEN** (oscjtab mode5 OFF thru v3, fsin
+  FM at v4 fr019 @0x4282a1; was the last flipsAt-1 ASSUMED).
+- `DELTA_POLY_16` → **flipsAt 3** (pool 32 PROVEN at v3 fr014 @0x410030; the
+  16→32 growth is v2-or-v3, no v2 binary, so still ASSUMED for that 1-version gap).
+The osc trio + TICK/SUBFRAME/RVB_E STAY flipsAt-5 proxies but the sweep
+confirmed their build-date flip is the one month **2002-08→09** (old-core thru
+fr-027 v5 2002-07, new at fr-028 brullwurfel 2002-09; fr-027 joins fr-022 as an
+early-v5 old-core unrepresentable case). check.py still 17/17 (these gates are
+no-ops on the v0+v6 corpus).
 
 ## 4. v1–v4 originals: structural-only validation (no oracle)
 
@@ -125,12 +137,15 @@ chunk-invariance only proves the renderer is deterministic; it does NOT prove
 the v1–v4 era *behavior* is correct (a renderer that wrongly played everything
 at v6 would pass the same test). **v1 is now oracle-proven** (flybye, §3):
 the embedded tpinv2 (byte-identical to the repo `tpinv2.v2m`) renders
-whole-song bit-exact against the 2001 binary itself. **v2/v3/v4 still have
-no period engine** (fr-022 is v5), so their era-fidelity remains unprovable
-for now — those files stay liveness-only until a v2/v3/v4 binary surfaces.
-Note kkrieger6's *native-v5* render changed with the era voice pool (it
-saturates 32 voices at 102.47 s; josie never does) — evidence-backed but
-oracle-less, since no period engine that plays kkrieger6 exists.
+whole-song bit-exact against the 2001 binary itself.
+
+**Update 2026-06-07:** the era-gap sweep surfaced **v3 (fr014, fr-022party) and
+v4 (fr019) period engines** (assayed, §3), and the brullwurfel (fr-028, v5)
+**render oracle** is built (`../v2m/brullwurfel-extraction/c3_oracle.c`). So v3/v4
+are no longer binary-less, and v5 has a second proven render anchor besides
+candytron. v3/v4 still lack a *render* oracle (assay-only), and **v2 still has no
+binary at all** — those remain liveness-only. kkrieger6's native-v5 pool note
+stands (saturates 32 voices at 102.47 s; josie never does).
 
 ## 5. CC1 mod-dest remap re-audit (low priority)
 
@@ -144,6 +159,33 @@ The hash contract is implemented and `baselines.sha256` is checked in, but
 the equal-bits-on-a-second-host check has only been run on x86_64 this
 session. Re-run `test/check.py` on one other arch (e.g. aarch64) and record
 the result to close 8.2.
+
+## 7. Portable v5 vs the brullwurfel v5 oracle (~0.148 residual)
+
+The brullwurfel (fr-028, 2002-09) render oracle is built and validated
+(`../v2m/brullwurfel-extraction/c3_oracle.c` + NOTES). Rendering song1 (= the
+fr08 ".the .product" song re-exported to v5) through brullwurfel's OWN synth vs
+the portable v5 path (same v2m, 60 s):
+
+- envelope correlation **0.9994**, **identical peak** — structurally validated;
+- but a **sample-level residual rms-diff/rms ≈ 0.148** remains (the portable v5
+  render is not bit-exact against this binary).
+
+This is NOT the closed josie ε (§1, ~0.009): it's ~16×larger. The likely cause
+is that **brullwurfel is the EARLIEST modern-core build (2002-09)** while the
+portable's v5 reference is the later **candytron (2003-08)** — there may be a v5
+*sub-era* DSP delta (within the modern core, between Sep-2002 and Aug-2003) that
+the ledger doesn't yet model. Candytron itself is bit-exact-ish vs the portable
+(the josie ε), so the residual is specific to the early-modern-core build.
+
+**To localize (next):** TAP the per-voice signal chain with the toolkit
+`oracle.h`/`oracle_chan_tap` (osc out / flt out / dist out / premix) on a single
+solo'd channel, brullwurfel-c3 vs portable, and bisect which DSP stage diverges
+— same playbook as the fr08/candytron channel-solo hunts. Decide afterward
+whether it warrants a new era row or stays a documented early-v5 ε.
+
+NOTE: the brullwurfel unpacked image + carved song1 live in scratch (re-unpack
+`~/downloads/fr-028.zip` via `../v2m/toolkit/era`; song1 is carve index 1).
 
 ---
 

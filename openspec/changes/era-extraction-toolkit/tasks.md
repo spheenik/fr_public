@@ -35,12 +35,13 @@
 
 ## 4. Migrate fr08 (harness lives in v2/validate/)
 
-- [ ] 4.1 Repoint fr08-extraction unpack/carve/assay/disasm to the toolkit; delete forks (note: `findv2m`, `findv2m2`, `findv2m3` all removed)
-- [ ] 4.2 Verify unpack → byte-compare to the captured fr08 `unpacked.bin`
-- [ ] 4.3 Verify carve → byte-identical to committed `fr08.v2m`
-- [ ] 4.4 Refit `v2/validate/c1_fr08_harness.c` onto `oracle.h`; recompile
-- [ ] 4.5 Verify re-render → `max|d| = 0` vs the committed fr08 663 s reference `.f32`
-- [ ] 4.6 Commit fr08 migration
+- [x] 4.1 Repoint fr08-extraction unpack/carve/assay/disasm to the toolkit; delete forks (`findv2m`, `findv2m2`, `findv2m3`, `aplib.py`, `constscan.py`, `disasm.py`, `unpack.py` all removed)
+- [x] 4.2 Verify unpack → byte-compare to the captured fr08 `unpacked.bin`
+- [x] 4.3 Verify carve → byte-identical to committed `fr08.v2m`
+- [x] 4.4 Refit `v2/validate/c1_fr08_harness.c` onto `oracle.h`; recompile
+- [x] 4.5 Verify re-render → `max|d| = 0` vs the committed fr08 663 s reference `.f32`
+- [x] 4.6 Commit fr08 migration
+- [ ] 4.7 Retrofit `c1_solo_probe.c` signal-chain taps onto the `oracle_chan_tap` table; verify tap outputs byte-identical (taps ON)
 
 ## 5. Close-out
 

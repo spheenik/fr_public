@@ -10,13 +10,14 @@ actual shipping demo, **fr-08: .the .product, final version 1.01**
 1. `dumpmem.sh` — runs the demo under `xvfb-run wine`, polls `/proc/<pid>/maps`
    for the committed image around `0x400000`, and dumps the process memory
    (the exe is packed; the live image is the depacked program + data).
-2. `aplib.py` / `unpack.py` / `loose.py` / `brute_start.py` — aPLib depacker
-   and helpers for carving the packed sections offline.
-3. `findv2m.py` / `findv2m2.py` / `findv2m3.py` — structural V2M scanners:
-   V2M has no magic, so they walk candidate offsets validating the header
-   shape (timediv/maxtime/gdnum ranges, 16 channel stream sizes summing
-   consistently — see `try_parse` in findv2m3.py).
-4. `dump2.py`..`dump5.py` / `disasm.py` — iteration helpers used along the way.
+2. `../toolkit/era unpack` (aPLib depacker, formerly `aplib.py`/`unpack.py`) plus
+   `loose.py` / `brute_start.py` — helpers for carving the packed sections offline.
+3. `../toolkit/era carve` (the structural V2M scanner, formerly `findv2m{,2,3}.py`):
+   V2M has no magic, so it walks candidate offsets validating the header shape
+   (timediv/maxtime/gdnum ranges, 16 channel stream sizes summing consistently —
+   the canonical `try_parse` now lives in `../toolkit/carve.py`).
+4. `dump2.py`..`dump5.py` — iteration helpers used along the way;
+   `../toolkit/era disasm` for disassembly (formerly `disasm.py`).
 
 Intermediate artifacts (wine memory dumps, depacked images, rendered wavs)
 are reproducible via the scripts and are not committed.
@@ -28,8 +29,8 @@ are reproducible via the scripts and are not committed.
 depacked image, and `/tmp/fr08/fr08_objdump.txt` = an `objdump -D -b binary -m
 i386 -M intel` of the synth window):
 
-- `constscan.py` — extract 2004 `synth.asm` float constants, scan the image for
-  their bit patterns (locates the constant pool; flags 2004-only constants).
+- `../toolkit/era assay` (era-delta const/opcode scan, formerly `constscan.py`) —
+  scans the image for the constant/opcode bit patterns that distinguish the cores.
 - `refscan.py` — find code xrefs to specific pool constants.
 - `fnmap.py` — segment the synth code into functions (at call targets) and
   fingerprint each by referenced pool constants + called subroutines.

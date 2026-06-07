@@ -28,32 +28,14 @@
 //     cursors + tempo and calls synthInit(patch @[0x592df8]) (0x40b872) and
 //     synthSetGlobals([0x592dfc]) (0x40be53).
 
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
 #include <stdint.h>
-#include <sys/mman.h>
-#define __USE_GNU 1
-#include <signal.h>
-#include <ucontext.h>
-#include <unistd.h>
-
-static void segv(int sig, siginfo_t *si, void *uc_)
-{
-    ucontext_t *uc = (ucontext_t *)uc_;
-    unsigned eip = uc->uc_mcontext.gregs[REG_EIP];
-    unsigned esp = uc->uc_mcontext.gregs[REG_ESP];
-    unsigned ecx = uc->uc_mcontext.gregs[REG_ECX];
-    unsigned esi = uc->uc_mcontext.gregs[REG_ESI];
-    unsigned edi = uc->uc_mcontext.gregs[REG_EDI];
-    fprintf(stderr, "[c1] SIGSEGV fault_addr=%p eip=0x%08x esp=0x%08x "
-            "ecx=0x%08x esi=0x%08x edi=0x%08x\n",
-            si->si_addr, eip, esp, ecx, esi, edi);
-    _exit(42);
-}
 
 #define IMG_BASE  0x400000u
 #define IMG_SIZE  0x32b000u   // unpacked.bin is exactly 811 pages
+
+// shared native oracle scaffold (mmap@0x400000 + fault reporter + rdtsc-pin + f32)
+#define ORACLE_IMG_SIZE IMG_SIZE
+#include "../v2m/toolkit/oracle.h"
 
 // Addresses discovered by static analysis (fr08-extraction/DELTA.md):
 #define VA_V2M_DATA   0x415637u  // the in-image original v0 fr08.v2m
@@ -90,41 +72,15 @@ static const uint32_t RDTSC_SITES[] = { 0x40a494u, 0x40a93eu, 0x40aa6cu };
 typedef void (*play_fn)(void);
 typedef void (__attribute__((stdcall)) *render_fn)(float *buf, uint32_t n);
 
-static uint32_t rd32(uint32_t va) { return *(volatile uint32_t *)(uintptr_t)va; }
+#define rd32(va) oracle_u32(va)
 
 int main(int argc, char **argv)
 {
     const char *path = (argc > 1) ? argv[1] : "/tmp/fr08/unpacked.bin";
 
-    struct sigaction sa; memset(&sa, 0, sizeof sa);
-    sa.sa_sigaction = segv; sa.sa_flags = SA_SIGINFO;
-    sigaction(SIGSEGV, &sa, NULL);
-
-    // 1) map a fixed RWX region at the image's native base
-    void *p = mmap((void *)(uintptr_t)IMG_BASE, IMG_SIZE,
-                   PROT_READ | PROT_WRITE | PROT_EXEC,
-                   MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
-    if (p != (void *)(uintptr_t)IMG_BASE) {
-        fprintf(stderr, "mmap @0x%x failed (got %p) -- 0x400000 not free?\n",
-                IMG_BASE, p);
-        return 1;
-    }
-
-    // 2) load the depacked image into it
-    FILE *f = fopen(path, "rb");
-    if (!f) { fprintf(stderr, "cannot open %s\n", path); return 1; }
-    size_t n = fread((void *)(uintptr_t)IMG_BASE, 1, IMG_SIZE, f);
-    fclose(f);
-    fprintf(stderr, "[c1] loaded %zu bytes at 0x%x\n", n, IMG_BASE);
-    if (n < IMG_SIZE) fprintf(stderr, "[c1] WARNING: short read\n");
-
-    // 3) pin rdtsc -> fixed seed 0 (0f 31 -> 31 c0)
-    for (unsigned i = 0; i < sizeof(RDTSC_SITES)/sizeof(RDTSC_SITES[0]); i++) {
-        uint8_t *s = (uint8_t *)(uintptr_t)RDTSC_SITES[i];
-        if (s[0] == 0x0f && s[1] == 0x31) { s[0] = 0x31; s[1] = 0xc0; }
-        else fprintf(stderr, "[c1] WARN: no rdtsc at 0x%x (%02x %02x)\n",
-                     RDTSC_SITES[i], s[0], s[1]);
-    }
+    oracle_install_faults();
+    oracle_map_image(path, IMG_SIZE);
+    oracle_pin_rdtsc(RDTSC_SITES, sizeof(RDTSC_SITES) / sizeof(RDTSC_SITES[0]));
     fprintf(stderr, "[c1] rdtsc sites patched -> deterministic seed 0\n");
 
     // 3b) skip RONAN (speech) init -- nop both pushes + the call, keeping the

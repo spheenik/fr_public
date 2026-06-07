@@ -125,4 +125,55 @@ static int oracle_write_f32(const char *path, const float *buf, size_t frames)
 #define ORACLE_F32_OPEN(path)            fopen((path), "wb")
 #define ORACLE_F32_CHUNK(o, buf, frames) fwrite((buf), 2 * sizeof(float), (frames), (o))
 
+// ===========================================================================
+// Tapping the loaded oracle: read live data at chosen positions in the running
+// mapped image and stream it out. The POSITIONS (VAs, field offsets, which
+// signal-chain buffer) are per-binary; these helpers are the shared mechanism,
+// replacing each harness's own `rd32`, scattered `*(float*)(uintptr_t)va` casts,
+// and `if(getenv("X")){fopen;...fwrite;...}` boilerplate.
+//
+// Example -- tap channel 7's oscillator buffer each render chunk:
+//   oracle_tap osc = oracle_tap_open("C1_OSC", "/tmp/ch7.osc");
+//   ... per chunk: oracle_tap_f32(&osc, oracle_buf(VA_OSCBUF), n);
+//   oracle_tap_close(&osc);
+// Example -- a scalar state probe via a workspace pointer (the RTAP idiom):
+//   float voicing = oracle_field_f32(0x6a88f8u, 0x54);  // *(ws)+0x54
+// ---------------------------------------------------------------------------
+
+// --- typed live reads of the running image at a virtual address -------------
+static inline uint32_t oracle_u32(uint32_t va) { return *(volatile uint32_t *)(uintptr_t)va; }
+static inline int32_t  oracle_i32(uint32_t va) { return *(volatile int32_t  *)(uintptr_t)va; }
+static inline float    oracle_f32_at(uint32_t va) { return *(volatile float *)(uintptr_t)va; }
+static inline void    *oracle_ptr(uint32_t va) { return (void *)(uintptr_t)oracle_u32(va); }
+// a float buffer located AT va, vs one POINTED-TO BY the slot at va:
+static inline const float *oracle_buf(uint32_t va)    { return (const float *)(uintptr_t)va; }
+static inline const float *oracle_bufptr(uint32_t va) { return *(const float *const *)(uintptr_t)va; }
+// pointer-indirect field read: dereference the slot at base_va, then read off it.
+// Returns 0 if the workspace pointer is null (uninitialized) -- matches the taps'
+// `if(ws){ ... }` guards.
+static inline uint32_t oracle_field_u32(uint32_t base_va, uint32_t off) {
+    uint32_t p = oracle_u32(base_va);
+    return p ? *(volatile uint32_t *)(uintptr_t)(p + off) : 0u;
+}
+static inline float oracle_field_f32(uint32_t base_va, uint32_t off) {
+    uint32_t p = oracle_u32(base_va);
+    return p ? *(volatile float *)(uintptr_t)(p + off) : 0.0f;
+}
+
+// --- env-gated tap sink: a no-op unless its env var is set ------------------
+typedef struct { FILE *fp; } oracle_tap;
+
+static oracle_tap oracle_tap_open(const char *env_var, const char *path) {
+    oracle_tap t;
+    t.fp = getenv(env_var) ? fopen(path, "wb") : NULL;
+    if (getenv(env_var) && !t.fp)
+        fprintf(stderr, "[oracle] tap %s: cannot open %s\n", env_var, path);
+    return t;
+}
+static inline int  oracle_tap_on(const oracle_tap *t)                         { return t->fp != NULL; }
+static inline void oracle_tap_bytes(oracle_tap *t, const void *p, size_t n)   { if (t->fp) fwrite(p, 1, n, t->fp); }
+static inline void oracle_tap_f32(oracle_tap *t, const float *b, size_t n)    { if (t->fp) fwrite(b, sizeof(float), n, t->fp); }
+static inline void oracle_tap_va(oracle_tap *t, uint32_t va, size_t bytes)    { if (t->fp) fwrite((const void *)(uintptr_t)va, 1, bytes, t->fp); }
+static inline void oracle_tap_close(oracle_tap *t)                            { if (t->fp) { fclose(t->fp); t->fp = NULL; } }
+
 #endif // ORACLE_H

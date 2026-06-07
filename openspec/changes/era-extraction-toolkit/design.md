@@ -89,8 +89,15 @@ single import surface for the sweep.
 ### D3 — Share only the oracle *scaffold*, keep driving glue per-binary
 `oracle.h` provides the common C scaffold as small inline helpers/macros:
 `oracle_map_image(base,size)`, the SIGSEGV/SIGBUS/SIGILL reporter, an rdtsc
-seed-pinning helper (patch `0f31`→`31c0` at given VAs), and an f32 stereo writer.
-Per-binary config = `{IMG_BASE, IMG_SIZE, entry/init/render VAs, rdtsc sites}`.
+seed-pinning helper (patch `0f31`→`31c0` at given VAs), an f32 stereo writer, and the
+**oracle-tap facility** — typed live reads at chosen VAs (`oracle_u32`/`_f32_at`/
+`oracle_buf`/`oracle_field_f32` for pointer-indirect workspace reads) plus env-gated
+tap sinks (`oracle_tap_open/_f32/_va/_close`). The tap *positions* (VAs, field
+offsets, which signal-chain buffer) are per-binary; the read/sink mechanism is
+shared, replacing each harness's `rd32`, scattered casts, and
+`if(getenv){fopen;fwrite}` boilerplate (the `osc`/`flt`/`dist`/`premix` dumps and the
+`VTAP`/`RTAP`/`STAP` probes). Per-binary config = `{IMG_BASE, IMG_SIZE,
+entry/init/render VAs, rdtsc sites}`.
 The harness keeps its own `main()` and its own driving strategy (in-image player
 *or* ported player). *Alternative:* a fully generic oracle driver parameterized by
 ABI — rejected as premature; the flybye/candytron split shows the driving layer

@@ -10,6 +10,7 @@
 - [x] 1.8 `oracle.h`: shared C scaffold — `oracle_map_image`, fault reporter, rdtsc seed-pin helper, f32 stereo writer; per-binary VAs/sites/driving stay in the harness
 - [x] 1.9 Commit the toolkit (inert until imported)
 - [x] 1.10 `bufcmp.py` + `era compare`: numpy-accelerated oracle-contract primitive (max|d|/rms/divergence), superseding inline diffs and the pure-Python `v2/validate/compare.py`
+- [x] 1.11 `oracle.h` tap facility: typed live reads (`oracle_u32`/`_f32_at`/`oracle_buf`/`oracle_field_*`) + env-gated tap sinks (`oracle_tap_*`) for tapping a loaded oracle at chosen positions; replaces per-harness `rd32`/casts/`getenv`+`fwrite` boilerplate
 
 ## 2. Migrate flybye end-to-end (cleanest; in-image player)
 

@@ -118,6 +118,21 @@ driving strategy (in-image player vs ported player) and synth ABI in bespoke glu
 - **WHEN** a harness drives the binary
 - **THEN** the entry/init/render VAs, rdtsc sites, and player-driving strategy are supplied by that harness, not fixed by the scaffold
 
+### Requirement: Oracle tapping
+
+The scaffold SHALL provide the shared mechanism for tapping a loaded oracle —
+reading live typed data at chosen virtual addresses (including pointer-indirect
+field reads) and streaming it to env-gated tap sinks — so a harness expresses only
+the per-binary positions, not the read/sink boilerplate.
+
+#### Scenario: typed live read at a position
+- **WHEN** a harness reads a value at a virtual address in the mapped image (directly or via a workspace pointer)
+- **THEN** the scaffold returns the typed value (u32/i32/f32/buffer pointer), yielding 0 for a null workspace pointer
+
+#### Scenario: env-gated tap sink
+- **WHEN** a harness opens a tap bound to an environment variable
+- **THEN** writes to that tap stream to its file only if the variable is set, and are a no-op otherwise
+
 ### Requirement: Migration preserves committed contracts
 
 Migrating an existing extraction dir onto the toolkit SHALL preserve every committed

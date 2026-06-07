@@ -53,6 +53,22 @@ A harness `#include "oracle.h"`, supplies its own `{IMG_SIZE, entry/init/render 
 rdtsc sites}` and driving strategy (in-image player or ported player), and gets the
 common scaffold helpers. Build: `gcc -m32 -no-pie -O0 harness.c -o harness`.
 
+**Tapping a loaded oracle.** `oracle.h` also provides the shared mechanism for
+pulling intermediate data out of the *running* image at chosen positions — the
+per-binary VAs/offsets stay in the harness, the read/sink plumbing is shared:
+
+- typed live reads: `oracle_u32(va)` / `oracle_i32` / `oracle_f32_at` / `oracle_ptr`,
+  buffer pointers `oracle_buf(va)` (buffer *at* va) and `oracle_bufptr(va)` (buffer
+  *pointed to by* va), and pointer-indirect field reads `oracle_field_u32(base, off)`
+  / `oracle_field_f32` (deref a workspace pointer, then read a field; 0 if null).
+- env-gated tap sinks: `oracle_tap t = oracle_tap_open("C1_OSC", "ch7.osc")` is a
+  no-op unless `C1_OSC` is set; then `oracle_tap_f32(&t, oracle_buf(VA), n)` /
+  `oracle_tap_va(&t, VA, bytes)` / `oracle_tap_bytes` stream to it; `oracle_tap_close`.
+
+This replaces each harness's own `rd32`, scattered `*(float*)(uintptr_t)va` casts,
+and `if(getenv("X")){fopen;…fwrite;…}` boilerplate (the `osc`/`flt`/`dist`/`premix`
+signal-chain dumps and the `VTAP`/`RTAP`/`STAP` state probes).
+
 ## Dependencies
 
 `python-unicorn` (2.1.4) and `python-capstone` (5.0.7) — on Arch: `pacman -S

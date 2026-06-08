@@ -2272,6 +2272,14 @@ struct V2Voice
     for (sInt i=0; i < syVV2::NOSC; i++)
       osc[i].render(voice, nsamples);
     VCETAP_SNAP(osc, voice, nsamples);
+#ifndef NDEBUG
+    { static int osh=0; if (getenv("V2_OSCONSET") && osh<2) {
+        int any=0; for (sInt k=0;k<16 && k<nsamples;k++) if (voice[k]!=0.0f) any=1;
+        if (any) { osh++;
+          fprintf(stderr,"[oscbuf] first16:");
+          for (sInt k=0;k<16 && k<nsamples;k++) fprintf(stderr," %.5f", voice[k]);
+          fprintf(stderr,"\n"); } } }
+#endif
 
     // voice buffer -> filters -> voice buffer
     switch (fmode)
@@ -2859,6 +2867,11 @@ struct V2Comp
     attack = v2_exp2(-para->attack * 12.0f / 128.0f);
     // release: 5ms .. 5s
     release = v2_exp2(-para->release * 16.0f / 128.0f);
+#ifndef NDEBUG
+    if (getenv("V2_COMPDUMP"))
+      fprintf(stderr, "[comp] mode=%.0f stereo=%.0f thresh=%.0f ratio=%.0f attack=%.0f release=%.0f outgain=%.0f autogain=%.0f -> invol=%.4f outvol=%.4f\n",
+              para->mode, para->stereo, para->threshold, para->ratio, para->attack, para->release, para->outgain, para->autogain, invol, outvol);
+#endif
   }
 
   void render(StereoSample *buf, sInt nsamples)
@@ -3175,7 +3188,21 @@ struct syVChan
   syVComp comp;
 };
 
+#ifndef NDEBUG
+// dev-only: per-channel-FX-stage peak (V2_MIXTAP set), localizes a channel-chain
+// divergence (dcf1/comp/boost/dist/chorus) under a channel solo.
+static inline void chtap_snap(const char *stage, const StereoSample *chan, sInt n)
+{
+  static int on = -1; if (on < 0) on = getenv("V2_MIXTAP") ? 1 : 0;
+  if (!on) return;
+  sF32 mx = 0.0f;
+  for (sInt i=0; i<n; i++) { sF32 a=fabsf(chan[i].l), b=fabsf(chan[i].r); if(a>mx)mx=a; if(b>mx)mx=b; }
+  if (mx > 0.5f) fprintf(stderr, "[ch] %-6s %.5f\n", stage, mx);
+}
+#define CHTAP_SNAP(stage, chan, n) chtap_snap(#stage, chan, n)
+#else
 #define CHTAP_SNAP(stage, chan, n) ((void)0)
+#endif
 
 struct V2Chan
 {
@@ -3265,6 +3292,9 @@ struct V2Chan
         CHTAP_SNAP(dcf1, chan, nsamples);
         DEBUG_PLOT_STEREO(&dcf1, chan, nsamples);
       }
+#ifndef NDEBUG
+      if (!getenv("V2_NOCOMP"))
+#endif
       comp.render(chan, nsamples);
       CHTAP_SNAP(comp, chan, nsamples);
       boost.render(chan, nsamples);
@@ -3275,6 +3305,9 @@ struct V2Chan
       dist.renderStereo(chan, chan, nsamples);
       CHTAP_SNAP(dist, chan, nsamples);
       if (!nochain && !nodcf) { dcf2.renderStereo(chan, chan, nsamples); CHTAP_SNAP(dcf2, chan, nsamples); }
+#ifndef NDEBUG
+      if (!getenv("V2_NOCHORUS"))
+#endif
       chorus.renderChan(chan, nsamples);
       CHTAP_SNAP(chorus, chan, nsamples);
     }
@@ -3399,7 +3432,25 @@ struct V2ChanInfo
 // V2Synth holds a V2Instance.
 // In the original code these are one and the same struct (SYN) but that
 // would turn out fairly awkward in this C++ version, hence the split.
+#ifndef NDEBUG
+// dev-only: per-master-stage peak (V2_MIXTAP set). Tracks the running max of a
+// stereo mix buffer at each global-FX boundary (premix/reverb/delay/dcf/lchc/
+// compr) so a channel solo localizes a master-stage divergence vs an oracle.
+static inline void mixtap_snap(const char *stage, const StereoSample *mix, sInt n)
+{
+  static int on = -1; if (on < 0) on = getenv("V2_MIXTAP") ? 1 : 0;
+  if (!on) return;
+  sF32 mx = 0.0f;
+  for (sInt i=0; i<n; i++) {
+    sF32 a = fabsf(mix[i].l), b = fabsf(mix[i].r);
+    if (a>mx) mx=a; if (b>mx) mx=b;
+  }
+  if (mx > 0.0f) fprintf(stderr, "[mix] %-7s %.5f\n", stage, mx);
+}
+#define MIXTAP_SNAP(stage, mix, n) mixtap_snap(#stage, mix, n)
+#else
 #define MIXTAP_SNAP(stage, mix, n) ((void)0)
+#endif
 
 struct V2Synth
 {
@@ -4228,6 +4279,13 @@ private:
 
         voicesw[voice].render(instance.chanbuf, nsamples);
       }
+#ifndef NDEBUG
+      if (getenv("V2_MIXTAP")) {
+        sF32 mx=0.0f; for (sInt i=0;i<nsamples;i++){ sF32 a=fabsf(instance.chanbuf[i].l),b=fabsf(instance.chanbuf[i].r); if(a>mx)mx=a; if(b>mx)mx=b; }
+        sInt nv=0; for (sInt v=0; v<POLY; v++) if (chanmap[v]==chan) nv++;
+        if (mx>0.5f) fprintf(stderr,"[chan%d] voicesum=%.5f nvoices=%d\n", chan, mx, nv);
+      }
+#endif
 
       // channel 15 -> Ronan
       if (chan == CHANS-1)

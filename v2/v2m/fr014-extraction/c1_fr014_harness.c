@@ -111,6 +111,34 @@ int main(int argc, char **argv)
         fprintf(stderr, "\n[c1014] soloed ch%d\n", solo);
     }
 
+    // FR014_STAGE: isolate the voice chain to measure per-stage output in the
+    // voice buffer 0x509730. NOP the 5-byte `call` at the stage boundaries
+    // (serial routing: vcf0@0x40efcc, vcf1@0x40f020, dist@0x40f03b).
+    //   STAGE=osc -> NOP vcf0,vcf1,dist (buffer = osc sum)
+    //   STAGE=flt -> NOP dist           (buffer = post-filter)
+    {
+        const char *st = getenv("FR014_STAGE");
+        if (st) {
+            uint8_t *vcf0 = (uint8_t *)0x40efccu, *vcf1 = (uint8_t *)0x40f020u, *dst = (uint8_t *)0x40f03bu;
+            int nop_dist = 1, nop_flt = (strcmp(st,"osc")==0);
+            if (nop_dist && dst[0]==0xe8) { memset(dst,0x90,5); fprintf(stderr,"[c1014] NOP dist\n"); }
+            if (nop_flt) {
+                if (vcf0[0]==0xe8){ memset(vcf0,0x90,5); fprintf(stderr,"[c1014] NOP vcf0\n"); }
+                if (vcf1[0]==0xe8){ memset(vcf1,0x90,5); fprintf(stderr,"[c1014] NOP vcf1\n"); }
+            }
+        }
+    }
+
+    // FR014_NOISERAW: bypass the noise resonator so the buffer = raw noise n*gain
+    // (NOP the recurrence math 0x40e81a..0x40e835; stack stays balanced: n stays
+    // in st0 -> 0x40e836 fmul gain -> output). Directly measures the noise input
+    // range fed to the resonator.
+    if (getenv("FR014_NOISERAW")) {
+        uint8_t *p = (uint8_t *)0x40e81au; size_t n = 0x40e836u - 0x40e81au;
+        memset(p, 0x90, n);
+        fprintf(stderr, "[c1014] noise resonator NOP'd (raw noise mode, %zu bytes)\n", n);
+    }
+
     // PlayV2M() -- void; esp-guarded for safety
     __asm__ volatile (
         "movl %%esp, %0\n\t"
@@ -134,9 +162,53 @@ int main(int argc, char **argv)
     uint64_t dumpvox_at = dvenv ? (uint64_t)(atof(dvenv) * SAMPLE_RATE) : ~0ull;
     int dumpvox_done = 0;
 
+    // FR014_BUFPEAK: track the running max of the voice buffer 0x509730 (for v3
+    // this holds the post-bitcrusher voice signal after each sub-render, since
+    // there is no per-voice DCF). Use with chunk=128 to sample every sub-frame.
+    const int bufpeak_on = getenv("FR014_BUFPEAK") ? 1 : 0;
+    float bufpeak = 0.0f; double bufpeak_t = 0.0;
+    float chanpeak = 0.0f; double chanpeak_t = 0.0;  // pre-master channel mix 0x509b30
     uint64_t total = 0, tail_left = ~0ull, next_log = 0;
     while (total < max_smp) {
         render(buf, chunk);
+        if (bufpeak_on) {
+            const volatile float *vb = (const volatile float *)(uintptr_t)0x509730u;
+            for (int k = 0; k < 256; k++) {
+                float a = vb[k] < 0 ? -vb[k] : vb[k];
+                if (a > bufpeak && a < 1e4f) { bufpeak = a; bufpeak_t = (double)total / SAMPLE_RATE; }
+            }
+            const volatile float *cb = (const volatile float *)(uintptr_t)0x509b30u;
+            for (int k = 0; k < 256; k++) {
+                float a = cb[k] < 0 ? -cb[k] : cb[k];
+                if (a > chanpeak && a < 1e4f) { chanpeak = a; chanpeak_t = (double)total / SAMPLE_RATE; }
+            }
+            // one-shot: print first 16 buffer samples once any are nonzero (onset)
+            static int shown_onset = 0;
+            if (!shown_onset) {
+                int any = 0; for (int k=0;k<16;k++) if (vb[k]!=0.0f) any=1;
+                if (any) { shown_onset = 1;
+                    fprintf(stderr, "[c1014] onset buf @%.3fs:", (double)total/SAMPLE_RATE);
+                    for (int k=0;k<24;k++) fprintf(stderr, " %.7f", vb[k]);
+                    fprintf(stderr, "\n");
+                    // osc0 coeffs of the voice on slot used (scan voices for active noise)
+                    for (int v=0; v<32; v++) {
+                        uint32_t ob = 0x50c184u + (uint32_t)v*0x210u + 0x30u;
+                        float f=*(volatile float*)(uintptr_t)(ob+0x14u);
+                        float r=*(volatile float*)(uintptr_t)(ob+0x18u);
+                        float g=*(volatile float*)(uintptr_t)(ob+0x20u);
+                        float s1=*(volatile float*)(uintptr_t)(ob+0x30u);
+                        float s2=*(volatile float*)(uintptr_t)(ob+0x2cu);
+                        uint32_t sd=*(volatile uint32_t*)(uintptr_t)(ob+0x1cu);
+                        if (f!=0.0f) {
+                            fprintf(stderr,"   v%d osc0 nffrq=%.6f nfres=%.6f gain=%.6f st1=%.4f st2=%.4f seed=%u\n",v,f,r,g,s1,s2,sd);
+                            // step the LCG from this seed to show the next n values
+                            uint32_t s=sd; fprintf(stderr,"     n[]:");
+                            for(int q=0;q<6;q++){ s=s*214013u+2531011u; uint32_t bits=((s&0xffff)<<7)|0x40000000u; float nf; memcpy(&nf,&bits,4); fprintf(stderr," %.4f", nf-3.0f);} fprintf(stderr,"\n");
+                        }
+                    }
+                }
+            }
+        }
         if (fwrite(buf, 2 * sizeof(float), chunk, out) != chunk) {
             fprintf(stderr, "short write\n"); return 1; }
         total += chunk;
@@ -144,6 +216,21 @@ int main(int argc, char **argv)
             dumpvox_done = 1;
             fprintf(stderr, "\n[c1014] voice-workspace dump @%.2fs:\n",
                     (double)total / SAMPLE_RATE);
+            // per-voice param FLOAT array (storeV2Values writes 0x39 floats to
+            // 0x50a504 + v*0xe4; idx37 = Amp-EG "Amplify" at +0x94). Print it for
+            // any voice with active noise oscs so we see the binary's post-mod
+            // gain (curvol source) without guessing voice-workspace offsets.
+            for (int v = 0; v < 32; v++) {
+                uint32_t pb = 0x50a504u + (uint32_t)v * 0xe4u;
+                float ampl = *(volatile float *)(uintptr_t)(pb + 37u*4u);
+                float aenv_ar = *(volatile float *)(uintptr_t)(pb + 32u*4u);
+                float aenv_dr = *(volatile float *)(uintptr_t)(pb + 33u*4u);
+                float aenv_sl = *(volatile float *)(uintptr_t)(pb + 34u*4u);
+                float f0cut  = *(volatile float *)(uintptr_t)(pb + 21u*4u);
+                if (ampl==0.0f && aenv_ar==0.0f && f0cut==0.0f) continue;
+                fprintf(stderr, "  v%-2d PARAM[37 Amplify]=%.4f aenv(ar=%.2f dr=%.2f sl=%.2f) flt0.cut=%.4f\n",
+                        v, ampl, aenv_ar, aenv_dr, aenv_sl, f0cut);
+            }
             const uint32_t OSCOFF[3] = { 0x30u, 0x6cu, 0xa8u };
             for (int v = 0; v < 32; v++) {
                 uint32_t vb = 0x50c184u + (uint32_t)v * 0x210u;
@@ -185,6 +272,9 @@ int main(int argc, char **argv)
         if (tail_left != ~0ull) { if (tail_left <= chunk) break; tail_left -= chunk; }
     }
     fclose(out);
+    if (bufpeak_on)
+        fprintf(stderr, "\n[c1014] voicebuf(0x509730) peak=%.5f @%.3fs ; chanmix(0x509b30) peak=%.5f @%.3fs\n",
+                bufpeak, bufpeak_t, chanpeak, chanpeak_t);
     fprintf(stderr, "\n[c1014] wrote %llu samples (%.1fs) -> %s%s\n",
             (unsigned long long)total, (double)total / SAMPLE_RATE, outpath,
             (total >= max_smp) ? " [max cap]" : "");

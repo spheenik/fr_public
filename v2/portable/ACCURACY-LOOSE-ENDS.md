@@ -231,9 +231,14 @@ candytron image re-unpacks from `~/downloads/fr-030_candytron_final.zip`
 
 ## 8. v3 (fr014) render oracle — built; one channel (ch8) diverges, OPEN
 
-**Status (2026-06-08): v3 render oracle BUILT & working; v3 is render-validated
-EXCEPT one channel. Root cause NOT yet pinned — engine math proven bit-faithful,
-divergence localized to ch8's amplitude-envelope/voice-volume path. RESUMABLE.**
+**Status (2026-06-08, UPDATED): v3 render oracle BUILT & working; v3 is render-
+validated EXCEPT ch8. ROOT CAUSE RE-LOCALIZED by direct measurement (gdb +
+binary-side taps): the noise oscillator AND the whole per-voice chain are
+BIT-EXACT — the earlier "noise resonator / amplitude-envelope / curvol" leads
+(719fe10, the first f15a2b7 §8) were ALL measurement artifacts of a broken
+voice-slot/borrowed-offset probe. The real divergence is in the CHANNEL FX chain
+(channel compressor + chorus over-amplify in the portable). Exact era-fix still
+OPEN. RESUMABLE; check.py stays 17/17. See "WHAT WAS MEASURED" below.**
 
 `../v2m/fr014-extraction/c1_fr014_harness.c` is the first **render** oracle for
 format v3 (previously assay-only, §3). It drives mark&sweep's (fr-014, 2001-12)
@@ -250,70 +255,93 @@ full-gain NOISE oscs → HP filter flt0 mode3 → LP flt1 mode1 → BITCRUSHER m
 → vol). Portable ch8 peak **3.19**, binary **0.63** (~5×). Other channels
 bit-exact ~2e-9 or matching ~5e-4.
 
-**What is RULED OUT (all measured, not theorized):**
-- *Loader color misparse* — binary ch8 osc nfres = **1.0**, identical to portable.
-- *Noise seed* — both **0** (rdtsc→0). *nffrq/nfres* — **bit-identical**
-  (`3f790e5f`/`3f800000`, all 3 oscs). *Recurrence* — decoded @0x40e7e1,
-  bit-identical to `renderNoise_v0`. *x87 precision* — binary runs **PC=24** =
-  float32; `double`-precision noise had **ZERO effect** (peak identical 3.1879);
-  the recurrence is intrinsically **bounded** (sim: 1 osc maxes ~4.5, 3
-  correlated oscs sum to ~13 in BOTH). **So this is NOT an x87/precision/
-  marginal-stability problem** — mimicking x87 would not help.
-- *Keysync / noise-filter accumulation* — resetting `nf` on note-on = zero effect.
-- *Master compressor* — bass (<500 Hz, other channels) NOT ducked at 7–8 s.
-- *Static volume* — lvol/rvol = **0.7071** both.
-- *env2→flt0.cutoff mod* — IS mis-applied (portable closes flt0 cfreq→0.143,
-  binary leaves it open ~0.98) but skipping it only moved 3.19→**2.57** (~20%);
-  a contributor, NOT the main cause. (NB the v2load mod-dest remap @v2load.cpp:344
-  produces dest=21=flt0.cutoff for ch8's env2 mod, and that matches both the
-  `kPatchParmVer` table and `../sounddef.h` — so the remap is "correct" by the
-  table yet the binary doesn't close flt0; see open question below. This is §5.)
+**WHAT WAS MEASURED (2026-06-08 follow-up — gdb on the binary + new taps).**
+The earlier curvol/env story rested on a voice-workspace probe that read the
+WRONG voice slot with brullwurfel-borrowed offsets; every number it produced
+(curvol≈0.118, "flt0 left open") was an artifact. Re-measured from scratch:
 
-**LEADING (unconfirmed) hypothesis — amplitude envelope / curvol.** At the ch8
-peak (~7.249 s) the binary's voice `curvol` ≈ **0.118** vs the portable's ≈
-**0.8–0.97** (~7×) — the dominant ~5× factor (osc/filters/bitcrusher just scale
-this). Points to a v3 **amplitude-envelope** behavior (attack/decay curve, or the
-vel→aenv.amplify mod: ch8 mod0 src=0 dest=37) differing from the portable's model.
-`DELTA_ENV_CURVES` is **flipsAt 2 EV_ANCHORED** (an unproven guess) — a candidate
-the oracle now contradicts for ch8.
+1. **Noise oscillator: BIT-EXACT.** gdb at `renderNoise` entry (0x40e7e1) shows
+   the binary's runtime coeffs are `nffrq`, `nfres=1.0`, `gain=0.992`, `seed=0`
+   — identical to the portable. Stepping `renderNoise_v0` 21 samples from seed 0
+   reproduces the binary's frame-2 state **to the bit** (`seed=3522190791,
+   sl=0.371471, sb=-0.645311`). The "noise resonator divergence" (commit 719fe10)
+   is FALSE. The decoded recurrence (`bb=sb+sl·f; h=(n−sl)·r−bb; ll=sl+h·f;
+   out=(h+bb+ll)·gain`) is `renderNoise_v0` verbatim. x87 PC=24/53/64 all give
+   the same peak (13.29) — precision is not it either.
+2. **Whole per-voice chain matches.** gdb buffer peaks: OSC sum ≈ **13.3**
+   (portable VCETAP 13.29), DIST (post-bitcrusher voice buffer) = **1.969**
+   (portable 1.97). The amp-EG `Amplify` (voice-param[37], velocity-modded) reads
+   **125** in the binary vs **124** portable — gain matches. flt0 cutoff closes
+   to ~93 in BOTH. So osc/filter/bitcrusher/curvol are all faithful.
+   (The earlier NOP-based "binary osc = 0.11" was ALSO an artifact — NOPing the
+   filter calls corrupted the shared voice buffer. gdb is the reliable probe.)
+3. **The divergence is the CHANNEL FX chain.** Per-stage peaks for ch8:
+   - portable voice-sum into chanbuf (1 voice): **1.36** — matches the binary.
+   - portable after channel COMPRESSOR: **3.21** (~2.4× makeup).
+   - portable after channel CHORUS: **9.18** (~2.8×, feedback comb).
+   - portable pre-master mix: **5.38**; final **3.19**.
+   - binary pre-master channel mix (0x509b30): **1.80**; final **0.628**.
+   Empirical isolation (portable, dev gates): baseline 3.19; no-chorus **1.16**;
+   no-comp **0.99**; **no-comp + no-chorus 0.49** ≈ binary **0.628**. So the
+   portable's channel compressor + chorus over-amplify a signal the v3 binary
+   leaves near unity. (corr is ~0 because ch8 is noise — use peak/RMS, not corr.)
 
-**TENSION to resolve:** other channels (incl. their envelopes) match at ~5e-4, so
-it is NOT a blanket env-curve error — it is specific to ch8's env params / vel-mod
-regime. **CAVEAT:** the binary voice-field offsets used for the curvol read
-(curvol@+0xc, lvol@+0x1c, rvol@+0x20) were *borrowed from brullwurfel's v5 layout*
-and are NOT verified for fr014 — good enough to see a ~7× gap, NOT to draft a fix.
+**OPEN — the exact era-fix.** The binary (0.628) sits BETWEEN the portable's
+stage-disabled configs (no-both 0.49, no-comp 0.99), so it is NOT a clean
+"disable one stage": the v3 binary's channel comp and/or chorus run with
+different gain/params, not simply off. Candidates, in priority:
+- *Channel compressor makeup.* ch8's comp parses to `mode=PEAK, thresh~116,
+  outgain=55, autogain=0` → net `2^((outgain−64)/16)` ≈ 0.68 when not
+  compressing, yet CHTAP shows net amplification — the comp config dump is
+  interleaved across channels and ch8's exact row was not cleanly isolated
+  (REDO: gate the dump to the soloed channel). `DELTA_NO_COMP_BOOST` is
+  flipsAt 1 EV_ANCHORED (param-table anchor) — the *param* exists at v1, but
+  whether the v3 ENGINE applies comp+boost the v5/v6 way is UNPROVEN. If v3 does
+  not, the row should flip later.
+- *Chorus feedback.* contributes ~2.8×; a feedback-comb resonance on noise.
+- *Channel→master `chgain`* (ctl7→ChanVol mod, dest 59; `DELTA_PGMCHANGE_V0`
+  resets ctl7=127 at v3).
 
-**HOW TO RESUME (the genuinely-final step):**
-1. Build a **verified fr014 voice-field map**: disasm the env setup (env init
-   0x40e9c2 @ voice +0xe4 (aenv) / +0xfc (env2); filters 0x40e85f @ +0x114/+0x138)
-   to pin the real `curvol`/`val`/`out`/`atd`/`dcf` offsets — same method that
-   pinned the osc fields (nffrq@osc+0x14, nfres@+0x18; osc bases +0x30/+0x6c/+0xa8).
-2. With verified offsets, dump the binary's ch8 **aenv trajectory** (out/val/state
-   + atd/dcf/sul/suf) over 7.2–7.5 s and compare to the portable's `env[0]`
-   (V2_VOL tap already prints curvol/flt0.cfreq/env2.out/aenv.out). Decide:
-   attack-rate, decay-rate, sustain, or the vel→amplify mod.
-3. If the v3 env curve differs: it is a `DELTA_ENV_CURVES`/`DELTA_ENV_CLAMP_SUSREL`
-   era-threshold correction (both currently ANCHORED/PROVEN-at-v5, never v3-proven).
-   Test by adjusting the gate and re-running the oracle; the matching-channels
-   tension MUST stay satisfied (don't regress 0–7 s) and check.py stays 17/17.
-4. The fr014 binary IS the ground truth (the v3 patch played natively); the
-   portable must match it, not the converted-v6 interpretation.
+**HOW TO RESUME:**
+1. Pin the v3 binary's channel chain by disasm/gdb of `0x40fda8` (per-channel
+   process; calls 0x40fc69/0x40eed0/0x40fc43/0x40f9ae/0x40f450/0x40f64c — identify
+   comp, boost, chorus, dcf, mix). gdb buffer-scan is too slow (breakpoints fire
+   ~38k× before the 7 s onset); fast-forward with `ignore <bp> 74` on `fwrite`
+   (chunk=4096 ⇒ ~75 chunks = 7 s) OR read the channel buffer via a one-shot
+   harness tap, not a per-sample gdb while-loop.
+2. Decide which stage (comp / chorus / chgain) the v3 engine handles differently
+   and encode it as an era-row threshold change (likely `DELTA_NO_COMP_BOOST`, or
+   a NEW chorus/comp row). Re-run the oracle; ch8 must reach ~0.63 WITHOUT
+   regressing the bit-exact channels, and **check.py stays 17/17** (the v5/v6
+   corpus proves the v5/v6 side of whatever row moves).
+3. The fr014 binary IS ground truth (native v3); match it, not converted-v6.
 
 **Reusable taps (dev-only, `#ifndef NDEBUG`, env-gated, output-neutral; committed):**
 - portable `v2core.cpp`: `V2_PATCHDUMP=<ch>` (post-mod voice config + mod matrix),
   `V2_VCETAP` (per-stage osc/flt/dist/dcf peaks), `V2_NSEED` (noise seed +
-  nffrq/nfres hex), `V2_VOL` (curvol/flt0.cfreq/flt1.cfreq/env2.out/aenv.out).
+  nffrq/nfres hex), `V2_VOL` (curvol/flt0.cfreq/flt1.cfreq/env2.out/aenv.out),
+  `V2_OSCONSET` (first-16 osc-buffer samples at onset), `V2_MIXTAP` (per-master-
+  stage peaks premix/reverb/delay/dcf/lchc/compr + per-channel-stage CHTAP
+  dcf1/comp/boost/dist/chorus + `[chanN] voicesum/nvoices`), `V2_COMPDUMP`
+  (channel-comp mode/thresh/ratio/outgain/autogain → invol/outvol),
+  `V2_NOCOMP` / `V2_NOCHORUS` (skip a channel-FX stage = stage isolation).
 - portable `v2load.cpp`: `V2_MODREMAP` (raw v3 dest → remapped v6 dest per mod).
-- harness `c1_fr014_harness.c`: `FR014_DUMPVOX=<sec>` (one-shot voice-workspace
-  float dump for v6), `FR014_SOLO=<ch>` (zero other channels' notenum in the
-  parsed table = binary-side channel solo).
+- harness `c1_fr014_harness.c`: `FR014_SOLO=<ch>` (binary-side channel solo),
+  `FR014_DUMPVOX=<sec>` (one-shot voice dump: per-voice param[37] Amplify + aenv +
+  osc nffrq/nfres), `FR014_BUFPEAK` (running max of voicebuf 0x509730 [post-dist]
+  + chanmix 0x509b30 [pre-master] + onset samples), `FR014_STAGE=osc|flt` (NOP the
+  later voice-chain calls — UNRELIABLE, corrupts the buffer; prefer gdb),
+  `FR014_NOISERAW` (NOP the noise resonator → raw n·gain; also unreliable for the
+  same reason). The TRUSTWORTHY binary probe is **gdb** at the stage VAs.
 - Scratch: `era unpack ~/downloads/fr014.zip`'s `mark&sweep.exe` →
   `/tmp/erascan_recon/fr014/unpacked.bin`; carve 0 = song0.v2m (v3, the divergent
-  song); carve 1 = song1.v2m (v1). Portable solo: `V2SEQ_SOLO=8`.
+  song); carve 1 = song1.v2m (v1). Portable solo: `V2SEQ_SOLO=8`. gdb method:
+  break `fwrite` to let the image map, then plant `*0x<VA>` breakpoints.
 
-NOTE: the v3 oracle's first commit message (719fe10) names a "v3 patch param
-parsing (color misparse)" prime suspect — that was **DISPROVEN** afterward
-(binary nfres=1.0); this section supersedes it.
+NOTE: BOTH earlier suspects are now disproven by measurement — the 719fe10
+"color misparse" (binary nfres=1.0) AND the f15a2b7 "amplitude-envelope/curvol"
+(Amplify=125 matches; the 0.118 read was the wrong voice slot). This update
+supersedes them; the divergence is the channel comp+chorus.
 
 ---
 

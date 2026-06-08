@@ -129,6 +129,32 @@ int main(int argc, char **argv)
         }
     }
 
+    // FR014_NOCOMP / FR014_NOBOOST / FR014_NODIST / FR014_NOCHORUS: stage
+    // isolation for the per-channel FX chain (syChanRender @0x40fcda). The render
+    // order is COMP(0x40f945) -> BOOST(0x40f40a) -> {DIST(0x40ee75),
+    // CHORUS(0x40f612)} swapped by the fxr flag [chanstruct+0xc]. NOP the 5-byte
+    // `call` at each stage's call site(s); skipping a stage leaves the in-place
+    // channel buffer 0x509b30 untouched (== portable V2_NOCOMP/V2_NOCHORUS).
+    // Use with FR014_SOLO=8 FR014_BUFPEAK to build the binary isolation table.
+    {
+        struct { const char *env; uint32_t site[2]; } stg[4] = {
+            { "FR014_NOCOMP",   { 0x40fce8u, 0u } },        // call COMP   0x40f945
+            { "FR014_NOBOOST",  { 0x40fcf3u, 0u } },        // call BOOST  0x40f40a
+            { "FR014_NODIST",   { 0x40fd05u, 0x40fd28u } }, // call DIST   0x40ee75 (both fxr paths)
+            { "FR014_NOCHORUS", { 0x40fd0du, 0x40fd20u } }, // call CHORUS 0x40f612 (both fxr paths)
+        };
+        for (int s = 0; s < 4; s++) {
+            if (!getenv(stg[s].env)) continue;
+            for (int k = 0; k < 2; k++) {
+                uint32_t va = stg[s].site[k];
+                if (!va) continue;
+                uint8_t *p = (uint8_t *)(uintptr_t)va;
+                if (p[0] == 0xe8) { memset(p, 0x90, 5); fprintf(stderr, "[c1014] %s: NOP call @0x%x\n", stg[s].env, va); }
+                else fprintf(stderr, "[c1014] WARN %s: @0x%x not a call (%02x)\n", stg[s].env, va, p[0]);
+            }
+        }
+    }
+
     // FR014_NOISERAW: bypass the noise resonator so the buffer = raw noise n*gain
     // (NOP the recurrence math 0x40e81a..0x40e835; stack stays balanced: n stays
     // in st0 -> 0x40e836 fmul gain -> output). Directly measures the noise input
@@ -257,6 +283,22 @@ int main(int argc, char **argv)
                                 v, o, mode, nffrq, fb, nfres, rb);
                     }
                 }
+            }
+            // CHANNEL post-mod value array (storeV2Values writes 25 floats per
+            // channel @0x510384 + ch*0x64). Layout == syVChan: [0]chanvol [1]aarcv
+            // [2]abrcv [3]aasnd [4]absnd [5]aux1 [6]aux2 [7]fxroute, then FX. The
+            // per-channel COMP params occupy values[16..24] (offset 0x40; comp set
+            // 0x40f654 reads esi[0..8] = mode/stereo/autogain/lookahead/threshold/
+            // ratio/attack/release/outgain). Dump ch8 to compare vs the portable.
+            {
+                uint32_t cv = 0x510384u + 8u * 0x64u;   // ch8 value base
+                fprintf(stderr, "  [ch8 chanvals]");
+                for (int k = 0; k < 25; k++)
+                    fprintf(stderr, " [%d]=%.3f", k, *(volatile float *)(uintptr_t)(cv + (uint32_t)k*4u));
+                fprintf(stderr, "\n");
+                float *C = (float *)(uintptr_t)(cv + 0x40u);
+                fprintf(stderr, "  [ch8 COMP] mode=%.0f stereo=%.0f autogain=%.0f lookahd=%.2f thresh=%.0f ratio=%.0f attack=%.0f release=%.0f outgain=%.0f\n",
+                        C[0], C[1], C[2], C[3], C[4], C[5], C[6], C[7], C[8]);
             }
         }
         if (total >= next_log) {

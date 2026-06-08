@@ -3270,10 +3270,12 @@ struct V2Chan
   void process(sInt nsamples)
   {
     StereoSample *chan = inst->chanbuf;
+    CHTAP_SNAP(entry, chan, nsamples);
 
     // AuxA/B receive (stereo)
     accumulate(chan, inst->auxabuf, nsamples, aarcv);
     accumulate(chan, inst->auxbbuf, nsamples, abrcv);
+    CHTAP_SNAP(rxaux, chan, nsamples);
 
     // Filters. era <v1 (fr08): the 2000 channel chain @0x40b5cc is ONLY
     // dist + chorus (in fxr order) -- comp/boost are v1 features with no code
@@ -4086,6 +4088,20 @@ private:
     for (sInt i=0; i < patch->modnum; i++)
     {
       const V2Mod *mod = &patch->modmatrix[i];
+
+      // era <v5: the CHANNEL mod loop only applies sources < 8 -- velocity (0) +
+      // ctl1..7 (1..7). Sources >= 8 (aenv/env2, lfo1/lfo2, note) are voice-
+      // PRIVATE and have no channel-level meaning, so the v3/v4 store skips them
+      // for channel params (fr014 syChanSet @0x40fe39 `cmp al,8; jae`; fr019 v4
+      // @0x429900). The modern-core v5+ store applies ALL sources. Without this
+      // gate, fr-014 ch8 (pgm7) wrongly let `aenv -> comp.outgain` push outgain
+      // 98 -> 128 (clamp) for ~3.7x extra compressor makeup, plus `lfo1 ->
+      // chorus.amount` -- the ~5x ch8 divergence vs the v3 render oracle.
+      // (DELTA_CHANMOD_NO_VOICE_SRC, flipsAt 5; the v5/v6 corpus carries such
+      // mods and stays bit-exact only because v5+ applies them.)
+      if (instance.old(DELTA_CHANMOD_NO_VOICE_SRC) && mod->source >= 8)
+        continue;
+
       sInt dest = mod->dest - COUNTOF(patch->voice);
       if (dest < 0 || dest >= COUNTOF(patch->chan))
         continue;
@@ -4094,6 +4110,25 @@ private:
       cparaf[dest] = clamp(cparaf[dest] + scale*getmodsource(voice, chan, mod->source), 0.0f, 128.0f);
     }
 
+#ifndef NDEBUG
+    // V2_CHANPARM=<ch>: dump that channel's POST-MOD param array (cparaf, the
+    // storeChanValues output == the asm 0x510384+ch*0x64 value array) + the
+    // decoded comp config, printed whenever pgm or comp.outgain changes. The
+    // tap that localized the fr-014 ch8 divergence to aenv->comp.outgain.
+    if (getenv("V2_CHANPARM") && chan == atoi(getenv("V2_CHANPARM"))) {
+      static int lastpgm=-99; static float lastog=-99;
+      if (chans[chan].pgm != lastpgm || cpara->comp.outgain != lastog) {
+        lastpgm = chans[chan].pgm; lastog = cpara->comp.outgain;
+        fprintf(stderr,"[chanparm] ch%d pgm=%d COUNTOF(chan)=%d | comp: mode=%.0f stereo=%.0f auto=%.0f lkah=%.0f thr=%.0f rat=%.0f atk=%.0f rel=%.0f outg=%.0f\n",
+                chan, chans[chan].pgm, (int)COUNTOF(patch->chan),
+                cpara->comp.mode, cpara->comp.stereo, cpara->comp.autogain, cpara->comp.lookahead,
+                cpara->comp.threshold, cpara->comp.ratio, cpara->comp.attack, cpara->comp.release, cpara->comp.outgain);
+        fprintf(stderr,"[chanparm] ch%d raw cparaf:", chan);
+        for (int i=0;i<(int)COUNTOF(patch->chan);i++) fprintf(stderr," %.0f", cparaf[i]);
+        fprintf(stderr,"\n");
+      }
+    }
+#endif
     cwork->set(cpara);
   }
 
@@ -4291,10 +4326,24 @@ private:
       if (chan == CHANS-1)
         ronanCBProcess(&ronan, &instance.chanbuf[0].l, nsamples);
 
-
-
+#ifndef NDEBUG
+      // V2_CHANTRACE: per-channel pre/post-process peak + the channel comp's
+      // runtime mode/invol/outvol/net/curgain + fxr. Pairs with V2_CHANPARM
+      // (post-mod param array) to localize a channel-FX-chain divergence.
+      sF32 ctin = 0.0f;
+      if (getenv("V2_CHANTRACE")) { for (sInt i=0;i<nsamples;i++){ sF32 a=fabsf(instance.chanbuf[i].l),b=fabsf(instance.chanbuf[i].r); if(a>ctin)ctin=a; if(b>ctin)ctin=b; } }
+#endif
       chansw[chan].process(nsamples);
-
+#ifndef NDEBUG
+      if (getenv("V2_CHANTRACE")) {
+        sF32 cto=0.0f; for (sInt i=0;i<nsamples;i++){ sF32 a=fabsf(instance.chanbuf[i].l),b=fabsf(instance.chanbuf[i].r); if(a>cto)cto=a; if(b>cto)cto=b; }
+        if (ctin>0.4f || cto>0.4f) {
+          V2Comp &cp = chansw[chan].comp;
+          fprintf(stderr,"[chantrace] ch%d in=%.4f out=%.4f | comp mode=%d invol=%.4f outvol=%.4f net=%.4f curgain=%.3f fxr=%d\n",
+                  chan, ctin, cto, cp.mode, cp.invol, cp.outvol, cp.invol*cp.outvol, cp.curgain[0], chansw[chan].fxr);
+        }
+      }
+#endif
     }
 
     // global filters

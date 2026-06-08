@@ -140,6 +140,23 @@ enum V2Delta {
   DELTA_POLY_32,           // voice pool is 32, not 64. Both v5 binaries agree
                            // (unlike the osc trio) so the format proxy is
                            // clean at this flip; 64 is the 2004 value.
+  DELTA_CHANMOD_NO_VOICE_SRC, // the CHANNEL mod matrix applies ONLY sources < 8
+                           // -- velocity (0) + ctl1..7 (1..7). Sources >= 8
+                           // (aenv/env2, lfo1/lfo2, note) are voice-PRIVATE and
+                           // have no channel-level meaning, so the old store
+                           // skips them for channel params. PROVEN old at v3
+                           // (fr014 syChanSet @0x40fe39 `cmp al,8; jae`) AND v4
+                           // (fr019 @0x429900, same `cmp al,8; jae` after the
+                           // dest-range cmp al,0x39/0x52). The modern-core store
+                           // (v5 brullwurfel: no such range/source check) applies
+                           // ALL sources -- proven by the bit-exact v5/v6 corpus
+                           // (pzero/zeitmaschine/debris/kkrieger6 carry source>=8
+                           // channel mods and only stay bit-exact if applied).
+                           // Build-date proxy at v5 like the osc/player rows
+                           // (early-v5 old-core fr-022 would still skip). Root
+                           // cause of the fr-014 v3 ch8 ~5x divergence: aenv ->
+                           // comp.outgain pushed makeup 98->128 (3.7x extra) plus
+                           // lfo1 -> chorus.amount, both wrongly applied.
 
   DELTA_COUNT
 };
@@ -307,6 +324,13 @@ inline constexpr V2DeltaRow kDeltas[DELTA_COUNT] = {
                                                      // candytron @0x41f96a);
                                                      // 64 in the 2004 asm
                                                      // (%define POLY 64)
+  /* DELTA_CHANMOD_NO_VOICE_SRC */ { 5, EV_ASSUMED }, // v3 fr014 + v4 fr019 SKIP
+                                                     // src>=8 in channel mods
+                                                     // (`cmp al,8; jae`); modern-
+                                                     // core v5+ applies all. v5
+                                                     // build-date proxy (early-v5
+                                                     // old-core unrepresentable),
+                                                     // like the osc/player rows.
 };
 
 // Does the OLD (pre-flip) behavior apply at this behavior version?
@@ -375,6 +399,11 @@ static_assert(voicePoolSize(0) == 16, "v0 pool is 16 (fr08)");
 static_assert(voicePoolSize(1) == 16, "v1 pool is 16 (flybye)");
 static_assert(voicePoolSize(5) == 32, "v5 pool is 32 (fr-022 AND candytron)");
 static_assert(voicePoolSize(6) == 64, "v6 pool is 64 (synth.asm)");
+// channel mod source filter: v3/v4 skip voice-private sources, v5+ apply all
+static_assert(oldBehavior(DELTA_CHANMOD_NO_VOICE_SRC, 3), "v3 channel mods skip src>=8 (fr014)");
+static_assert(oldBehavior(DELTA_CHANMOD_NO_VOICE_SRC, 4), "v4 channel mods skip src>=8 (fr019)");
+static_assert(!oldBehavior(DELTA_CHANMOD_NO_VOICE_SRC, 5), "v5+ channel mods apply all sources");
+static_assert(!oldBehavior(DELTA_CHANMOD_NO_VOICE_SRC, 6), "v6 channel mods apply all sources");
 #endif
 
 // behavior version a Player resolves to: forced override (research knob) or

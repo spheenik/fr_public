@@ -75,7 +75,7 @@ asm) — now `DELTA_POLY_16`/`DELTA_POLY_32` + era-bounded allocator scans
 
 | row | status after flybye/fr-022 |
 | --- | --- |
-| `DELTA_OSC_BOXFILTER`   | **fixed → flipsAt 5.** flybye(v1) is OLD (box) — old `flipsAt 1` was WRONG. |
+| `DELTA_OSC_BOXFILTER`   | **SUPERSEDED → flipsAt 3 PROVEN (see §9).** flybye(v1) box, fr014(v3)/fr019(v4) OSM — the box→OSM rewrite is v1→v3, not the build-date. flipsAt 5 was wrong. |
 | `DELTA_NOISE_LCG_MSVC`  | **fixed → flipsAt 5.** flybye(v1) has MSVC LCG; modern absent. |
 | `DELTA_OSC_FREQ_CONST`  | **fixed → flipsAt 5.** flybye(v1) has baked 3185015. |
 | `DELTA_PGMCHANGE_V0`    | **fixed → flipsAt 5.** flybye(v1) disasm @0x410455 == fr08: no early-out + ctl7=127. (NEW already at early-v5 fr-022 — flipped earlier than the rest.) |
@@ -109,7 +109,8 @@ giving the FIRST v3 and v4 engines. Three rows moved off the flipsAt-5 proxy:
   FM at v4 fr019 @0x4282a1; was the last flipsAt-1 ASSUMED).
 - `DELTA_POLY_16` → **flipsAt 3** (pool 32 PROVEN at v3 fr014 @0x410030; the
   16→32 growth is v2-or-v3, no v2 binary, so still ASSUMED for that 1-version gap).
-The osc trio + TICK/SUBFRAME/RVB_E STAY flipsAt-5 proxies but the sweep
+NOISE_LCG/FREQ_CONST + TICK/SUBFRAME/RVB_E STAY flipsAt-5 proxies (OSC_BOXFILTER
+left the group — pinned at v3 PROVEN by the v4 oracle, §9) but the sweep
 confirmed their build-date flip is the one month **2002-08→09** (old-core thru
 fr-027 v5 2002-07, new at fr-028 brullwurfel 2002-09; fr-027 joins fr-022 as an
 early-v5 old-core unrepresentable case). check.py still 17/17 (these gates are
@@ -143,9 +144,11 @@ whole-song bit-exact against the 2001 binary itself.
 v4 (fr019) period engines** (assayed, §3), and the brullwurfel (fr-028, v5)
 **render oracle** is built (`../v2m/brullwurfel-extraction/c3_oracle.c`). So v3/v4
 are no longer binary-less, and v5 has a second proven render anchor besides
-candytron. v3/v4 still lack a *render* oracle (assay-only), and **v2 still has no
-binary at all** — those remain liveness-only. kkrieger6's native-v5 pool note
-stands (saturates 32 voices at 102.47 s; josie never does).
+candytron. **Update 2026-06-08: v3 (fr014, §8) AND v4 (fr019, §9) now have full
+render oracles** — v3/v4 osc rendering is render-proven (fr019 whole-mix rms
+3.9e-6), and the v4 oracle corrected the BOXFILTER flip point (§9). **v2 still
+has no binary at all** — it remains liveness-only. kkrieger6's native-v5 pool
+note stands (saturates 32 voices at 102.47 s; josie never does).
 
 ## 5. CC1 mod-dest remap re-audit (low priority)
 
@@ -354,6 +357,63 @@ NOTE: every earlier suspect is now disproven — the 719fe10 "color misparse"
 and the prior §8 "channel comp/chorus makeup era-difference" (right stage, wrong
 cause: the comp/chorus math and parsed params are bit-faithful). The real cause
 is the channel mod-source filter (`DELTA_CHANMOD_NO_VOICE_SRC`).
+
+## 9. v4 (fr019) render oracle — built; overturned the BOXFILTER flip point
+
+**Status (2026-06-08, SOLVED): the v4 render oracle is built and it caught a
+real era-row error. ROOT CAUSE: the tri/saw/pulse box->analytic-OSM oscillator
+rewrite happens at the v1->v3 format step, NOT at the v5 build-date as the
+flipsAt-5 `DELTA_OSC_BOXFILTER` proxy assumed. The proxy was set from flybye
+(v1, box) + candytron (v5, OSM) and INTERPOLATED across v2-v4 -- but v3/v4 were
+never checked. They are OSM. FIX: `DELTA_OSC_BOXFILTER` flipsAt 5 -> 3 (PROVEN),
+decoupled from the NOISE_LCG/FREQ_CONST pair it was bundled with; AND the
+integral renderTriSaw/renderPulse now advance the phase at freq<<2 when
+old(FREQ_CONST) (v3/v4 keep the 4x-oversample freq convention even though the
+renderer is the analytic OSM -- fr019 pulse @0x428111 does `shl esi,2`), mirror-
+ing renderSin_v0. RESULT: fr019 (v4) whole-mix oracle rms 0.037 -> 3.9e-6 (MATCH,
+ch3 pulse bit-exact); fr014 (v3) whole-song corr 0.990 -> 0.99989 (its leftover
+§8 residual was these box-vs-OSM tri/saw channels, not just the ch8 noise seed);
+flybye (v1)/fr08 (v0) unchanged (box untouched); check.py 17/17 (v0/v5/v6 corpus
+is unaffected by a v3/v4-only change).**
+
+`../v2m/fr019-extraction/c1_fr019_harness.c` is the v4 ORACLE. poemtoahorse
+(fr-019, ms2002 2002-03) fuses OpenV2M+PlayV2M into one stdcall @0x4107f0 (parses
+header -> globals timediv@0x448b98/maxtime@0x448ba0/gdnum@0x448ba8, builds 16
+channel tables @0x448bb4 stride 0x50, calls Reset @0x41003d, sets the playing
+BYTE @0x448148 := 1). RenderProxy @0x410716 (ret 8) calls synthRender @0x429a36.
+synthInit @0x429979 (SYN @0x4cacf0, 32 voices @0x4ccb00 stride 0x210, `mov
+cl,0x20` = v4 POLY 32). rdtsc 0x427ee4/0x42856b/0x428693. No Ronan on the path.
+embedded v4 song = carve 0 @0x41a7cd (timediv 480, 14 active ch). VAs signature-
+matched against fr014's known V2MPlayer methods (OpenV2M imul-0x2710 prologue,
+synthRender's PC=24 `66 25 fff0; 66 0d 3f00`, the byte playing-flag RenderProxy).
+Build: `gcc -m32 -no-pie -O0 c1_fr019_harness.c -o c1_fr019_harness`.
+
+**How it was found.** Whole-mix diff DIVERGE (rms 0.037). Channel-solo bisection
+(`FR019_SOLO`=binary, `V2SEQ_SOLO`=portable): ch2 (noise) bit-exact, ch3 (3x
+pulse) carried the whole residual at **corr exactly -1.0, magnitudes matched** --
+a pure sign inversion, localized to OSC_PULSE (ch4 = 1 pulse + 2 tri/saw diverged
+partially). The v1 linchpin: flybye (v1) ch7 pulse is `corr +1.0 max|d|=0`
+BIT-EXACT vs the current (box) renderer, so the box sign is right at v1 -- a real
+era difference, not a global bug. The asm settled it: fr014(v3) pulse @0x40e6cf /
+tri/saw @0x40e595 and fr019(v4) @0x428111 / @0x427fd9 are the analytic OSM
+(utof23 + `fdivr` gain/f + the osm state-machine jump), byte-identical to each
+other, while flybye(v1) tri/saw @0x40e70a is the 4x box (`mov cl,4; fldz`). The
+-1.0 was box-vs-OSM (opposite polarity convention); the residual 4% magnitude
+after fixing the flip was the freq<<2 phase-advance (the OSM at v3/v4 still uses
+the old 4x freq). fr08(v0) has 4 pulse channels and is whole-song bit-exact too,
+so v0+v1 = box, v3+v4 = OSM: the flip is v1->v3 (v2 has no binary; assumed box).
+
+**v4 was the goal era for the FM-osc path** (`DELTA_NO_FM_OSC` NEW side):
+poemtoahorse uses mode5 FM on ch11/ch12 (one ring-modulated). The oracle's
+whole-mix MATCH at rms 3.9e-6 (which includes ch11/ch12) render-proves the FM
+path that was previously assay-only (fsin @0x4282a1). oscjtab confirms it:
+fr014(v3) mode5 -> off @0x40e6ad, fr019(v4) mode5 -> FM @0x4282a1.
+
+**Reusable taps (committed):** `FR019_SOLO=<ch>` (binary channel solo via
+notenum-zeroing @0x448bac+ch*0x50 + re-Reset), `FR019_BUFPEAK` (output peak).
+Scratch: `era unpack ~/downloads/fr019_party.zip's fr-019-party-b.exe
+/tmp/fr019_unpacked.bin`; carve 0 = the v4 song. fr-022 party (also ms2002, v3,
+has pulse) and the fr019 pulse/oscjtab disasm are the cross-checks.
 
 ---
 

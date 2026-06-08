@@ -192,11 +192,26 @@ struct V2DeltaRow {
 //    the flip is pinned at exactly v6. Citations are genthree/_viruz2a.asm
 //    (== the shipped binary, 6 signatures spot-verified in the unpacked
 //    image) vs v2/synth.asm.
-//  - flipsAt 5 + ASSUMED on the osc-core trio (OSC_BOXFILTER, NOISE_LCG_MSVC,
-//    OSC_FREQ_CONST): these were WRONGLY flipsAt 1. The fr-013 flybye binary
+//  - OSC_BOXFILTER is PINNED at flipsAt 3 + PROVEN (the fr-019 v4 render oracle,
+//    2026-06-08). It is NOT a build-date row: the tri/saw/pulse box->analytic-OSM
+//    rewrite landed at the v1->v3 format step, far earlier than the LCG/freq
+//    build-date flip it was wrongly bundled with. PROVEN both sides: flybye (v1)
+//    renders the 4x box (`mov cl,4; fldz` @0x40e70a, whole-song bit-exact incl
+//    its pulse ch7); fr014 (v3) + fr019 (v4) render the analytic OSM (utof23+
+//    fdiv; pulse @0x40e6cf/0x428111, tri/saw @0x40e595/0x427fd9), byte-identical
+//    to each other. The v4 oracle MATCHES once v3/v4 use the OSM (fr019 whole-mix
+//    rms 3.9e-6; ch3 pulse bit-exact). NOTE the OSM at v3/v4 still advances the
+//    phase at freq<<2 (fr019 `shl esi,2`) because FREQ_CONST is still old there:
+//    renderTriSaw/renderPulse scale freq by 4 when old(FREQ_CONST), like
+//    renderSin_v0. v2 has no binary -> assumed box like its v1 neighbor.
+//  - flipsAt 5 + ASSUMED on the osc-core PAIR (NOISE_LCG_MSVC, OSC_FREQ_CONST):
+//    these were WRONGLY flipsAt 1. The fr-013 flybye binary
 //    (format v1, plays tpinv2.v2m) PROVES them OLD at v1 -- its synth has the
 //    MSVC LCG (214013/2531011 @0x40e7dc) + the baked oscfreq 3185015.0
 //    @0x40e5c0 and NO modern LCG anywhere. So v1 is OLD, not NEW.
+//    (fr014/fr019 at v3/v4 CONFIRM these stay OLD: fr014 ch8 noise is bit-exact
+//    with renderNoise_v0, and the fr014 sine still advances freq<<2 @0x40e7a4 --
+//    so only BOXFILTER moved off the proxy, not the LCG/freq pair.)
 //    But these do NOT flip at a format boundary: the fr-022 ein.schlag binary
 //    embeds a v5 song yet its synth is ALSO old-core (MSVC LCG @0x40da0a,
 //    baked 3185015 @0x40d668, no modern LCG) -- while candytron, ALSO v5,
@@ -252,7 +267,17 @@ inline constexpr V2DeltaRow kDeltas[DELTA_COUNT] = {
   /* DELTA_FRAME256           */ { 2, EV_ANCHORED },
   /* DELTA_ENV_CLAMP_SUSREL   */ { 6, EV_PROVEN   }, // v5 state_dec: no LOWEST
                                                      // runout (binary @0x41e199)
-  /* DELTA_OSC_BOXFILTER      */ { 5, EV_ASSUMED  }, // build-date flip, see below
+  /* DELTA_OSC_BOXFILTER      */ { 3, EV_PROVEN   }, // tri/saw/pulse OSM rewrite at
+                                                     // v3, NOT the build-date flip:
+                                                     // fr014/fr019 (v3/v4) render the
+                                                     // analytic OSM (utof23+fdiv,
+                                                     // pulse @0x40e6cf/0x428111,
+                                                     // trisaw @0x40e595) while flybye
+                                                     // (v1) is the 4x box (mov cl,4;
+                                                     // fldz @0x40e70a). DECOUPLED from
+                                                     // NOISE_LCG/FREQ_CONST (those
+                                                     // stay old at v3). v2 gap: no
+                                                     // binary, box like its v1 neighbor.
   /* DELTA_NOISE_LCG_MSVC     */ { 5, EV_ASSUMED  }, // build-date flip, see below
   /* DELTA_NATIVE_FSIN        */ { 6, EV_PROVEN   }, // v5 osc/LFO/FM = native
                                                      // fsin (binary @0x41dfc3/
@@ -373,8 +398,16 @@ static_assert(kDeltas[DELTA_POLY_16].flipsAt <= kDeltas[DELTA_POLY_32].flipsAt,
 // assay: candytron (v5) evaluates the sine with native fsin (DELTA_NATIVE_FSIN
 // old until v6) but advances 1x on the runtime freq. v2core's renderSin_v0
 // therefore derives its step from DELTA_OSC_FREQ_CONST, not from the fsin row.
-static_assert(kDeltas[DELTA_OSC_FREQ_CONST].flipsAt == kDeltas[DELTA_OSC_BOXFILTER].flipsAt,
-              "osc freq-constant and the 4x-advance v0 renderers are one convention");
+//
+// The sine freq-ADVANCE (FREQ_CONST) is ALSO decoupled from the tri/saw/pulse
+// box->OSM rewrite (BOXFILTER): the fr014 (v3) oracle disasm shows the analytic
+// OSM tri/saw/pulse renderers (BOXFILTER already NEW at v3) ALONGSIDE a sine
+// that still advances freq<<2 with native fsin (FREQ_CONST still OLD at v3,
+// @0x40e7a4 `shl edx,2`). So BOXFILTER flips at v3 while FREQ_CONST stays on the
+// build-date proxy (flipsAt 5). They are no longer one convention.
+static_assert(!oldBehavior(DELTA_OSC_BOXFILTER, 3), "v3 tri/saw/pulse are analytic OSM (fr014/fr019)");
+static_assert(oldBehavior(DELTA_OSC_BOXFILTER, 1), "v1 tri/saw/pulse are the 4x box (flybye)");
+static_assert(oldBehavior(DELTA_OSC_FREQ_CONST, 3), "v3 sine still advances freq<<2 (fr014 @0x40e7a4)");
 
 #if V2_VER_MIN == 0 && V2_VER_MAX == 6
 // ledger sanity for the default full-range build

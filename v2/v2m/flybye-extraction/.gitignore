@@ -1,0 +1,8 @@
+# compiled harnesses + scratch renders (reproducible from ~/downloads + toolkit)
+c1_flybye_harness
+c1_flybye_harness_g
+c1_flybye_solo
+c1_flybye_solo_g
+*.f32
+*.wav
+*.bin

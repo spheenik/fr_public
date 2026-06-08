@@ -1085,6 +1085,14 @@ private:
     // "easy" cases a) and c) almost all the time.
     COVER("Osc tri/saw");
 
+    // FREQ_CONST: at v3/v4 the analytic OSM renderer is present (BOXFILTER new
+    // at v3) but the freq is still the baked 4x-oversample convention (FREQ_CONST
+    // old) -- fr019's OSM tri/saw advances freq<<2 (`shl esi,2` @0x427fd9), like
+    // renderSin_v0's step. Scale the phase freq for this render (osm_init/osm_tick
+    // + utof23(freq) all read the member); restore after. v5/v6 advance 1x.
+    sInt freq_save = freq;
+    if (inst->old(DELTA_OSC_FREQ_CONST)) freq <<= 2;
+
     // calc helper values.
     // PORTING NOTE: the "hard" cases below (b/d/e/f) have a catastrophic
     // cancellation amplified by rcpf=1/f. The asm computes this on the x87 at
@@ -1157,6 +1165,7 @@ private:
 
       output(dest + i, y + gain);
     }
+    freq = freq_save;
   }
 
   void renderPulse(sF32 *dest, sInt nsamples)
@@ -1166,6 +1175,11 @@ private:
     // which means we get very simple integrals. The state machine works
     // the exact same way, see above for description.
     COVER("Osc pulse");
+
+    // FREQ_CONST: v3/v4 advance the OSM pulse at freq<<2 (fr019 @0x428111 does
+    // `shl esi,2`); v5/v6 advance 1x. Mirror renderTriSaw -- see the note there.
+    sInt freq_save = freq;
+    if (inst->old(DELTA_OSC_FREQ_CONST)) freq <<= 2;
 
     // calc helper values
     sF32 f = utof23(freq);
@@ -1216,6 +1230,7 @@ private:
 
       output(dest + i, out);
     }
+    freq = freq_save;
   }
 
   void renderSin(sF32 *dest, sInt nsamples)

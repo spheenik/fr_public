@@ -26,18 +26,17 @@ import argparse, hashlib, math, os, struct, subprocess, sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO_V2M = os.path.normpath(os.path.join(HERE, "..", "..", "v2m"))
 
-# corpus: name -> path (v6 converted set + the two native-v6 files + the
-# original v0 fr08 exercising the native loader)
+# corpus: name -> path. GENUINE files only -- the original embedded V2Ms at their
+# native era. NO v6-converted files: the portable plays originals directly, so a
+# converted corpus is neither needed nor a valid basis for any conclusion (USER
+# RULING 2026-06-10). This is a cross-host DETERMINISM gate (same bytes every
+# host), not a fidelity check -- fidelity is the era oracles on embedded songs.
 def corpus():
-    files = []
-    conv = os.path.join(REPO_V2M, "converted")
-    for fn in sorted(os.listdir(conv)):
-        if fn.endswith(".v2m"):
-            files.append((fn[:-4], os.path.join(conv, fn)))
-    files.append(("pzero_new", os.path.join(REPO_V2M, "pzero_new.v2m")))
-    files.append(("v2_zeitmaschine_new", os.path.join(REPO_V2M, "v2_zeitmaschine_new.v2m")))
-    files.append(("fr08_v0_native", os.path.join(REPO_V2M, "fr08.v2m")))
-    return files
+    return [
+        ("pzero_new",           os.path.join(REPO_V2M, "pzero_new.v2m")),            # genuine v6
+        ("v2_zeitmaschine_new", os.path.join(REPO_V2M, "v2_zeitmaschine_new.v2m")),  # genuine v6
+        ("fr08_v0_native",      os.path.join(REPO_V2M, "fr08.v2m")),                 # genuine v0
+    ]
 
 def render(dump, path, out, seconds):
     r = subprocess.run([dump, path, out, str(seconds), "4096"],

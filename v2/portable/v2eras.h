@@ -253,7 +253,7 @@ struct V2DeltaRow {
 //    PGMCHANGE_V0 is NO LONGER in this group: the sweep PINNED it at v4 (v3
 //    fr014/fr-022party OLD with ctl7=127, v4 fr019 NEW with the same-program
 //    early-out) -> now flipsAt 4 EV_PROVEN, both sides at the one MS2002 party.
-//    These keep v5 NEW, so the oracle corpus is unchanged (check.py 17/17).
+//    These keep v5 NEW, so the oracle corpus is unchanged (check.py 3/3 (genuine-only)).
 //    Override with Player::open(..., forceBehaviorVersion) when researching.
 //  - era-gap sweep (2026-06-07, v2m/era-gap-sweep + brullwurfel-extraction):
 //    PINNED two more rows that had no period binary before. NO_FM_OSC: oscjtab

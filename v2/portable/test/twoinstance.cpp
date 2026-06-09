@@ -31,8 +31,8 @@ static std::vector<float> renderSolo(const std::vector<uint8_t> &song, uint32_t 
 
 int main(int argc, char **argv)
 {
-  const char *fa = argc > 1 ? argv[1] : "../v2m/converted/kkrieger6.v2m";
-  const char *fb = argc > 2 ? argv[2] : "../v2m/converted/tpinv.v2m";
+  const char *fa = argc > 1 ? argv[1] : "../v2m/pzero_new.v2m";          // genuine v6
+  const char *fb = argc > 2 ? argv[2] : "../v2m/v2_zeitmaschine_new.v2m"; // genuine v6
   const uint32_t FRAMES = 44100 * 3, STEP = 777; // odd step crosses frames
 
   // render-before-open: silence, no crash

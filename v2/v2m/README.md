@@ -2,8 +2,13 @@
 
 This tree is organized **by stage**, not by demo. A single demo's work therefore
 spans several directories (its extraction dir here, its oracle harness in
-`../validate/`, its converted song in `converted/`). That is intentional — read the
-stages, then follow a demo across them.
+`../validate/`). That is intentional — read the stages, then follow a demo
+across them.
+
+NOTE (USER RULING 2026-06-10): there are **no v6-converted song files**. The
+portable plays the original embedded V2M at its native era; ground truth is
+always the song carved from the demo binary, never a converted copy. The former
+`converted/` corpus has been removed.
 
 ## Stages
 
@@ -22,12 +27,8 @@ stages, then follow a demo across them.
                                         disasm/tap/compare; the native render
                                         scaffold + live/signal-chain taps). See its
                                         README. Replaced the forked per-dir scripts.
-        │  format-convert the carved songs to a common corpus
-        ▼
- converted/                          the 13-song converted-format corpus (cross-demo;
-                                        e.g. converted/fr08.v2m is the CONVERTED song,
-                                        distinct from the raw carve fr08.v2m here)
-        │  render through the period synth + the portable player, diff
+        │  render the carved ORIGINAL through the period synth + the portable
+        │  player at its native era, diff (no v6 conversion)
         ▼
  ../validate/                        the c1_* oracle lab (cross-cutting): the period
                                         synth harnesses (c1_fr08_harness, c1_solo_probe)
@@ -44,7 +45,6 @@ stages, then follow a demo across them.
 | --- | --- |
 | extraction | `fr08-extraction/` (binary, RE scripts, docs) + raw carve `fr08.v2m` |
 | tooling | `toolkit/era` (unpack/carve/assay) + `toolkit/oracle.h` |
-| corpus | `converted/fr08.v2m` (format-converted) |
 | oracle lab | `../validate/c1_fr08_harness.c`, `../validate/c1_solo_probe.c` |
 
 `flybye-extraction/` is the most self-contained (its carved `flybye_embedded.v2m` /

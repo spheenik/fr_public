@@ -133,22 +133,26 @@ ties), not drift.
 | **v6** `v2_zeitmaschine_new.v2m` | `harness_asm` | exact | **0** | **0** | bit-exact |
 | **v5** `josie.v2m` (Ronan on) | candytron final binary | whole song | — | ~0.009 (music-bed) | per-channel DSP / voice / player / voice-steal **bit-exact**; residual = ch3/ch6 late-song osc-phase razor ties (§1 loose ends) |
 
-Scope ruling (2026-06-05): `converted/` files played at v6 behavior carry **no
-oracle-identity contract** — they are a lab construct and most are not
-genuinely v6 (originals span v0–v6). The ε contract covers **originals at their
-true era** only (fr08 v0 vs C1; `pzero_new`/`v2_zeitmaschine_new` v6 vs the
-asm; josie v5 vs the candytron binary). Converted files remain in the
-*determinism* (hash) baseline only.
+Scope ruling (USER, 2026-06-10): there are **no v6-converted music files**. The
+portable plays the **original embedded V2M at its native era**, so a converted
+corpus is neither needed nor a valid basis for any conclusion. Ground truth is
+ALWAYS the song carved from the demo binary, rendered at its detected era,
+diffed against that binary's own engine (the era oracles). The `converted/`
+directory has been removed. Fidelity is covered by the oracles on originals
+(fr08 v0 vs C1; flybye v1; fr014 v3; fr019 v4; candytron v5; the asm for v6);
+`check.py` is a cross-host *determinism* gate on genuine files only.
 
 ## Determinism / regression test suite
 
 ```sh
 ./build.sh && \
   test/mathcheck && test/twoinstance && test/tablecheck && \
-  test/loadcheck ../v2m/fr08.v2m ../v2m/converted/fr08.v2m ../v2m/pzero_new.v2m ../v2m/v2_zeitmaschine_new.v2m && \
   test/forcecheck ../v2m/pzero_new.v2m && \
-  python3 test/check.py            # corpus hash baseline (+ --oracle-dir for ε)
+  python3 test/check.py            # determinism hash baseline (genuine files only)
 ```
+(`loadcheck` validated the in-memory loader-canonicalization against a pre-made
+converted file; with converted files removed it is no longer wired into the
+default run.)
 
 - `mathcheck` — owned transcendentals vs genuine x87 at PC=24 (0 mismatches in 25M+ points).
 - `twoinstance` — two concurrent players are independent.

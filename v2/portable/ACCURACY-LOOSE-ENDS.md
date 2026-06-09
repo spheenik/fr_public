@@ -89,7 +89,7 @@ candytron (v5, 2003-08) are the SAME format version with OPPOSITE DSP cores
 landed in that 12-month gap, and the v2m records only format version — so an
 early-v5 file is genuinely under-specified. `flipsAt 5` is the best proxy
 (OLD v0..v4, NEW v5..v6): correct for every oracle-bearing file and a no-op
-for v0/v5/v6 (check.py still 17/17). The lone unrepresentable case is an
+for v0/v5/v6 (check.py still 3/3). The lone unrepresentable case is an
 early-v5 old-core file like fr-022 — rendering it as new-core measures **89%
 relative-RMS / 0.63 correlation** error (dominated by the tonal core, not
 just noise; full breakdown in the extraction NOTES). Getting it right needs a
@@ -113,7 +113,7 @@ NOISE_LCG/FREQ_CONST + TICK/SUBFRAME/RVB_E STAY flipsAt-5 proxies (OSC_BOXFILTER
 left the group — pinned at v3 PROVEN by the v4 oracle, §9) but the sweep
 confirmed their build-date flip is the one month **2002-08→09** (old-core thru
 fr-027 v5 2002-07, new at fr-028 brullwurfel 2002-09; fr-027 joins fr-022 as an
-early-v5 old-core unrepresentable case). check.py still 17/17 (these gates are
+early-v5 old-core unrepresentable case). check.py still 3/3 (these gates are
 no-ops on the v0+v6 corpus).
 
 ## 4. v1–v4 originals: structural-only validation (no oracle)
@@ -225,7 +225,7 @@ noise-heavy v2m enters the corpus AND brullwurfel's exact seed init is decoded
 
 Tooling added this session: `C3_SOLO` in `c3_oracle.c` (mirrors `C2_SOLO`/
 `V2SEQ_SOLO`); `V2_PATCHDUMP=<ch>` in `v2core.cpp` `storeV2Values` (dev-only,
-`#ifndef NDEBUG`, dumps a channel's post-mod voice config). check.py 17/17.
+`#ifndef NDEBUG`, dumps a channel's post-mod voice config). check.py 3/3 (genuine-only).
 
 NOTE: the brullwurfel unpacked image + carved song1 live in scratch (re-unpack
 `~/downloads/fr-028.zip` via `../v2m/toolkit/era`; song1 is carve index 1). The
@@ -245,7 +245,7 @@ gain (plus the chorus perturbation) = the ~5x ch8 blow-up. FIX:
 (`cmp al,8; jae`, fr014 @0x40fe39, fr019 @0x429900); the modern-core v5+ store
 applies all sources (bit-exact v5/v6 corpus). RESULT: whole-song v3 oracle corr
 0.947 -> 0.990, ch8 peak 3.19 -> amplitude-matched (~0.68 like the binary).
-check.py stays 17/17, release render sha unchanged. The remaining ch8 residual
+check.py stays 3/3, release render sha unchanged. The remaining ch8 residual
 (corr ~0 on a noise channel, peaks matched) is the §7-class noise-seed phase
 decorrelation amplified by the chorus feedback comb — NOT a new bug.**
 
@@ -372,7 +372,7 @@ old(FREQ_CONST) (v3/v4 keep the 4x-oversample freq convention even though the
 renderer is the analytic OSM -- fr019 pulse @0x428111 does `shl esi,2`), mirror-
 ing renderSin_v0. The box-vs-OSM divergence is then GONE (ch3 pulse corr -1.0 ->
 1.0 max|d|=0). fr014 (v3) whole-song corr 0.990 -> 0.99989; flybye (v1)/fr08 (v0)
-unchanged (box untouched); check.py 17/17 (v0/v5/v6 corpus is unaffected by a
+unchanged (box untouched); check.py 3/3 (genuine-only) (v0/v5/v6 corpus is unaffected by a
 v3/v4-only change). BUT the box->OSM fix alone left fr019 audibly wrong from
 t=20.3 s -- that turned out to be TWO MORE structural v4 bugs in the FM oscillator
 (not a floor; see "FM oscillator" below). With all three fixes, fr019 whole-song
@@ -439,7 +439,7 @@ scheme (v4 AND v5) is 4.0; only the SEPARATE v6 float scheme (renderFMSin, the
 for v4+v5; the 2.0 it used before was a latent v5 bug (the v6 value reused).
 Confirmed against the candytron oracle: candytron's own v5 FM channel (ch6) now
 matches the portable to magnitude-spectrum corr 1.0000 (rel-dist 0.0). v6
-unchanged, check.py 17/17 (the v5 FM path is not in that corpus -- its v5 songs
+unchanged, check.py 3/3 (genuine-only) (the v5 FM path is not in that corpus -- its v5 songs
 are v6-converted).
 RESULT: fr019 whole-song (341 s) 0/341 sec above 3%, overall rms-diff/rms 0.12%,
 listening A/B indistinguishable.

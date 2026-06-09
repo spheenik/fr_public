@@ -370,11 +370,13 @@ decoupled from the NOISE_LCG/FREQ_CONST pair it was bundled with; AND the
 integral renderTriSaw/renderPulse now advance the phase at freq<<2 when
 old(FREQ_CONST) (v3/v4 keep the 4x-oversample freq convention even though the
 renderer is the analytic OSM -- fr019 pulse @0x428111 does `shl esi,2`), mirror-
-ing renderSin_v0. RESULT: fr019 (v4) whole-mix oracle rms 0.037 -> 3.9e-6 (MATCH,
-ch3 pulse bit-exact); fr014 (v3) whole-song corr 0.990 -> 0.99989 (its leftover
-§8 residual was these box-vs-OSM tri/saw channels, not just the ch8 noise seed);
-flybye (v1)/fr08 (v0) unchanged (box untouched); check.py 17/17 (v0/v5/v6 corpus
-is unaffected by a v3/v4-only change).**
+ing renderSin_v0. RESULT: the box-vs-OSM divergence is GONE -- fr019 (v4) is now
+bit-exact for the first ~15 s (rms < 1e-4, ch3 pulse corr -1.0 -> 1.0 max|d|=0);
+fr014 (v3) whole-song corr 0.990 -> 0.99989 (its leftover §8 residual was these
+box-vs-OSM tri/saw channels, not just the ch8 noise seed); flybye (v1)/fr08 (v0)
+unchanged (box untouched); check.py 17/17 (v0/v5/v6 corpus is unaffected by a
+v3/v4-only change). fr019 is NOT whole-song bit-exact: a §1-class residual remains
+(see "Whole-song residual" below) -- NOT a regression, NOT structural.**
 
 `../v2m/fr019-extraction/c1_fr019_harness.c` is the v4 ORACLE. poemtoahorse
 (fr-019, ms2002 2002-03) fuses OpenV2M+PlayV2M into one stdcall @0x4107f0 (parses
@@ -404,10 +406,31 @@ the old 4x freq). fr08(v0) has 4 pulse channels and is whole-song bit-exact too,
 so v0+v1 = box, v3+v4 = OSM: the flip is v1->v3 (v2 has no binary; assumed box).
 
 **v4 was the goal era for the FM-osc path** (`DELTA_NO_FM_OSC` NEW side):
-poemtoahorse uses mode5 FM on ch11/ch12 (one ring-modulated). The oracle's
-whole-mix MATCH at rms 3.9e-6 (which includes ch11/ch12) render-proves the FM
-path that was previously assay-only (fsin @0x4282a1). oscjtab confirms it:
-fr014(v3) mode5 -> off @0x40e6ad, fr019(v4) mode5 -> FM @0x4282a1.
+poemtoahorse uses mode5 FM on ch11/ch12 (one ring-modulated). The first-15s
+bit-exactness render-proves the FM path that was previously assay-only (fsin
+@0x4282a1) -- though the FM channels also carry a slice of the whole-song
+residual below. oscjtab confirms it: fr014(v3) mode5 -> off @0x40e6ad, fr019(v4)
+mode5 -> FM @0x4282a1.
+
+**Whole-song residual (2026-06-09, localized -- NOT structural, NOT the clock).**
+fr019 is bit-exact for ~15 s, then a residual appears (whole-mix corr dips to
+0.68 in the t=20-23 s window, recovers to 1.0 by t=23 s -- a TRANSIENT, not a
+permanent desync; plus a tiny slow ε from t~7 s, rms 1e-5..1e-4). Per-channel
+attribution (solo, t=20-23 s): the divergence is carried by **PULSE oscillators
+and FM**, scaled by filter resonance -- ch6 (pulse+tri/saw, flt0 mode3 cutoff20
+reso115 = near self-oscillation) rms 0.20; ch11 (FM) 0.078; ch4 (pulse) 0.019;
+ch3 (pulse) 5.6e-3; while **sin/noise channels are bit-exact even at high Q**
+(ch1 sin reso95 rms 1.9e-9; ch2 noise rms 0). MECHANISM = the §1/josie family:
+the OSM tri/saw/pulse HARD cases (b/d/e/f -- the rcpf-amplified catastrophic-
+cancellation branches v2core already flags "match the asm op order exactly
+(1-ULP fidelity)") carry a residual ~1 ULP vs the binary on certain notes,
+inaudible alone but amplified ~40x by an extreme-resonance filter; FM (fsin) is
+the other ε source. RULED OUT: the rdtsc clock (pinned, byte-stable both sides);
+voice-steal (ch6 is tonal, diverges when soloed); x87-vs-SSE precision (a
+faithful `-m32 -mpc32` PC=24 build is BYTE-IDENTICAL to the default SSE build, so
+the ε is an algorithm/op-order difference, not an FP-mode one). Pinning the exact
+op needs josie-style per-op bisection (tap ch6's voice buffer at the first hard-
+case sample in the t~20 s note). Same irreducible floor as §1.
 
 **Reusable taps (committed):** `FR019_SOLO=<ch>` (binary channel solo via
 notenum-zeroing @0x448bac+ch*0x50 + re-Reset), `FR019_BUFPEAK` (output peak).

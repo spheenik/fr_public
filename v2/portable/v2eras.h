@@ -199,8 +199,11 @@ struct V2DeltaRow {
 //    renders the 4x box (`mov cl,4; fldz` @0x40e70a, whole-song bit-exact incl
 //    its pulse ch7); fr014 (v3) + fr019 (v4) render the analytic OSM (utof23+
 //    fdiv; pulse @0x40e6cf/0x428111, tri/saw @0x40e595/0x427fd9), byte-identical
-//    to each other. The v4 oracle MATCHES once v3/v4 use the OSM (fr019 whole-mix
-//    rms 3.9e-6; ch3 pulse bit-exact). NOTE the OSM at v3/v4 still advances the
+//    to each other. Once v3/v4 use the OSM the box-vs-OSM divergence is GONE:
+//    fr019 is bit-exact for the first ~15s (ch3 pulse corr -1.0->1.0 max|d|=0).
+//    (It is NOT whole-song bit-exact -- a §1-class resonance-amplified 1-ULP
+//    residual remains on the pulse/FM channels, ACCURACY-LOOSE-ENDS.md §9 --
+//    not structural.) NOTE the OSM at v3/v4 still advances the
 //    phase at freq<<2 (fr019 `shl esi,2`) because FREQ_CONST is still old there:
 //    renderTriSaw/renderPulse scale freq by 4 when old(FREQ_CONST), like
 //    renderSin_v0. v2 has no binary -> assumed box like its v1 neighbor.

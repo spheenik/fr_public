@@ -148,11 +148,15 @@ directory has been removed. Fidelity is covered by the oracles on originals
 ./build.sh && \
   test/mathcheck && test/twoinstance && test/tablecheck && \
   test/forcecheck ../v2m/pzero_new.v2m && \
-  python3 test/check.py            # determinism hash baseline (genuine files only)
+  python3 test/check.py            # determinism hash baseline
 ```
-(`loadcheck` validated the in-memory loader-canonicalization against a pre-made
-converted file; with converted files removed it is no longer wired into the
-default run.)
+`check.py` renders the **embedded** corpus (`../v2m/embedded/` — fr08 v0, flybye
+v1, fr014 v3, fr019 v4, candytron v5, each carved from its demo binary at native
+era) plus the two genuine v6 files, and hashes the output. It is a cross-host
+*determinism* gate (same bytes on every host), NOT a fidelity claim — fidelity is
+the era oracles on these same embedded songs. (`loadcheck` compared the in-memory
+loader-canonicalization against a pre-made converted file; with converted files
+removed it is no longer in the default run.)
 
 - `mathcheck` — owned transcendentals vs genuine x87 at PC=24 (0 mismatches in 25M+ points).
 - `twoinstance` — two concurrent players are independent.

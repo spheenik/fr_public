@@ -32,10 +32,15 @@ REPO_V2M = os.path.normpath(os.path.join(HERE, "..", "..", "v2m"))
 # RULING 2026-06-10). This is a cross-host DETERMINISM gate (same bytes every
 # host), not a fidelity check -- fidelity is the era oracles on embedded songs.
 def corpus():
+    emb = os.path.join(REPO_V2M, "embedded")  # songs carved from the demo binaries
     return [
+        ("fr08_v0",             os.path.join(emb, "fr08.v2m")),                      # embedded v0
+        ("flybye_v1",           os.path.join(emb, "flybye.v2m")),                    # embedded v1
+        ("fr014_v3",            os.path.join(emb, "fr014.v2m")),                     # embedded v3
+        ("fr019_v4",            os.path.join(emb, "fr019.v2m")),                     # embedded v4
+        ("candytron_v5",        os.path.join(emb, "candytron.v2m")),                 # embedded v5
         ("pzero_new",           os.path.join(REPO_V2M, "pzero_new.v2m")),            # genuine v6
         ("v2_zeitmaschine_new", os.path.join(REPO_V2M, "v2_zeitmaschine_new.v2m")),  # genuine v6
-        ("fr08_v0_native",      os.path.join(REPO_V2M, "fr08.v2m")),                 # genuine v0
     ]
 
 def render(dump, path, out, seconds):

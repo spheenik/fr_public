@@ -27,8 +27,16 @@ always the song carved from the demo binary, never a converted copy. The former
                                         disasm/tap/compare; the native render
                                         scaffold + live/signal-chain taps). See its
                                         README. Replaced the forked per-dir scripts.
-        │  render the carved ORIGINAL through the period synth + the portable
-        │  player at its native era, diff (no v6 conversion)
+        │  carve the EMBEDDED song from each demo binary -> the ground-truth corpus
+        ▼
+ embedded/                           the genuine songs carved from the demo binaries
+                                        (fr08 v0, flybye v1, fr014 v3, fr019 v4,
+                                        candytron v5), each at its NATIVE format
+                                        version + PROVENANCE.md. THE corpus the
+                                        portable is validated against; replaced the
+                                        old v6-converted set (no converted files).
+        │  render the original at its native era through the period synth + the
+        │  portable player, diff (no v6 conversion)
         ▼
  ../validate/                        the c1_* oracle lab (cross-cutting): the period
                                         synth harnesses (c1_fr08_harness, c1_solo_probe)

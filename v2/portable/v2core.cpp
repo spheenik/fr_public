@@ -1336,11 +1336,15 @@ private:
     // renderSin_v0). 2004 instead keeps the modulator in float and feeds
     // fastsinrc. Non-ring REPLACES the buffer (asm stores without fadd),
     // exactly like the 2004 FM.
+    // FREQ_CONST: v4 advances the FM carrier at freq<<2 (fr019 @0x4282a7 does
+    // `shl edx,2; add eax,edx`), exactly like renderSin_v0 / tri-saw / pulse;
+    // v5/v6 advance 1x. (The modulator add uses the un-advanced cnt either way.)
+    const sInt cstep = inst->old(DELTA_OSC_FREQ_CONST) ? (freq << 2) : freq;
     for (sInt i=0; i < nsamples; i++)
     {
       sInt modi = v2_fistp(dest[i] * fcfmmax * fc32bit);
       sF32 p = v0_cnt2f(cnt + (sU32)modi);
-      cnt += freq;
+      cnt += cstep;
 
       sF32 out = gain * v2_sin(p * fc2pi);
       if (ring)

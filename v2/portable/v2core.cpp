@@ -1340,9 +1340,15 @@ private:
     // `shl edx,2; add eax,edx`), exactly like renderSin_v0 / tri-saw / pulse;
     // v5/v6 advance 1x. (The modulator add uses the un-advanced cnt either way.)
     const sInt cstep = inst->old(DELTA_OSC_FREQ_CONST) ? (freq << 2) : freq;
+    // v4 scales the modulator by 4.0 (fr019 const @0x427e7c), TWICE the 2.0
+    // fcfmmax of the v5 candytron scheme -- a deeper FM index. With 2.0 the v4 FM
+    // timbre is wrong (ch11 magnitude-spectrum corr 0.87); with 4.0 it matches
+    // (corr 0.998). FREQ_CONST-old proxies the v4-vs-v5 FM boundary (FM exists
+    // only at v4+, FREQ_CONST flips at v5), so v5/v6 keep fcfmmax unchanged.
+    const sF32 fmdepth = inst->old(DELTA_OSC_FREQ_CONST) ? 4.0f : fcfmmax;
     for (sInt i=0; i < nsamples; i++)
     {
-      sInt modi = v2_fistp(dest[i] * fcfmmax * fc32bit);
+      sInt modi = v2_fistp(dest[i] * fmdepth * fc32bit);
       sF32 p = v0_cnt2f(cnt + (sU32)modi);
       cnt += cstep;
 

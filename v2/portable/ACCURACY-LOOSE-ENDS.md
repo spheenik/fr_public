@@ -427,12 +427,20 @@ renderer @0x4282a1, both the v4-vs-v5 FM scheme:
      renderFMSin_v5 advanced 1x, so the carrier ran at 1/4 rate -- spectrum at
      894 Hz instead of 996. Fixed -> sidebands match, whole-song bad-seconds
      40 -> 10 (60 s).
-  2. **Modulation depth 4.0.** v4 scales the modulator by 4.0 (`fmul [0x427e7c]`),
-     twice the 2.0 fcfmmax of the v5 candytron scheme. With 2.0 the timbre is
-     wrong (ch11 magnitude-spectrum corr 0.87, rel-dist 0.57); with 4.0 it matches
-     (corr 0.998, rel-dist 0.065). Fixed -> whole-song 10 -> 0 bad-seconds.
-Both gated `old(DELTA_OSC_FREQ_CONST)` (FM exists only at v4+, FREQ_CONST flips
-at v5, so this proxies the v4-vs-v5 boundary; v5/v6 unchanged, check.py 17/17).
+  2. **Modulation depth 4.0** (NOT freq-gated -- see below). v4 scales the
+     modulator by 4.0 (`fmul [0x427e7c]`), twice the 2.0 fcfmmax. With 2.0 the
+     timbre is wrong (ch11 magnitude-spectrum corr 0.87, rel-dist 0.57); with 4.0
+     it matches (0.998). Fixed -> whole-song 10 -> 0 bad-seconds.
+The carrier freq<<2 is gated `old(DELTA_OSC_FREQ_CONST)` (v4 only -- candytron's
+FM @0x41e060 has NO `shl edx,2`). But the **depth 4.0 is NOT gated**: the v5
+candytron FM uses 4.0 too (@0x41dbd0, verified 2026-06-10) -- the integer FM
+scheme (v4 AND v5) is 4.0; only the SEPARATE v6 float scheme (renderFMSin, the
+2004 synth.asm line-85 `fcfmmax 2.0`) is 2.0. So `renderFMSin_v5` hardcodes 4.0
+for v4+v5; the 2.0 it used before was a latent v5 bug (the v6 value reused).
+Confirmed against the candytron oracle: candytron's own v5 FM channel (ch6) now
+matches the portable to magnitude-spectrum corr 1.0000 (rel-dist 0.0). v6
+unchanged, check.py 17/17 (the v5 FM path is not in that corpus -- its v5 songs
+are v6-converted).
 RESULT: fr019 whole-song (341 s) 0/341 sec above 3%, overall rms-diff/rms 0.12%,
 listening A/B indistinguishable.
 

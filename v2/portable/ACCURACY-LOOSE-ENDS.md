@@ -370,13 +370,14 @@ decoupled from the NOISE_LCG/FREQ_CONST pair it was bundled with; AND the
 integral renderTriSaw/renderPulse now advance the phase at freq<<2 when
 old(FREQ_CONST) (v3/v4 keep the 4x-oversample freq convention even though the
 renderer is the analytic OSM -- fr019 pulse @0x428111 does `shl esi,2`), mirror-
-ing renderSin_v0. RESULT: the box-vs-OSM divergence is GONE -- fr019 (v4) is now
-bit-exact for the first ~15 s (rms < 1e-4, ch3 pulse corr -1.0 -> 1.0 max|d|=0);
-fr014 (v3) whole-song corr 0.990 -> 0.99989 (its leftover §8 residual was these
-box-vs-OSM tri/saw channels, not just the ch8 noise seed); flybye (v1)/fr08 (v0)
+ing renderSin_v0. The box-vs-OSM divergence is then GONE (ch3 pulse corr -1.0 ->
+1.0 max|d|=0). fr014 (v3) whole-song corr 0.990 -> 0.99989; flybye (v1)/fr08 (v0)
 unchanged (box untouched); check.py 17/17 (v0/v5/v6 corpus is unaffected by a
-v3/v4-only change). fr019 is NOT whole-song bit-exact: a §1-class residual remains
-(see "Whole-song residual" below) -- NOT a regression, NOT structural.**
+v3/v4-only change). BUT the box->OSM fix alone left fr019 audibly wrong from
+t=20.3 s -- that turned out to be TWO MORE structural v4 bugs in the FM oscillator
+(not a floor; see "FM oscillator" below). With all three fixes, fr019 whole-song
+(341 s) is 0 of 341 sec above 3%, overall rms-diff/rms 0.12%, listening A/B
+indistinguishable.**
 
 `../v2m/fr019-extraction/c1_fr019_harness.c` is the v4 ORACLE. poemtoahorse
 (fr-019, ms2002 2002-03) fuses OpenV2M+PlayV2M into one stdcall @0x4107f0 (parses
@@ -412,25 +413,41 @@ bit-exactness render-proves the FM path that was previously assay-only (fsin
 residual below. oscjtab confirms it: fr014(v3) mode5 -> off @0x40e6ad, fr019(v4)
 mode5 -> FM @0x4282a1.
 
-**Whole-song residual (2026-06-09, localized -- NOT structural, NOT the clock).**
-fr019 is bit-exact for ~15 s, then a residual appears (whole-mix corr dips to
-0.68 in the t=20-23 s window, recovers to 1.0 by t=23 s -- a TRANSIENT, not a
-permanent desync; plus a tiny slow ε from t~7 s, rms 1e-5..1e-4). Per-channel
-attribution (solo, t=20-23 s): the divergence is carried by **PULSE oscillators
-and FM**, scaled by filter resonance -- ch6 (pulse+tri/saw, flt0 mode3 cutoff20
-reso115 = near self-oscillation) rms 0.20; ch11 (FM) 0.078; ch4 (pulse) 0.019;
-ch3 (pulse) 5.6e-3; while **sin/noise channels are bit-exact even at high Q**
-(ch1 sin reso95 rms 1.9e-9; ch2 noise rms 0). MECHANISM = the §1/josie family:
-the OSM tri/saw/pulse HARD cases (b/d/e/f -- the rcpf-amplified catastrophic-
-cancellation branches v2core already flags "match the asm op order exactly
-(1-ULP fidelity)") carry a residual ~1 ULP vs the binary on certain notes,
-inaudible alone but amplified ~40x by an extreme-resonance filter; FM (fsin) is
-the other ε source. RULED OUT: the rdtsc clock (pinned, byte-stable both sides);
-voice-steal (ch6 is tonal, diverges when soloed); x87-vs-SSE precision (a
-faithful `-m32 -mpc32` PC=24 build is BYTE-IDENTICAL to the default SSE build, so
-the ε is an algorithm/op-order difference, not an FP-mode one). Pinning the exact
-op needs josie-style per-op bisection (tap ch6's voice buffer at the first hard-
-case sample in the t~20 s note). Same irreducible floor as §1.
+**FM oscillator -- TWO more structural v4 bugs (2026-06-09, FIXED).** After the
+box->OSM fix, fr019 was still audibly wrong (diff ~80% of signal) from t=20.32 s
+-- which is exactly when ch11's first FM note enters (the first ~20 s has no FM,
+which is why earlier windows looked clean and the original "FM render-proved"
+claim was premature). The trigger channel is ch11 (osc1 mode5 FM), found by
+whole-mix-aligned onset detection (NOT the binary solo, whose re-Reset shifts
+note timing per-channel -- a real gotcha; the whole-mix diff is the trustworthy
+signal). Both bugs are in `renderFMSin_v5`, both asm-confirmed from the v4 FM
+renderer @0x4282a1, both the v4-vs-v5 FM scheme:
+  1. **Carrier freq<<2.** v4 advances the FM carrier at freq<<2 (`shl edx,2; add
+     eax,edx` @0x4282a7), like the other oscillators at FREQ_CONST-old;
+     renderFMSin_v5 advanced 1x, so the carrier ran at 1/4 rate -- spectrum at
+     894 Hz instead of 996. Fixed -> sidebands match, whole-song bad-seconds
+     40 -> 10 (60 s).
+  2. **Modulation depth 4.0.** v4 scales the modulator by 4.0 (`fmul [0x427e7c]`),
+     twice the 2.0 fcfmmax of the v5 candytron scheme. With 2.0 the timbre is
+     wrong (ch11 magnitude-spectrum corr 0.87, rel-dist 0.57); with 4.0 it matches
+     (corr 0.998, rel-dist 0.065). Fixed -> whole-song 10 -> 0 bad-seconds.
+Both gated `old(DELTA_OSC_FREQ_CONST)` (FM exists only at v4+, FREQ_CONST flips
+at v5, so this proxies the v4-vs-v5 boundary; v5/v6 unchanged, check.py 17/17).
+RESULT: fr019 whole-song (341 s) 0/341 sec above 3%, overall rms-diff/rms 0.12%,
+listening A/B indistinguishable.
+
+**Method lesson (this section was WRONG twice before this rewrite):** "whole-mix
+MATCH 3.9e-6" was a 10 s window; "ch6 pulse / §1 resonance-amplified ULP floor"
+was a mis-attribution off the timing-skewed binary solo. Each "sub-perceptual
+floor" call turned out to be a structural bug found by pushing harder. Judge a
+DEPTH/timbre change by the MAGNITUDE spectrum, not waveform correlation (which is
+phase-dominated): waveform corr stayed -0.69 while the depth fix took the
+magnitude match 0.87 -> 0.998. The remaining 0.12% is a genuine carrier-phase/
+keysync offset (waveform -0.69, magnitude 0.998) + transcendental ULP -- below
+the perceptual floor (confirmed by the whole-song measure AND listening, not an
+assumption). The exact phase op is the only open item; not chased (inaudible).
+RULED OUT for the big divergence: rdtsc clock (pinned), voice-steal, x87-vs-SSE
+(faithful `-m32 -mpc32` build BYTE-IDENTICAL) -- it was plain wrong constants.
 
 **Reusable taps (committed):** `FR019_SOLO=<ch>` (binary channel solo via
 notenum-zeroing @0x448bac+ch*0x50 + re-Reset), `FR019_BUFPEAK` (output peak).

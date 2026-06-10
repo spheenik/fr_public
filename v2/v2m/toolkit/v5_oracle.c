@@ -29,6 +29,9 @@ static void (__attribute__((stdcall)) *p_init)(void*,int)        = (void*)VA_INI
 static void (__attribute__((stdcall)) *p_glob)(void*)            = (void*)VA_GLOB;   // (globals) ret4
 static void (__attribute__((stdcall)) *p_midi)(void*)            = (void*)VA_MIDI;   // (midibuf) ret4
 static void (__attribute__((stdcall)) *p_rend)(void*,int,int,int)= (void*)VA_REND;   // (buf,count,a,b) ret16
+#ifdef VA_LYRICS
+static void (__attribute__((stdcall)) *p_lyrics)(const char**)   = (void*)VA_LYRICS; // (speechptrs) ret4
+#endif
 
 static void synthInit(void*pm){ p_init(pm,44100); }
 static void synthSetGlobals(void*g){ p_glob(g); }
@@ -85,6 +88,13 @@ static void ssReset(){
             UPDATENT(state.chan[ch].ctl[cn].ccnr,state.chan[ch].ctl[cn].ccnt,state.chan[ch].ctl[cn].ccptr,bc->ctl[cn].ccnum); } }
     state.usecs=500000*441; state.num=4; state.den=4; state.tpq=8; state.bar=0; state.beat=0; state.tick=0; state.smplrem=0;
     synthInit(base.patchmap); synthSetGlobals(base.globals);
+#ifdef VA_LYRICS
+    // ronan speech: mirror the genuine player's ssReset tail
+    // (_viruz2.cpp: synthInit -> synthSetGlobals -> synthSetLyrics(speechptrs)).
+    // Feeds the v2m's 256 phoneme-string pointers into ronan so ch15 vocodes
+    // real speech instead of collapsing to silence. ronan was init'd by synthInit.
+    p_lyrics(base.speechptrs);
+#endif
 }
 static void ssTick(){
     if(!state.running) return;

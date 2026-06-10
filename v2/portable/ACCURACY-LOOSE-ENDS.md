@@ -517,10 +517,25 @@ corr 0.85 (peaks/rms within 3 %); per-channel solos — tonal ch7 **0.998** (sam
 aligned; a tiny ≈326 Hz 5th-harmonic timbre residual), FM ch11 0.77 (energy matches,
 phase decorrelates). The FM/noise/drum channels phase-decorrelate — the same
 continuous-osc-phase / noise-seed razor-tie class as fr024/fr029 late-song (§ above) and
-brüllwürfel §7, but heavily exercised by kkrieger's FM bass + drums. **Residuals (non-
-blocking):** (a) ronan/ch15 needs lyrics for a true speech A/B; (b) FM/noise razor-phase;
-(c) the small ch7 326 Hz harmonic timbre delta. Full evidence + reproduce commands in
-`kkrieger-extraction/NOTES.md` §3.
+brüllwürfel §7, but heavily exercised by kkrieger's FM bass + drums.
+
+**True speech A/B (2026-06-10): genuine ronan speaks; the PORTABLE ronan diverges.**
+Found `synthSetLyrics` @0x80742f in the binary (reads wsptr 0x84286c, `rep movsd` 64
+phoneme-string ptrs → texts 0x842a00, sets w.ptr/baseptr +0x140/+0x144) and wired the
+oracle's `ssReset` to call it (generic `-DVA_LYRICS`), mirroring the real player
+(`synthInit→setGlobals→setLyrics`). The genuine engine then **vocodes real speech** on
+ch15 — solo peak 0.21, rms 0.038, formant-clustered (326–457 Hz F1/F2), tonal, syllabic
+envelope. The portable built `V2_RONAN=1` feeds the same lyrics (`v2seq.cpp:175`) + gets
+ch15 note-ons (`v2core.cpp:3719`) but its ronan stays **near-silent** (ch15-solo peak
+0.015, rms 0.0035, corr 0.05 — ~11× under the genuine, below even its own raw carrier).
+Same ronan.cpp source ⇒ the gap is a ronan **version/era difference** (kkrieger-beta
+2004-04 vs the ported RG2/v6 ronan) or a workspace-init delta. **NEW open loose end:
+portable ronan speech-synth fidelity** (separate from the faithful instrument engine;
+kkrieger is the only corpus song with spsize≠0, so nothing else exercised it).
+
+**Residuals (non-blocking):** (a) **portable ronan/ch15 speech divergence** (above —
+the open follow-up); (b) FM/noise razor-phase; (c) the small ch7 326 Hz harmonic timbre
+delta. Full evidence + reproduce commands in `kkrieger-extraction/NOTES.md` §3.
 
 ---
 

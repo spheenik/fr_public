@@ -1,62 +1,82 @@
-# .kkrieger (beta) — v5 own-engine oracle BLOCKED (kkrieger image won't reconstruct)
+# .kkrieger (beta) — v5 own-engine oracle
 
-Goal was the same own-engine verification done for fr-024 / fr-029. It is
-**blocked**: for *this* image the unpack recovers the *data* but not coherent
-*code*, so there is no runnable synth to oracle against. NOT a portable-player
-question — a packer/toolchain limitation, and **specific to kkrieger-beta**:
-candytron is *also* kkrunchy-packed and reconstructs perfectly (its c2 oracle is
-bit-exact, and the `d91f8d7f0449` fild-loop heart below is present 7×). So the
-kkrunchy route works in general; kkrieger-beta's image is the exception.
+**Unpack SOLVED (2026-06-10).** The kkrunchy_k7 image now reconstructs to coherent
+code; the oracle loads and RUNS kkrieger's genuine V2 engine. One residual wiring
+issue (osc-amplitude silence) is open before a clean A/B vs the portable — see §3.
 
-## What works
+## 1. The unpack blocker — SOLVED
 
-- `~/downloads/kkrieger-beta.zip` → `pno0001.exe` (kkrunchy-packed, 95 KB).
-- `era unpack` runs the stub under Unicorn and dumps a 14 MB image
-  (`unpacked.bin`). The **data** decompressed correctly:
-  - `era carve` finds 2 valid v2m songs (span 0 = `v2m/embedded/kkrieger.v2m`,
-    27031 bytes, 13 ch, **spsize=128 → uses ronan speech**).
-  - `era assay` reads real float constants: modern noise LCG present, no baked
-    oscfreq, no v6 oscseeds. (The "v6 fcdcoffset 2^-18" hits at 0x46d5d5/0x46fb03/
-    0x4785bd are in the **game-code** region 0x46–0x47, not the synth at 0x40–0x43
-    — coincidental 0x39800000 float matches in physics/render code, not the synth.)
-  - Data-signature alone ⇒ kkrieger is *consistent with* modern-core v5 (like
-    fr024/fr029/candytron) — but a data signature is **not** an engine render, so
-    this stays UNVERIFIED, not proven.
+kkrieger-beta is packed with **kkrunchy_k7** (ryg, 2004; source is in this repo at
+`kkrunchy_k7/`), a *newer* kkrunchy than candytron's. k7 adds an x86 **split-stream
+disassembly filter**: the packer (`exepacker.cpp` → `DisFilter::Filter`) separates
+opcode bytes from their operand/immediate/displacement bytes so each stream
+compresses better; the stub reverses it with `DisUnFilter` (stage **depack2.asm**).
 
-## Why the code is unusable (decisive proof)
+The generic `era unpack` route stopped at the stub's **import-resolution loop**
+(`depacker.asm` ~L466: `mov esi,IMPORTS; mov ebx,LOADLIBRARY; call [ebx]`). With no
+Windows loader the IAT slots hold filler (0x17bb7), so `call [ebx]` faulted —
+**before** stage1 returns to depack2. The un-filter therefore never ran and the
+dumped `.text` stayed in split form: opcodes stripped from operands. Proof: the
+address-free fild-loop heart `d91f8d7f0449` was present 7× in candytron/fr024/fr029
+and **0×** here, and the noise LCG sat as bare bytes `35 84 b3 0b 6b 63 19 36`
+without its `imul`/`add` opcodes. (candytron is an *older* kkrunchy with no such
+filter, which is why it always worked — the stub-stop `fetch-unmapped` at a low addr
+is the *normal* kkrunchy finish, not the tell.)
 
-Two independent proofs the .text is not coherent code:
+**Fix:** stub the two imports so the loop completes → stage1 returns → depack2 runs
+`DisUnFilter` → coherent `.text`. `kkr_unpack.py` (this dir) maps a scratch page with
+`LoadLibraryA`(ret 4)/`GetProcAddress`(ret 8) stubs returning a fake nonzero value,
+patches the IAT slots at the import-loop entry, runs to the post-un-filter OEP fault,
+and dumps. Result verified: `fild-heart` and `imul-LCG` both present, fully
+disassemblable.
 
-1. **The address-free fild-loop heart is absent.** The v5 synth is byte-identical
-   across releases, so `d9 1f 8d 7f 04 49` (`fstp [edi]; lea edi,[edi+4]; dec ecx`,
-   the address-free core of `synthSetGlobals` and the param fild loops) appears
-   **7× in candytron, 7× in fr024, 7× in fr029 — and 0× in kkrieger.**
+```
+unzip ~/downloads/kkrieger-beta.zip pno0001.exe -d /tmp/kk
+python3 kkr_unpack.py /tmp/kk/pno0001.exe unpacked_fixed.bin   # base 0x7c0000
+```
 
-2. **The noise LCG is bare data, not an instruction.** In candytron (@0x414419)
-   the modern LCG is `imul eax,eax,0xbb38435 ; add eax,0x3619636b`
-   (`69 c0 35 84 b3 0b  05 6b 63 19 36`). In kkrieger the same constants appear as
-   bare adjacent bytes `35 84 b3 0b 6b 63 19 36` with the `69 c0`/`05` opcodes
-   **stripped**, sitting in a table-like layout amid null padding and
-   absolute-VA-looking dwords (0x842878, 0x842b00…). Disassembly of the whole
-   synth region is incoherent (`jmp 0xac3624ba`, missing displacement operands).
+**Image base is 0x7c0000** (not 0x400000 like the other demos) — the toolkit's
+`era disasm/assay` assume 0x400000, so add 0x3c0000 to their reported VAs, or use a
+capstone disasm at base 0x7c0000.
 
-This looks like kkrunchy's **disassembly-based code filter** (ryg's packer
-segregates opcode vs. operand/relocation streams for better compression; the
-decompressor un-filters them as its final stage). candytron's earlier (2003)
-kkrunchy build either omits the filter or the toolkit emulation reverses it;
-kkrieger-beta (2004-04) is a later build whose filtered `.text` the current
-`era unpack` route does **not** reconstruct for this image. The stub-stop
-(`fetch-unmapped eip=0x17bb7`) is the *normal* kkrunchy finish signal — candytron
-stops the same way at 0xffba — so the stop is not the tell; the recovered bytes are.
+## 2. Oracle — runs the genuine engine
 
-## To unblock (separate, substantial task — not attempted here)
+Built like fr024/fr029 (`../toolkit/v5_oracle.c`) but at base 0x7c0000. Synth-entry
+VAs (found by the same fingerprints, in the now-coherent image):
 
-Diagnose why kkrieger-beta's stub leaves `.text` un-reconstructed where
-candytron's doesn't (compare the two kkrunchy stubs; likely the newer build's
-x86 un-filter pass is the gap), then either run it to true completion under
-Unicorn or implement the un-filter over the dumped stream. This is RE on the
-packer, orthogonal to the synth port. Every *other* carvable demo in the corpus
-is aPLib (clean round-trip) or kkrunchy-that-works (candytron); kkrieger-beta is
-the lone holdout. Until then, kkrieger's song renders deterministically in the
-portable player and is era-*plausible* (modern-core data signature), but cannot
-be called *faithful*.
+| fn | VA | note |
+| --- | --- | --- |
+| synthInit ret8 | **0x809e2e** | zeroes 0x1e2cc8 state @0x8c4f48; 32 voices @0x8c6e5c stride 0x228 |
+| synthRender ret16 | **0x809f08** | PC=24; out buf = arg0; mixes internal 0x8c4644 → buf |
+| synthProcessMIDI ret4 | **0x80a222** | |
+| synthSetGlobals ret4 | **0x80a530** | 22 globals → floats @0xa7ee9c |
+| rdtsc | **0x8082ae, 0x808966** | |
+
+```
+gcc -m32 -no-pie -O0 ../toolkit/v5_oracle.c -I../toolkit -o oracle \
+  -DORACLE_IMG_BASE=0x7c0000u -DIMG_SIZE=0xd87000 \
+  -DVA_INIT=0x809e2e -DVA_GLOB=0x80a530 -DVA_MIDI=0x80a222 -DVA_REND=0x809f08 \
+  -DRDTSC0=0x8082ae -DRDTSC1=0x808966
+./oracle unpacked_fixed.bin ../embedded/kkrieger.v2m orc.f32 30
+```
+
+Verified working end-to-end: `setSampleRate` produces the canonical oscbase
+12740060; `synthProcessMIDI` allocates voices; the **amplitude envelope generates
+correctly** (e.g. a voice sustaining at curvol 0.92, aenv state = sustain). The
+genuine engine is executing.
+
+## 3. OPEN: osc-amplitude silence (NOT an unpack issue)
+
+The render comes out near-silent (peak ~8e-8) **despite correct envelopes**. The
+osc *phase* advances at the right frequency (≈65 Hz from a correct integer phase
+increment) and curvol is right (0.92), but the osc *output amplitude* is ~1e-8 — the
+collapse is in the oscillator gain/output path, the same class as the brüllwürfel
+"osc collapse" gotcha ([[brullwurfel-v5-oracle]]: a synth-relevant global the demo's
+init wrapper sets that a synth-only harness must replay). The osc render (0x808377)
+is coherent and dispatches by type; the missing piece is a gain/scale the game's
+startup establishes outside synthInit/SetGlobals. This blocks the final A/B vs the
+portable but is independent of the (now solved) unpack. song uses ronan (spsize=128);
+the harness doesn't set lyrics yet, so ch15 is silent either way.
+
+Disposition: kkrieger's engine is now reachable and running; finishing the A/B is a
+bounded follow-up (find the osc-gain global), not a packer problem.

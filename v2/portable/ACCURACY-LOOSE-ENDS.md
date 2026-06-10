@@ -482,7 +482,7 @@ byte-identical across releases). Full per-song writeups + reproduce commands in
 | --- | --- | --- | --- | --- | --- |
 | fr-024 | v5 | **0.999991** | 0.0010 | 1.140 / 1.130 | PROVEN — ε-floor (bit-exact first 60s; late-song razor-tie max\|d\| 0.026 @182s) |
 | fr-029 | v5 | **0.999557** | 0.0051 | 1.162 / 1.160 | PROVEN — ε-floor (late-song 0.009 band == candytron's; max\|d\| 0.35 @145s, 1-sample tie) |
-| kkrieger | v5 | — | — | — | BLOCKED — kkrieger-beta image won't reconstruct coherent `.text` |
+| kkrieger | v5 | — | — | — | unpack SOLVED + engine runs; osc-amplitude silence open (§ below) |
 
 Both fr-024/fr-029 are the same irreducible native-vs-x87 / continuous-osc-phase
 razor-tie class already documented for candytron (§1) and fr019 (§9): bit-exact
@@ -492,18 +492,22 @@ spsize=0 (no ronan), so no speech path was exercised. `era assay` of both matche
 candytron's modern-core v5 signature exactly (modern noise LCG; no baked oscfreq,
 no v6 oscseeds/fcdcoffset).
 
-**kkrieger blocker (image-specific, not a portable issue).** kkrieger-beta is
-kkrunchy-packed; `era unpack` recovers the data (carve finds both songs, assay
-reads real constants) but **not** runnable code: the address-free synth fild-loop
-heart `d91f8d7f0449` is present 7× in candytron/fr024/fr029 and 0× in kkrieger,
-and the noise LCG appears as bare table data with the `imul`/`add` opcodes
-stripped (vs candytron's coherent `imul eax,eax,0xbb38435; add eax,0x3619636b`).
-This is **not** a blanket kkrunchy limit — candytron is *also* kkrunchy and its c2
-oracle is bit-exact. It is specific to kkrieger-beta's (2004-04) likely-newer
-kkrunchy build whose disasm-filtered `.text` the toolkit route doesn't un-filter.
-Unblocking = packer RE (diagnose vs candytron's stub, or implement the un-filter);
-deferred. See `kkrieger-extraction/NOTES.md`. Until then kkrieger stays
-determinism-only / era-plausible, not faithful.
+**kkrieger unpack SOLVED (2026-06-10); engine runs; one open item.** kkrieger-beta
+is **kkrunchy_k7**-packed (newer than candytron's kkrunchy; source in repo at
+`kkrunchy_k7/`), which adds an x86 **split-stream disasm filter** (opcodes split
+from operands; reversed by stage `depack2.asm`/`DisUnFilter`). The generic
+`era unpack` faulted at the stub's import-resolution loop (no Windows loader →
+`call [LoadLibraryA]` faults) **before** the un-filter ran, leaving `.text` in split
+form — hence the earlier "fild-heart present 7×/0×" and bare-operand LCG findings.
+**Fix:** stub LoadLibraryA/GetProcAddress so the import loop completes → depack2
+un-filters → coherent code (`kkrieger-extraction/kkr_unpack.py`; image base 0x7c0000,
+not 0x400000). The own-engine oracle then loads and RUNS kkrieger's genuine V2 engine
+(correct oscbase 12740060; voices allocate; amp envelopes generate, e.g. curvol 0.92
+sustain). **Open:** the render is near-silent (peak ~8e-8) despite correct envelopes
+— the osc *amplitude* collapses (phase/freq correct), a brüllwürfel-class
+missing-init-global ([[ §7]]), independent of the unpack. Finishing the A/B = find
+the osc-gain global the game's startup sets. Not a blanket kkrunchy limit; candytron
+(older kkrunchy) was always fine. See `kkrieger-extraction/NOTES.md` §3.
 
 ---
 

@@ -463,6 +463,48 @@ Scratch: `era unpack ~/downloads/fr019_party.zip's fr-019-party-b.exe
 /tmp/fr019_unpacked.bin`; carve 0 = the v4 song. fr-022 party (also ms2002, v3,
 has pulse) and the fr019 pulse/oscjtab disasm are the cross-checks.
 
+## 10. v5 corpus verification — fr-024 & fr-029 PROVEN, kkrieger blocked
+
+**Status (2026-06-10): two of the three previously-unverified v5 songs are now
+oracle-proven faithful; the third is blocked on its packer.** This closes the
+"determinism-only" gap for the v5 corpus that §4 flagged — the portable v5 model
+was proven against candytron only; now fr-024 and fr-029 are proven against
+*their own* engines too.
+
+Method: a generic v5 own-engine oracle (`../v2m/toolkit/v5_oracle.c`) — the same
+source-ported `_viruz2.cpp` player as the candytron c2, parametrised by `-D` flags
+for the 4 synth-entry VAs + rdtsc sites of each binary. Entry VAs were located by
+address-free code fingerprints against candytron's (the v5 synth source is
+byte-identical across releases). Full per-song writeups + reproduce commands in
+`../v2m/{fr024,fr029,kkrieger}-extraction/NOTES.md`.
+
+| song | era | whole-song corr | rms\|d\| | peak orc/port | disposition |
+| --- | --- | --- | --- | --- | --- |
+| fr-024 | v5 | **0.999991** | 0.0010 | 1.140 / 1.130 | PROVEN — ε-floor (bit-exact first 60s; late-song razor-tie max\|d\| 0.026 @182s) |
+| fr-029 | v5 | **0.999557** | 0.0051 | 1.162 / 1.160 | PROVEN — ε-floor (late-song 0.009 band == candytron's; max\|d\| 0.35 @145s, 1-sample tie) |
+| kkrieger | v5 | — | — | — | BLOCKED — kkrieger-beta image won't reconstruct coherent `.text` |
+
+Both fr-024/fr-029 are the same irreducible native-vs-x87 / continuous-osc-phase
+razor-tie class already documented for candytron (§1) and fr019 (§9): bit-exact
+or sub-µ early, a 1-ULP transcendental tie nudges a keysync=0 osc phase late in
+the song, per-second corr stays ≥0.998 throughout. Sub-perceptual. Both songs are
+spsize=0 (no ronan), so no speech path was exercised. `era assay` of both matches
+candytron's modern-core v5 signature exactly (modern noise LCG; no baked oscfreq,
+no v6 oscseeds/fcdcoffset).
+
+**kkrieger blocker (image-specific, not a portable issue).** kkrieger-beta is
+kkrunchy-packed; `era unpack` recovers the data (carve finds both songs, assay
+reads real constants) but **not** runnable code: the address-free synth fild-loop
+heart `d91f8d7f0449` is present 7× in candytron/fr024/fr029 and 0× in kkrieger,
+and the noise LCG appears as bare table data with the `imul`/`add` opcodes
+stripped (vs candytron's coherent `imul eax,eax,0xbb38435; add eax,0x3619636b`).
+This is **not** a blanket kkrunchy limit — candytron is *also* kkrunchy and its c2
+oracle is bit-exact. It is specific to kkrieger-beta's (2004-04) likely-newer
+kkrunchy build whose disasm-filtered `.text` the toolkit route doesn't un-filter.
+Unblocking = packer RE (diagnose vs candytron's stub, or implement the un-filter);
+deferred. See `kkrieger-extraction/NOTES.md`. Until then kkrieger stays
+determinism-only / era-plausible, not faithful.
+
 ---
 
 ### Scrapped / descoped

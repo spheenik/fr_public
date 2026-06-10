@@ -125,6 +125,13 @@ static void ssTick(){
             UPDATENT2(state.chan[ch].notenr,state.chan[ch].notent,state.chan[ch].noteptr,bc->notenum); }
         UPDATENT3(state.chan[ch].notenr,state.chan[ch].notent,state.chan[ch].noteptr,bc->notenum); }
     *mptr++=0xfd;
+#ifdef KK_VOICEBASE
+    if(getenv("KK_MIDITRACE")){ u8*q=midibuf; u32 st=0;
+        fprintf(stderr,"[midi] t=%u :",state.time);
+        while(*q!=0xfd){ if(*q&0x80){ st=*q; fprintf(stderr," |%02x",*q); q++; }
+            else fprintf(stderr," %02x",*q), q++; }
+        fprintf(stderr,"\n"); }
+#endif
     synthProcessMIDI(midibuf);
     if(state.nexttime==(u32)-1) state.running=0;
 }
@@ -151,6 +158,14 @@ int main(int argc,char**argv){
       sa.sa_flags=SA_SIGINFO; sigaction(SIGFPE,&sa,NULL); }
     oracle_map_image(img, IMG_SIZE);
     oracle_pin_rdtsc(RDTSC_SITES, sizeof(RDTSC_SITES)/sizeof(RDTSC_SITES[0]));
+#ifdef KK_RONAN_JNE
+    // KK_NORONAN: convert the `jne .noronan` guarding the ch15 syRonanProcess
+    // call into an unconditional jmp (0x75->0xeb), so ch15 renders the RAW
+    // oscillator carrier instead of the (lyric-less => silent) vocoded speech.
+    if(getenv("KK_NORONAN")){ u8*p=(u8*)(uintptr_t)KK_RONAN_JNE;
+        if(*p==0x75){ *p=0xeb; fprintf(stderr,"[orc] ronan ch15 NOP'd (raw carrier)\n"); }
+        else fprintf(stderr,"[orc] WARN no jne @%#x (%02x)\n",KK_RONAN_JNE,*p); }
+#endif
 #ifdef IAT_ALLOC
     *(u32*)(uintptr_t)IAT_ALLOC=(u32)(uintptr_t)&stub_alloc;
     *(u32*)(uintptr_t)IAT_ALLOC2=(u32)(uintptr_t)&stub_ident;
@@ -174,10 +189,27 @@ int main(int argc,char**argv){
     u32 CHUNK=getenv("ORC_CHUNK")?atoi(getenv("ORC_CHUNK")):2048;
     float*buf=malloc(8192*2*sizeof(float));
     FILE*out=fopen(outp,"wb");
+#ifdef KK_VOICEBASE
+    int vtrace=getenv("KK_VTRACE")!=NULL; u32 nextv=0;
+#endif
     while(done<total){ u32 n=(total-done<CHUNK)?(total-done):CHUNK;
         ssRender(buf,n);
         for(u32 i=0;i<n*2;i++){double a=buf[i];if(a<0)a=-a;if(a>peak)peak=a;}
         fwrite(buf,2*sizeof(float),n,out); done+=n;
+#ifdef KK_VOICEBASE
+        if(vtrace && done>=nextv){ nextv+=44100; // once/sec
+            double cpk=0; for(u32 i=0;i<n*2;i++){double a=buf[i];if(a<0)a=-a;if(a>cpk)cpk=a;}
+            fprintf(stderr,"[v] %.0fs mixpk=%.3e\n",(double)done/44100,cpk);
+            for(int v=0;v<32;v++){ u32 vb=KK_VOICEBASE+v*0x228;
+                s32 ch=*(s32*)(uintptr_t)(KK_CHANMAP+4*v);
+                if(ch<0) continue;
+                u32 gate=*(u32*)(uintptr_t)(vb+0x8);
+                float curvol=*(float*)(uintptr_t)(vb+0xc);
+                u32 o1=vb+0x30; u32 mode=*(u32*)(uintptr_t)(o1);
+                float g=*(float*)(uintptr_t)(o1+0x20); u32 freq=*(u32*)(uintptr_t)(o1+0xc);
+                fprintf(stderr,"    v%02d ch%d gate=%u curvol=%.4f osc1[mode=%u gain=%.5e freq=%u]\n",
+                    v,ch,gate,curvol,mode,g,freq); } }
+#endif
         if(!state.running){ fprintf(stderr,"[orc] song ended at %.1fs\n",(double)done/44100); break; } }
     fclose(out);
     fprintf(stderr,"[orc] rendered %.1fs peak=%.4f\n",(double)done/44100,peak);

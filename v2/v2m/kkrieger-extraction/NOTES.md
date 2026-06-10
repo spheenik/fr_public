@@ -1,8 +1,10 @@
 # .kkrieger (beta) — v5 own-engine oracle
 
-**Unpack SOLVED (2026-06-10).** The kkrunchy_k7 image now reconstructs to coherent
-code; the oracle loads and RUNS kkrieger's genuine V2 engine. One residual wiring
-issue (osc-amplitude silence) is open before a clean A/B vs the portable — see §3.
+**Unpack SOLVED (2026-06-10).** The kkrunchy_k7 image reconstructs to coherent code;
+the oracle loads and RUNS kkrieger's genuine V2 engine. **The earlier "osc-amplitude
+silence" diagnosis was WRONG** — the engine renders all 13 channels correctly; the
+near-silent intro is the **ronan speech channel (ch15) vocoding to nothing without
+lyrics**, and the intro happens to be ch15-only. A/B now characterised — see §3.
 
 ## 1. The unpack blocker — SOLVED
 
@@ -52,31 +54,64 @@ VAs (found by the same fingerprints, in the now-coherent image):
 | synthSetGlobals ret4 | **0x80a530** | 22 globals → floats @0xa7ee9c |
 | rdtsc | **0x8082ae, 0x808966** | |
 
+The `-DKK_*` flags below enable env-gated kkrieger probes baked into `v5_oracle.c`
+(harmless to fr024/fr029, which don't define them): `KK_VOICEBASE`+`KK_CHANMAP`
+arm `KK_VTRACE` (per-sec voice dump: chan/gate/curvol/osc mode·gain·freq) and
+`KK_MIDITRACE` (emitted midibuf per tick); `KK_RONAN_JNE` arms `KK_NORONAN`
+(patch the ch15 `syRonanProcess` guard `jne`→`jmp` so ch15 renders the RAW carrier).
+
 ```
 gcc -m32 -no-pie -O0 ../toolkit/v5_oracle.c -I../toolkit -o oracle \
   -DORACLE_IMG_BASE=0x7c0000u -DIMG_SIZE=0xd87000 \
   -DVA_INIT=0x809e2e -DVA_GLOB=0x80a530 -DVA_MIDI=0x80a222 -DVA_REND=0x809f08 \
-  -DRDTSC0=0x8082ae -DRDTSC1=0x808966
+  -DRDTSC0=0x8082ae -DRDTSC1=0x808966 \
+  -DKK_VOICEBASE=0x8c6e5c -DKK_CHANMAP=0x8c4f58 -DKK_RONAN_JNE=0x80a0fb
 ./oracle unpacked_fixed.bin ../embedded/kkrieger.v2m orc.f32 30
 ```
 
 Verified working end-to-end: `setSampleRate` produces the canonical oscbase
-12740060; `synthProcessMIDI` allocates voices; the **amplitude envelope generates
-correctly** (e.g. a voice sustaining at curvol 0.92, aenv state = sustain). The
-genuine engine is executing.
+12740060; `synthProcessMIDI` allocates voices; envelopes generate correctly; and
+**all 13 channels render** (peak 0.153, rms 0.019 over 30 s).
 
-## 3. OPEN: osc-amplitude silence (NOT an unpack issue)
+## 3. A/B vs the portable — characterised (engine faithful; ronan + razor-phase residual)
 
-The render comes out near-silent (peak ~8e-8) **despite correct envelopes**. The
-osc *phase* advances at the right frequency (≈65 Hz from a correct integer phase
-increment) and curvol is right (0.92), but the osc *output amplitude* is ~1e-8 — the
-collapse is in the oscillator gain/output path, the same class as the brüllwürfel
-"osc collapse" gotcha ([[brullwurfel-v5-oracle]]: a synth-relevant global the demo's
-init wrapper sets that a synth-only harness must replay). The osc render (0x808377)
-is coherent and dispatches by type; the missing piece is a gain/scale the game's
-startup establishes outside synthInit/SetGlobals. This blocks the final A/B vs the
-portable but is independent of the (now solved) unpack. song uses ronan (spsize=128);
-the harness doesn't set lyrics yet, so ch15 is silent either way.
+The "osc-amplitude silence" of the earlier note was a **misdiagnosis**. The chain of
+evidence:
 
-Disposition: kkrieger's engine is now reachable and running; finishing the A/B is a
-bounded follow-up (find the osc-gain global), not a packer problem.
+1. **The intro is ch15-only.** The other channels' tick-0/tick-12 events are
+   *note-offs* (vel 0); their real notes don't start until tick ~3072 (≈21 s). So the
+   first ~21 s is genuinely just channel 15 — the `KK_VTRACE` dump shows the only
+   active voices in that window are all ch15 (curvol correct ≈0.96, osc gain 0.99,
+   freq correct), yet the mix is ~7e-8.
+2. **ch15 is the ronan speech channel.** `RenderBlock` (binary @0x80a0f8) routes
+   `cl==15` through `syRonanProcess` (@0x809e24), which vocodes the channel's raw
+   oscillator carrier through the speech synth. **Without lyrics, ronan zeroes ch15**
+   → the ch15-only intro is ~silent. NOPing the guard (`KK_NORONAN`) makes ch15 render
+   the raw carrier and the intro becomes audible (peak 0.27). The collapse is *not* an
+   osc-gain global and *not* the brüllwürfel SR-const class — it is the documented
+   "harness doesn't drive ronan lyrics" path. (The portable defaults to `V2_RONAN 0`,
+   so it too leaves ch15 raw — neither side currently vocodes speech.)
+3. **The instrument engine is faithful.** Excluding ch15 (portable `KK_MUTECH=15` vs
+   the oracle's ronan-silenced ch15): whole-mix corr **0.85**, peaks 0.153/0.143, rms
+   0.0192/0.0187 (≈3 %). Per-channel **solos** (strip the v2m to one channel by zeroing
+   the other channels' velocity columns — `/tmp/strip.py` idiom — and render both):
+
+   | channel | osc1 mode | corr | rms-ratio orc/port | reading |
+   | --- | --- | --- | --- | --- |
+   | ch7  | 2 (sine)   | **0.998** | 1.03 | tonal; tiny 5th-harmonic (≈326 Hz) timbre residual |
+   | ch11 | 4 (FM)     | 0.768 | 0.99 | FM osc: energy matches, **phase decorrelates** |
+
+   ch7 is sample-aligned (lag 0) and tonal (the diff is 92 % <500 Hz, spectrally tonal
+   — **not** noise). ch11's FM oscillator matches in energy but razor-phase
+   decorrelates — the same continuous-osc-phase / FM razor-tie class as fr024/fr029's
+   late-song drift ([[v5-corpus-own-engine-verified]]) and the brüllwürfel noise-seed
+   sub-era delta ([[brullwurfel-v5-oracle]] §7), just **heavily exercised** here by
+   kkrieger's FM bass + drums + 13-channel mix. The whole-mix 32-sample lag comes from
+   those FM/noise channels, not the tonal ones.
+
+**Disposition.** kkrieger's genuine engine is unpacked, runs, and renders every
+channel; instrument fidelity is structural/energy-faithful (tonal channels ≈0.998),
+with two characterised, non-blocking residuals: (a) ronan/ch15 needs lyrics for a true
+speech A/B (separate path, not exercised by any spsize=0 song); (b) FM/noise channels
+phase-decorrelate (known razor-tie class). It is **not** bit-exact like fr024/fr029,
+and the small ch7 326 Hz harmonic residual is a remaining fine-grained loose end.

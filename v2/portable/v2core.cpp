@@ -4330,6 +4330,11 @@ private:
       if (voice == POLY)
         continue;
 
+#ifndef NDEBUG
+      if (getenv("KK_MUTECH") && (atoi(getenv("KK_MUTECH")) == chan))
+        continue;
+#endif
+
       // clear channel buffer
       memset(instance.chanbuf, 0, nsamples * sizeof(StereoSample));
 

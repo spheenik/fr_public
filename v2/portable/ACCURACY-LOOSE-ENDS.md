@@ -482,7 +482,7 @@ byte-identical across releases). Full per-song writeups + reproduce commands in
 | --- | --- | --- | --- | --- | --- |
 | fr-024 | v5 | **0.999991** | 0.0010 | 1.140 / 1.130 | PROVEN — ε-floor (bit-exact first 60s; late-song razor-tie max\|d\| 0.026 @182s) |
 | fr-029 | v5 | **0.999557** | 0.0051 | 1.162 / 1.160 | PROVEN — ε-floor (late-song 0.009 band == candytron's; max\|d\| 0.35 @145s, 1-sample tie) |
-| kkrieger | v5 | — | — | — | unpack SOLVED + engine runs; osc-amplitude silence open (§ below) |
+| kkrieger | v5 | 0.85 mix / 0.998 ch7 | 0.011 | 0.153 / 0.143 | unpack SOLVED + engine runs + all channels render; "silence" was ronan/ch15 (§ below) |
 
 Both fr-024/fr-029 are the same irreducible native-vs-x87 / continuous-osc-phase
 razor-tie class already documented for candytron (§1) and fr019 (§9): bit-exact
@@ -492,22 +492,35 @@ spsize=0 (no ronan), so no speech path was exercised. `era assay` of both matche
 candytron's modern-core v5 signature exactly (modern noise LCG; no baked oscfreq,
 no v6 oscseeds/fcdcoffset).
 
-**kkrieger unpack SOLVED (2026-06-10); engine runs; one open item.** kkrieger-beta
-is **kkrunchy_k7**-packed (newer than candytron's kkrunchy; source in repo at
-`kkrunchy_k7/`), which adds an x86 **split-stream disasm filter** (opcodes split
-from operands; reversed by stage `depack2.asm`/`DisUnFilter`). The generic
+**kkrieger unpack SOLVED (2026-06-10); engine runs; all channels render.**
+kkrieger-beta is **kkrunchy_k7**-packed (newer than candytron's kkrunchy; source in
+repo at `kkrunchy_k7/`), which adds an x86 **split-stream disasm filter** (opcodes
+split from operands; reversed by stage `depack2.asm`/`DisUnFilter`). The generic
 `era unpack` faulted at the stub's import-resolution loop (no Windows loader →
 `call [LoadLibraryA]` faults) **before** the un-filter ran, leaving `.text` in split
 form — hence the earlier "fild-heart present 7×/0×" and bare-operand LCG findings.
 **Fix:** stub LoadLibraryA/GetProcAddress so the import loop completes → depack2
 un-filters → coherent code (`kkrieger-extraction/kkr_unpack.py`; image base 0x7c0000,
-not 0x400000). The own-engine oracle then loads and RUNS kkrieger's genuine V2 engine
-(correct oscbase 12740060; voices allocate; amp envelopes generate, e.g. curvol 0.92
-sustain). **Open:** the render is near-silent (peak ~8e-8) despite correct envelopes
-— the osc *amplitude* collapses (phase/freq correct), a brüllwürfel-class
-missing-init-global ([[ §7]]), independent of the unpack. Finishing the A/B = find
-the osc-gain global the game's startup sets. Not a blanket kkrunchy limit; candytron
-(older kkrunchy) was always fine. See `kkrieger-extraction/NOTES.md` §3.
+not 0x400000). The own-engine oracle loads and RUNS kkrieger's genuine V2 engine and
+renders **all 13 channels** (peak 0.153). Not a blanket kkrunchy limit; candytron
+(older kkrunchy) was always fine.
+
+**The earlier "osc-amplitude silence" was a MISDIAGNOSIS** (corrected 2026-06-10). It
+is *not* a missing osc-gain global / brüllwürfel SR-const class. The first ~21 s is
+genuinely **ch15-only** (every other channel's tick-0/12 events are note-OFFs, vel 0;
+real notes start tick ~3072), and ch15 is the **ronan speech channel** — `RenderBlock`
+routes `cl==15` through `syRonanProcess`, which vocodes the carrier to **silence
+without lyrics**. NOP the ch15 ronan guard (`KK_NORONAN`) and the intro renders the raw
+carrier (peak 0.27). (The portable defaults to `V2_RONAN 0`, so it too leaves ch15 raw;
+neither side currently drives speech.) **Instrument fidelity, ch15 excluded:** whole-mix
+corr 0.85 (peaks/rms within 3 %); per-channel solos — tonal ch7 **0.998** (sample-
+aligned; a tiny ≈326 Hz 5th-harmonic timbre residual), FM ch11 0.77 (energy matches,
+phase decorrelates). The FM/noise/drum channels phase-decorrelate — the same
+continuous-osc-phase / noise-seed razor-tie class as fr024/fr029 late-song (§ above) and
+brüllwürfel §7, but heavily exercised by kkrieger's FM bass + drums. **Residuals (non-
+blocking):** (a) ronan/ch15 needs lyrics for a true speech A/B; (b) FM/noise razor-phase;
+(c) the small ch7 326 Hz harmonic timbre delta. Full evidence + reproduce commands in
+`kkrieger-extraction/NOTES.md` §3.
 
 ---
 

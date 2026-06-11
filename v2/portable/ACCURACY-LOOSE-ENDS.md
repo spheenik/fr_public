@@ -482,7 +482,7 @@ byte-identical across releases). Full per-song writeups + reproduce commands in
 | --- | --- | --- | --- | --- | --- |
 | fr-024 | v5 | **0.999991** | 0.0010 | 1.140 / 1.130 | PROVEN — ε-floor (bit-exact first 60s; late-song razor-tie max\|d\| 0.026 @182s) |
 | fr-029 | v5 | **0.999557** | 0.0051 | 1.162 / 1.160 | PROVEN — ε-floor (late-song 0.009 band == candytron's; max\|d\| 0.35 @145s, 1-sample tie) |
-| kkrieger | v5 | 0.85 mix / 0.998 ch7 | 0.011 | 0.153 / 0.143 | unpack SOLVED + engine runs + all channels render; "silence" was ronan/ch15 (§ below) |
+| kkrieger | v5 | **0.9995** (float FM) / 0.44 (default int FM) | 0.0013 | 0.239 / 0.241 | FM-scheme root-caused + fix PROVEN ε-floor whole-song; BLOCKED on build-era gating (v5 int-vs-float FM, ungateable from format) — default still inexact (§ below) |
 
 Both fr-024/fr-029 are the same irreducible native-vs-x87 / continuous-osc-phase
 razor-tie class already documented for candytron (§1) and fr019 (§9): bit-exact
@@ -519,23 +519,58 @@ phase decorrelates). The FM/noise/drum channels phase-decorrelate — the same
 continuous-osc-phase / noise-seed razor-tie class as fr024/fr029 late-song (§ above) and
 brüllwürfel §7, but heavily exercised by kkrieger's FM bass + drums.
 
-**True speech A/B (2026-06-10): genuine ronan speaks; the PORTABLE ronan diverges.**
-Found `synthSetLyrics` @0x80742f in the binary (reads wsptr 0x84286c, `rep movsd` 64
-phoneme-string ptrs → texts 0x842a00, sets w.ptr/baseptr +0x140/+0x144) and wired the
-oracle's `ssReset` to call it (generic `-DVA_LYRICS`), mirroring the real player
-(`synthInit→setGlobals→setLyrics`). The genuine engine then **vocodes real speech** on
-ch15 — solo peak 0.21, rms 0.038, formant-clustered (326–457 Hz F1/F2), tonal, syllabic
-envelope. The portable built `V2_RONAN=1` feeds the same lyrics (`v2seq.cpp:175`) + gets
-ch15 note-ons (`v2core.cpp:3719`) but its ronan stays **near-silent** (ch15-solo peak
-0.015, rms 0.0035, corr 0.05 — ~11× under the genuine, below even its own raw carrier).
-Same ronan.cpp source ⇒ the gap is a ronan **version/era difference** (kkrieger-beta
-2004-04 vs the ported RG2/v6 ronan) or a workspace-init delta. **NEW open loose end:
-portable ronan speech-synth fidelity** (separate from the faithful instrument engine;
-kkrieger is the only corpus song with spsize≠0, so nothing else exercised it).
+**True speech A/B: genuine ronan speaks; portable ch15 near-silent — LOCALIZED to the
+CARRIER, not ronan (2026-06-11).** Found `synthSetLyrics` @0x80742f (reads wsptr
+0x84286c, `rep movsd` 64 ptrs → texts 0x842a00) and wired the oracle's `ssReset` to call
+it (`-DVA_LYRICS`). The genuine engine vocodes real speech on ch15 (peak 0.21, rms 0.038,
+326–457 Hz F1/F2). The portable (`V2_RONAN=1`) feeds the same lyrics + note-ons yet ch15
+is near-silent (peak 0.015, rms 0.003, corr 0.05). **The "ronan version/era difference"
+guess is DISPROVEN; the bug is the ch15 oscillator carrier.** Evidence (full writeup +
+repro in `kkrieger-extraction/NOTES.md` §3):
+- **ronan is identical & faithful.** `werkkzeug3_kkrieger/ronan.cpp` ≡ the forked
+  `v2/ronan.cpp` (syls/phonemes/`db2lin`/post-EQ all equal; the only different variant,
+  RG2/ViruzII, is *quieter*). Traced: the sequencer walks the marker-less lyric
+  `AH27OH40…` correctly (curp2 60→39→42→25→16), `a_voicing≈0.397`, formant gains right.
+  ronan vocodes whatever carrier it gets. (kkrieger is the only `!`/`_`-free, free-run
+  lyric in the corpus — candytron/josie are all `!`-gated — but that path is proven here
+  too, so the candytron corr-0.99966 validation was *not* the gap.)
+- **The carrier is harmonic-collapsed.** ch15 raw-carrier energy matches the genuine
+  (rms 0.039 vs 0.041) but its spectrum is ~all <200 Hz (sub-200 ≈12300 vs ~250 above
+  500 Hz); the genuine carrier is broadband. A formant filter is a high-Q bandpass at
+  500–3000 Hz → with no harmonics there, ronan outputs silence (retains 8% of carrier
+  energy vs the genuine's 86% → the 11×).
+- **Root cause = the FM-osc PHASE SCHEME (root-caused 2026-06-11).** ch15 patch pgm12 runs
+  three same-pitch oscs (osc0 PULSE, osc1 SAW, osc2 FM mode 5, 65 Hz); V2's FM osc *replaces*
+  the buffer using pulse+saw (±2) as its modulator, so the carrier = the FM output. The
+  portable renders v5 FM with the **integer `fistp` scheme** (`renderFMSin_v5`:
+  `fistp(mod·4·2³¹)`), which **overflows 100 %** on the ±2 modulator (x87 fistp →
+  `0x80000000`) → degenerate pure sine. kkrieger-beta's 2004 engine uses the **float-phase
+  scheme** (`renderFMSin`: `(mod·2 + phase_float)·2π`, `fastsinrc`) → rich FM. **Proven from
+  both binaries:** candytron FM @0x41e066 = integer/`fistp`/native-`fsin` (depth 4.0);
+  kkrieger FM @0x8086a2 = float/`fadd`/`fastsinrc` (depth 2.0). NOT a per-channel "razor
+  phase"/cancellation effect — it is a deterministic scheme mismatch.
+- **Fix PROVEN (not yet gated in).** Dispatching kkrieger's FM to `renderFMSin` makes the
+  ch15 carrier match the genuine (sub-200/above-500 8370/6838 vs 8372/6839), ch15 speech
+  **corr 1.000** (100 % energy, was 11× too quiet), and — because every FM channel ran the
+  same broken scheme — the **whole 30 s mix** vs the own-engine oracle goes **corr 0.44 →
+  0.9995**, rms|d| 0.039 → 0.0013, max|d| 0.013: **ε-floor**, the fr024/fr029 razor-tie band.
+  So the fix promotes kkrieger from "energy-faithful, not bit-exact" to **own-engine-proven
+  at ε-floor**, and subsumes the old "FM/noise razor-phase" residual.
+- **BLOCKER = build-era split inside format v5 (no auto-gate).** fr029 (v5, ~2003) uses
+  **integer** FM and is proven faithful with it (flip → regresses 0.91); kkrieger (v5, 2004)
+  uses **float**. Both fingerprint as v5 (identical `globSize`=22 + patch-param-count) and
+  **no content heuristic separates them**: candytron (2003) has speech+ch15+integer FM; and
+  fr029's FM modulator *also* overflows yet wants the degenerate integer result — so neither
+  "uses speech/ch15" nor "FM overflows" implies float. The era model assumed float-FM = v6
+  (2012); kkrieger-beta proves it shipped in 2004. **2nd build-era ambiguity** after the
+  brüllwürfel noise-seed sub-era (§7) — needs a *provenance-supplied* era hint, not a format
+  gate. Engine default stays integer FM, so **kkrieger is still inexact out of the box**.
 
-**Residuals (non-blocking):** (a) **portable ronan/ch15 speech divergence** (above —
-the open follow-up); (b) FM/noise razor-phase; (c) the small ch7 326 Hz harmonic timbre
-delta. Full evidence + reproduce commands in `kkrieger-extraction/NOTES.md` §3.
+**Residuals.** (a) **FM-scheme gating** — the fix is proven and whole-song ε-floor, but
+blocked on how a caller signals the 2004 build era (ungateable from the v2m; see BLOCKER).
+Until then the engine default (integer FM at v5) leaves kkrieger ch15 silent and its FM
+channels decorrelated. (b) the small ch7 ≈326 Hz 5th-harmonic timbre delta (the only thing
+between the *fixed* song and bit-exact). ronan is faithful and needs no change.
 
 ---
 

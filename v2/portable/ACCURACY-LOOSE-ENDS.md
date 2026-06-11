@@ -482,7 +482,7 @@ byte-identical across releases). Full per-song writeups + reproduce commands in
 | --- | --- | --- | --- | --- | --- |
 | fr-024 | v5 | **0.999991** | 0.0010 | 1.140 / 1.130 | PROVEN — ε-floor (bit-exact first 60s; late-song razor-tie max\|d\| 0.026 @182s) |
 | fr-029 | v5 | **0.999557** | 0.0051 | 1.162 / 1.160 | PROVEN — ε-floor (late-song 0.009 band == candytron's; max\|d\| 0.35 @145s, 1-sample tie) |
-| kkrieger | v5 | **0.9995** (float FM) / 0.44 (default int FM) | 0.0013 | 0.239 / 0.241 | FM-scheme root-caused + fix PROVEN ε-floor whole-song; BLOCKED on build-era gating (v5 int-vs-float FM, ungateable from format) — default still inexact (§ below) |
+| kkrieger | v5 | **0.99999** (`eras::kkrieger2004`) / 0.46 (default Auto/v5 int FM) | 0.0013 | 0.239 / 0.241 | PROVEN ε-floor via the **Era profile** `eras::kkrieger2004` (base v5 + NATIVE_FSIN/FPATAN→New). Default Auto stays int-FM (faithful to fr029); caller names the profile (§ below) |
 
 Both fr-024/fr-029 are the same irreducible native-vs-x87 / continuous-osc-phase
 razor-tie class already documented for candytron (§1) and fr019 (§9): bit-exact
@@ -556,21 +556,50 @@ repro in `kkrieger-extraction/NOTES.md` §3):
   0.9995**, rms|d| 0.039 → 0.0013, max|d| 0.013: **ε-floor**, the fr024/fr029 razor-tie band.
   So the fix promotes kkrieger from "energy-faithful, not bit-exact" to **own-engine-proven
   at ε-floor**, and subsumes the old "FM/noise razor-phase" residual.
-- **BLOCKER = build-era split inside format v5 (no auto-gate).** fr029 (v5, ~2003) uses
-  **integer** FM and is proven faithful with it (flip → regresses 0.91); kkrieger (v5, 2004)
-  uses **float**. Both fingerprint as v5 (identical `globSize`=22 + patch-param-count) and
-  **no content heuristic separates them**: candytron (2003) has speech+ch15+integer FM; and
-  fr029's FM modulator *also* overflows yet wants the degenerate integer result — so neither
-  "uses speech/ch15" nor "FM overflows" implies float. The era model assumed float-FM = v6
-  (2012); kkrieger-beta proves it shipped in 2004. **2nd build-era ambiguity** after the
-  brüllwürfel noise-seed sub-era (§7) — needs a *provenance-supplied* era hint, not a format
-  gate. Engine default stays integer FM, so **kkrieger is still inexact out of the box**.
+- **Root of the ambiguity = build-era split inside format v5 (no auto-gate).** fr029 (v5,
+  ~2003) uses **integer** FM and is proven faithful with it (flip → regresses 0.91); kkrieger
+  (v5, 2004) uses **float**. Both fingerprint as v5 (identical `globSize`=22 + patch-param-
+  count) and **no content heuristic separates them**: candytron (2003) has speech+ch15+integer
+  FM; and fr029's FM modulator *also* overflows yet wants the degenerate integer result — so
+  neither "uses speech/ch15" nor "FM overflows" implies float. The era model assumed float-FM =
+  v6 (2012); kkrieger-beta proves it shipped in 2004. **2nd build-era ambiguity** after the
+  brüllwürfel noise-seed sub-era (§7). The format version *cannot* express it; the caller must
+  supply the missing coordinate — see the Era resolution below.
 
-**Residuals.** (a) **FM-scheme gating** — the fix is proven and whole-song ε-floor, but
-blocked on how a caller signals the 2004 build era (ungateable from the v2m; see BLOCKER).
-Until then the engine default (integer FM at v5) leaves kkrieger ch15 silent and its FM
-channels decorrelated. (b) the small ch7 ≈326 Hz 5th-harmonic timbre delta (the only thing
-between the *fixed* song and bit-exact). ronan is faithful and needs no change.
+**RESOLVED (2026-06-12) — the Era interface.** The format version is a lossy proxy for the
+engine BUILD that rendered a song (the score, not the orchestra); a few ledger rows flip
+mid-version on the build-date timeline the format can't see. The player now takes an **`Era`**
+(`v2eras.h`) = a format-version base + a sparse per-row override of the ledger. `Era::Auto()`
+(default) = the detected version (every clean case, byte-identical to before); a caller who
+knows the provenance names a profile from the **`eras::` catalog**, each entry one disassembled
+binary. The pinned straddler:
+
+```cpp
+inline constexpr Era kkrieger2004 = Era::v(5)
+                                      .with(DELTA_NATIVE_FSIN,   Era::New)   // sine+FM poly @0x808178
+                                      .with(DELTA_NATIVE_FPATAN, Era::New);  // overdrive fastatan @0x808100
+```
+
+PROVEN by disasm of the unpacked binary (image base 0x7c0000): kkrieger's sine osc AND FM both
+call the fastsin **poly** @0x808178 (Horner, double coeffs 0x8080a8/b0/b8, no `fsin`), and the
+per-sample overdrive is the fastatan **poly** @0x808100 (rational, coeffs 0x8080c8..0x808110,
+`fdiv`, no `fpatan` — the only native `fpatan` in the synth are the era-independent π/4 const +
+set-time `odGain2`). Everything else stays v5: NO_DCOFFSET old (no 2^-18 bias in the render),
+POLY_32 old (pool 32) — so kkrieger is a **mixed intermediate build**, NOT v6, and forcing v6
+would wrongly inject the DC bias + grow the pool to 64. The transcendental cluster flipped as a
+unit; the float FM falls out of `NATIVE_FSIN` being New (the dispatch at `v2core.cpp` already
+keyed FM on that row — no new code there). `open(kkrieger.v2m, len, eras::kkrieger2004)` →
+whole-30s corr vs the genuine-engine oracle **0.46 → 0.99999** (no-ronan oracle), ε-floor.
+
+Representation is two 32-bit masks, so every `eras::` entry is `constexpr` and folds every gate
+at compile time (no longer needs `V2_VER_MIN == V2_VER_MAX`). The plumbing: `Player::open(...,
+const Era&)` (+ a back-compat `int` overload) → `V2MPlayer::SetEra` → `synthSetEra` →
+`V2Instance::era`; `old(DELTA_X)` routes through it, with a single-version fast path that bypasses
+the masks (cross-era overrides are unrepresentable when the other version's code isn't compiled).
+
+**Residuals.** (a) the small ch7 ≈326 Hz 5th-harmonic timbre delta (the only thing between the
+*profiled* song and bit-exact). ronan is faithful and needs no change. The FM-scheme gating that
+was blocking is now closed by the Era interface above.
 
 ---
 

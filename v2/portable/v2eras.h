@@ -32,7 +32,18 @@
 #ifndef V2ERAS_H_
 #define V2ERAS_H_
 
-#include "v2portable.h" // V2_VER_MIN / V2_VER_MAX
+#include <stdint.h>
+
+// V2_VER_MIN / V2_VER_MAX: the compiled format-version range. Defined by
+// v2portable.h, but this header is also pulled in stand-alone by the engine
+// (v2core.cpp), so default them here too -- self-contained, no include cycle
+// with the public header (which now includes US, for the Era type below).
+#ifndef V2_VER_MIN
+#define V2_VER_MIN 0
+#endif
+#ifndef V2_VER_MAX
+#define V2_VER_MAX 6
+#endif
 
 namespace v2portable {
 
@@ -409,12 +420,16 @@ static_assert(kDeltas[DELTA_POLY_16].flipsAt <= kDeltas[DELTA_POLY_32].flipsAt,
 // that still advances freq<<2 with native fsin (FREQ_CONST still OLD at v3,
 // @0x40e7a4 `shl edx,2`). So BOXFILTER flips at v3 while FREQ_CONST stays on the
 // build-date proxy (flipsAt 5). They are no longer one convention.
+
+#if V2_VER_MIN == 0 && V2_VER_MAX == 6
+// ledger sanity for the default full-range build. These probe oldBehavior at
+// EXPLICIT versions (1/3/...), so they only hold when the compiled range spans
+// those versions -- a restricted-range build clamps oldBehavior and the probes
+// no longer reflect the pure ledger. Hence the full-range guard (moved inside
+// it so single-version builds, e.g. -DV2_VER_MIN=6, still compile).
 static_assert(!oldBehavior(DELTA_OSC_BOXFILTER, 3), "v3 tri/saw/pulse are analytic OSM (fr014/fr019)");
 static_assert(oldBehavior(DELTA_OSC_BOXFILTER, 1), "v1 tri/saw/pulse are the 4x box (flybye)");
 static_assert(oldBehavior(DELTA_OSC_FREQ_CONST, 3), "v3 sine still advances freq<<2 (fr014 @0x40e7a4)");
-
-#if V2_VER_MIN == 0 && V2_VER_MAX == 6
-// ledger sanity for the default full-range build
 static_assert(oldBehavior(DELTA_ENV_CURVES, 0), "v0 must get old env curves");
 static_assert(oldBehavior(DELTA_ENV_CURVES, 1), "v1 assumed old env curves");
 static_assert(!oldBehavior(DELTA_ENV_CURVES, 2), "v2+ gets modern env curves");
@@ -450,6 +465,92 @@ static_assert(!oldBehavior(DELTA_CHANMOD_NO_VOICE_SRC, 6), "v6 channel mods appl
 inline bool behaviorVersionValid(int v)
 {
   return v >= V2_VER_MIN && v <= V2_VER_MAX;
+}
+
+// ---------------------------------------------------------------------------
+// Era -- the engine-identity coordinate
+// ---------------------------------------------------------------------------
+//
+// The v2m FORMAT VERSION read from a file is a LOSSY proxy for the engine
+// build that rendered it: it is the score, not the orchestra. Most ledger
+// rows track the format version faithfully, but a few flip mid-version on the
+// build-DATE timeline that the format cannot see (the flipsAt-5 ASSUMED
+// cluster, and the kkrieger transcendental cluster below). For those, the
+// caller must supply the missing coordinate.
+//
+// An Era is exactly that coordinate: a format-version BASELINE plus a SPARSE
+// per-row override of the ledger. The format version detected from a file is
+// only the default projection -- Era::v(detected). A caller who knows the
+// build provenance names a profile from the `eras::` catalog, or refines one
+// with .with(). base < 0 is the auto/modern sentinel (no period gating).
+//
+// Representation is two 32-bit masks (DELTA_COUNT < 32), so a constexpr Era --
+// every `eras::` entry is one -- folds every gate at compile time, even across
+// a multi-version compiled range (no longer needs V2_VER_MIN == V2_VER_MAX).
+static_assert(DELTA_COUNT <= 32, "Era override masks are 32-bit");
+
+struct Era {
+  enum Behavior { Old = 0, New = 1 }; // pre-flip vs post-flip behavior
+
+  int      base;       // format-version baseline 0..6 (-1 = auto/modern)
+  uint32_t overridden; // bit d set => row d is forced, ignoring base
+  uint32_t forcedNew;  // bit d => the forced value (1 = NEW/post-flip)
+
+  static constexpr Era v(int formatVersion) { return { formatVersion, 0u, 0u }; }
+  static constexpr Era Auto() { return { -1, 0u, 0u }; }
+  constexpr bool isAuto() const { return base < 0; }
+
+  // Derive a new era with one ledger row pinned to Old/New. Chainable.
+  constexpr Era with(V2Delta d, Behavior b) const {
+    return { base,
+             overridden | (1u << (unsigned)d),
+             b == New ? (forcedNew |  (1u << (unsigned)d))
+                      : (forcedNew & ~(1u << (unsigned)d)) };
+  }
+
+  // Does the OLD (pre-flip) behavior apply for row d? Forced rows answer from
+  // the masks; the rest fall back to the format-version proxy.
+  constexpr bool old(V2Delta d) const {
+    return (overridden >> (unsigned)d & 1u) ? !(forcedNew >> (unsigned)d & 1u)
+                                            : oldBehavior(d, base);
+  }
+
+  // Era voice-pool size (16/32/64), honoring any POLY overrides.
+  constexpr int poolSize() const {
+    return old(DELTA_POLY_16) ? 16 : old(DELTA_POLY_32) ? 32 : 64;
+  }
+};
+
+// The catalog: each entry is ONE disassembled period binary. The clean cases
+// are just Era::v(version) (no overrides => byte-identical to the proxy). The
+// straddlers carry the rows the format version cannot express.
+namespace eras {
+  inline constexpr Era fr08      = Era::v(0); // year-2000 (fr08-extraction)
+  inline constexpr Era flybye    = Era::v(1); // fr-013 (flybye-extraction)
+  inline constexpr Era fr014     = Era::v(3);
+  inline constexpr Era fr019     = Era::v(4);
+  inline constexpr Era candytron = Era::v(5); // fr-030, late-v5 modern core
+
+  // kkrieger-beta (2004-04): a format-v5 file rendered by a near-v6 engine.
+  // PROVEN by disasm of the unpacked binary (image base 0x7c0000):
+  //   NATIVE_FSIN   -> New : sine osc AND FM both call the fastsin POLY
+  //                          @0x808178 (Horner, double coeffs 0x8080a8/b0/b8,
+  //                          no `fsin`). This is what makes the FM render as
+  //                          renderFMSin (float scheme) and ends the ch15
+  //                          silence -- the proven 30s corr 0.44 -> 0.9995 fix.
+  //   NATIVE_FPATAN -> New : per-sample overdrive = the fastatan POLY @0x808100
+  //                          (rational, coeffs 0x8080c8..0x808110, `fdiv`, no
+  //                          `fpatan`; the two native fpatan in the synth are
+  //                          the era-independent pi/4 const + set-time odGain2).
+  // Everything else stays v5: NO_DCOFFSET old (no 2^-18 bias in the synth
+  // render), POLY_32 old (pool 32). So NOT a v6 engine -- forcing v6 would
+  // wrongly inject the DC bias and grow the pool to 64. See ACCURACY-LOOSE-
+  // ENDS.md sec.10.
+  inline constexpr Era kkrieger2004 = Era::v(5)
+                                        .with(DELTA_NATIVE_FSIN,   Era::New)
+                                        .with(DELTA_NATIVE_FPATAN, Era::New);
+
+  inline constexpr Era release2004 = Era::v(6); // 2004 synth.asm
 }
 
 } // namespace v2portable

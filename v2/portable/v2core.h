@@ -56,8 +56,15 @@ extern "C"
 
   // era compat: the v2m FORMAT VERSION the song data was originally authored
   // as (0..6); gates period DSP behaviors via the v2eras.h ledger. Call after
-  // synthInit (init resets to modern).
+  // synthInit (init resets to modern). Shorthand for synthSetEra(pthis, ver,0,0).
   void __stdcall synthSetSourceVersion(void *pthis, int srcver);
+
+  // era compat (richer): set the full Era coordinate -- a format-version base
+  // plus the v2eras.h Era override masks (overridden/forcedNew). Lets a caller
+  // pin a build that the format version cannot express (e.g. eras::kkrieger2004
+  // = base 5 with NATIVE_FSIN/FPATAN forced New). Call after synthInit.
+  void __stdcall synthSetEra(void *pthis, int base,
+                             unsigned int overridden, unsigned int forcedNew);
 
   // determinism knob: replaces the historical rdtsc seeding (0 = reference)
   void __stdcall synthSetSeed(void *pthis, unsigned long long seed);

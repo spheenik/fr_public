@@ -75,9 +75,20 @@ Key contracts:
   identical bits — and never allocates.
 - `setSeed()` replaces the historical `rdtsc` noise/S&H/dist seeding;
   `0` is the reference seed (matches the pinned-rdtsc oracle convention).
-- `open(data, len, forceBehaviorVersion)` — the third arg is a **research
-  knob**: `-1` (default) uses the detected version; `0..6` renders with that
-  era's engine semantics (must lie inside the compiled range).
+- `open(data, len, era)` — the optional third arg is the **engine identity**
+  (`Era`, see `v2eras.h`). The format version is a lossy proxy for the build
+  that rendered a song (the score, not the orchestra); a few behaviors flip
+  mid-version on a timeline the format can't see.
+  - `Era::Auto()` (default) — use the detected version. Correct for every clean
+    case (byte-identical to before this knob existed).
+  - `eras::xxx` — a named build profile when the format can't express the build,
+    e.g. `eras::kkrieger2004` (a format-v5 file rendered by a near-v6 engine:
+    poly sine/FM + fastatan, but still v5 dc-offset/pool). Each catalog entry is
+    one disassembled binary.
+  - `Era::v(n)` / `.with(DELTA_X, Era::New)` — a raw version baseline or a
+    refined research override. The resolved base must lie in the compiled range.
+  - A back-compat `open(data, len, int)` overload remains (`-1`==Auto, `0..6`==
+    `Era::v(n)`).
 
 ### `v2dump` CLI
 

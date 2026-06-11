@@ -12,6 +12,7 @@
 #define V2SEQ_H_
 
 #include "v2core.h"   // 64-bit-clean type aliases (defines V2TYPES)
+#include "v2eras.h"   // v2portable::Era (engine-identity coordinate)
 
 /*************************************************************************************/
 /**                                                                                 **/
@@ -62,7 +63,7 @@ public:
 
   // init
   // call this instead of a constructor
-  void Init(sU32 a_tickspersec=1000) { m_tpc=a_tickspersec; m_base.valid=0; m_srcver=-1; m_seed=0; }
+  void Init(sU32 a_tickspersec=1000) { m_tpc=a_tickspersec; m_base.valid=0; m_era=v2portable::Era::Auto(); m_seed=0; }
 
 
   // era compat: declare which v2m FORMAT VERSION the song was originally
@@ -72,7 +73,12 @@ public:
   // player forwards it to the synth core after every synthInit, gating period
   // DSP behaviors (see v2/v2m/fr08-extraction/DELTA.md). Call any time before
   // Play(); -1 (default) = modern, no period gating.
-  void SetSourceVersion(sInt a_ver) { m_srcver = a_ver; }
+  void SetSourceVersion(sInt a_ver) { m_era = (a_ver < 0) ? v2portable::Era::Auto()
+                                                          : v2portable::Era::v(a_ver); }
+
+  // era compat (richer): set the full Era coordinate -- lets the player pin a
+  // build the format version cannot express (e.g. v2portable::eras::kkrieger2004).
+  void SetEra(const v2portable::Era &a_era) { m_era = a_era; }
 
   // determinism seed (applied after synthInit at the next Play/Reset)
   void SetSeed(sU64 a_seed) { m_seed = a_seed; }
@@ -249,7 +255,7 @@ private:
 
 	// member variables
 	sU32        m_tpc;
-	sInt        m_srcver;   // era compat: source v2m format version (-1 = modern)
+	v2portable::Era m_era;  // era compat: engine-identity coordinate (Auto = modern)
 	sU64        m_seed;     // determinism seed (0 = reference)
 	V2MBase			m_base;
 	PlayerState m_state;

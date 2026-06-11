@@ -41,7 +41,7 @@ struct PlayerImpl {
   uint8_t *song = nullptr; // our copy of the (canonicalized) v2m data
   size_t songLen = 0;
   uint64_t seed = 0;
-  int behaviorVersion = V2_VER_MAX;
+  Era era = Era::v(V2_VER_MAX);
   bool opened = false;
 
   ~PlayerImpl() { free(song); }
@@ -50,7 +50,7 @@ struct PlayerImpl {
 Player::Player() : impl_(new PlayerImpl), detectedVersion_(-1) {}
 Player::~Player() { delete impl_; }
 
-Result Player::open(const void *v2mData, size_t length, int forceBehaviorVersion)
+Result Player::open(const void *v2mData, size_t length, const Era &era)
 {
   PlayerImpl *im = impl_;
   if (im->opened) { im->seq.Stop(); im->opened = false; }
@@ -62,9 +62,10 @@ Result Player::open(const void *v2mData, size_t length, int forceBehaviorVersion
   if (!v2mData || length < 16)
     return Result::BadFile;
 
-  // research override (era-gated-engine spec): force the behavior version
-  // regardless of the detected format version; must lie in the compiled range
-  if (forceBehaviorVersion >= 0 && !behaviorVersionValid(forceBehaviorVersion))
+  // A non-auto era forces a baseline (research override / named profile)
+  // regardless of the detected format version; its base must lie in the
+  // compiled range. (Auto is validated against the detected version below.)
+  if (!era.isAuto() && !behaviorVersionValid(era.base))
     return Result::UnsupportedVersion;
 
   // native loading: fingerprint the format version and canonicalize to the
@@ -74,8 +75,9 @@ Result Player::open(const void *v2mData, size_t length, int forceBehaviorVersion
   if (lr.result != Result::OK)
     return lr.result;
 
-  im->behaviorVersion = forceBehaviorVersion >= 0 ? forceBehaviorVersion
-                                                  : detectedVersion_;
+  // resolve Auto to the detected format version; otherwise honor the caller's
+  // era (base already validated above).
+  im->era = era.isAuto() ? Era::v(detectedVersion_) : era;
 
   // the loader's canonical copy is ours; V2MPlayer keeps pointers into it
   // for the song's lifetime
@@ -83,13 +85,20 @@ Result Player::open(const void *v2mData, size_t length, int forceBehaviorVersion
   im->songLen = lr.size;
 
   im->seq.Init(1000);
-  im->seq.SetSourceVersion(im->behaviorVersion);
+  im->seq.SetEra(im->era);
   if (!im->seq.Open(im->song, 44100)) {
     free(im->song); im->song = nullptr;
     return Result::BadFile;
   }
   im->opened = true;
   return Result::OK;
+}
+
+Result Player::open(const void *v2mData, size_t length, int forceBehaviorVersion)
+{
+  // back-compat: -1 => Auto (detected version); 0..6 => force that baseline.
+  return open(v2mData, length,
+              forceBehaviorVersion < 0 ? Era::Auto() : Era::v(forceBehaviorVersion));
 }
 
 int Player::fileVersion() const { return detectedVersion_; }

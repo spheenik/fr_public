@@ -40,6 +40,11 @@
 #define V2_RONAN 0
 #endif
 
+// Era + the eras:: catalog (the engine-identity coordinate the caller supplies
+// when the file's format version under-resolves the build; see v2eras.h).
+// Included AFTER the V2_VER_MIN/MAX defaults above so the ledger sees them.
+#include "v2eras.h"
+
 namespace v2portable {
 
 enum class Result {
@@ -60,10 +65,20 @@ public:
 
   // Detect the file's format version, canonicalize, and prepare for playback.
   // The data is copied; the caller's buffer may be freed after open().
-  // forceBehaviorVersion: -1 = use the detected version (normal operation);
-  // 0..6 = research override, render with that version's engine semantics
-  // (must lie within the compiled version range).
-  Result open(const void *v2mData, size_t length, int forceBehaviorVersion = -1);
+  //
+  // era: which engine identity to render with (see v2eras.h).
+  //   Era::Auto()  (default) -- use the detected format version. Correct for
+  //                every clean case; for an ambiguous version (v5) it picks
+  //                the documented newest-in-range default.
+  //   eras::xxx    -- a named build profile, e.g. eras::kkrieger2004, when the
+  //                file's format version cannot express the build that wrote it.
+  //   Era::v(n)/.with(..) -- a raw version or a refined research override.
+  // The resolved base must lie within the compiled [V2_VER_MIN, V2_VER_MAX].
+  Result open(const void *v2mData, size_t length, const Era &era = Era::Auto());
+
+  // Back-compat overload: -1 = detected version (== Era::Auto()); 0..6 = force
+  // that format-version baseline (== Era::v(n)). Prefer the Era form above.
+  Result open(const void *v2mData, size_t length, int forceBehaviorVersion);
 
   // Format version (0..6) detected by the last successful open().
   // After a failed open() with UnsupportedVersion, still reports what was

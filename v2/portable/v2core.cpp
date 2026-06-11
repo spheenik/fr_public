@@ -635,13 +635,32 @@ struct V2Instance
   // row carries the flip version + evidence; oldBehavior() constant-folds
   // every gate in single-version builds (V2_VER_MIN == V2_VER_MAX).
   static const sInt SRCVER_MODERN = 6;
-  sInt srcVersion;
-  bool old(V2Delta d) const { return oldBehavior(d, srcVersion); }
+  // The era coordinate (format-version base + sparse ledger overrides, see
+  // v2eras.h Era). Defaults to modern; synthSetSourceVersion/synthSetEra lower
+  // it for period files. Engine code never inspects it directly: every
+  // behavior question goes through old(DELTA_X), ONE delta id per call site.
+  Era era;
+  bool old(V2Delta d) const {
+#if V2_VER_MIN == V2_VER_MAX
+    // Single-version build: oldBehavior folds to a compile-time constant and
+    // cross-era overrides are unrepresentable anyway (the other version's code
+    // paths aren't compiled), so bypass the masks entirely -- every gate folds.
+    return oldBehavior(d, V2_VER_MIN);
+#else
+    return era.old(d);
+#endif
+  }
   // era voice-pool bound (16/32/64, DELTA_POLY_16/32): the ALLOCATOR never
   // scans voices past this, which is provably equivalent to the period
   // engine's smaller pool -- unallocated voices keep chanmap == -1 and every
   // other voice loop skips those. Arrays stay sized for the 2004 POLY = 64.
-  sInt voicePool() const { return voicePoolSize(srcVersion); }
+  sInt voicePool() const {
+#if V2_VER_MIN == V2_VER_MAX
+    return voicePoolSize(V2_VER_MIN);
+#else
+    return era.poolSize();
+#endif
+  }
 
   // Stuff that depends on the sample rate
   sF32 SRfcsamplesperms;
@@ -3561,10 +3580,11 @@ struct V2Synth
     // ("mov ecx, SYN.size / rep stosb"). Match it: sizeof(*this).
     memset((void *)this, 0, sizeof(*this)); // (see PORT FIX above)
 
-    // era compat: the memset above would leave srcVersion == 0 (= fr08 era!);
-    // default to modern. A period file must opt in via synthSetSourceVersion
-    // AFTER synthInit (mirrors the synthSetGlobals call order in the player).
-    instance.srcVersion = V2Instance::SRCVER_MODERN;
+    // era compat: the memset above would leave the era zeroed (base 0 = fr08
+    // era!); default to modern. A period file must opt in via
+    // synthSetSourceVersion / synthSetEra AFTER synthInit (mirrors the
+    // synthSetGlobals call order in the player).
+    instance.era = Era::v(V2Instance::SRCVER_MODERN);
     instance.rng.init(1);     // glibc-compatible deterministic stream
     instance.userSeed = 0;    // player seed knob (synthSetSeed)
 
@@ -4467,12 +4487,13 @@ void __stdcall synthSetGlobals(void *pthis, const void *ptr)
 }
 
 
-void __stdcall synthSetSourceVersion(void *pthis, int srcver)
+// Apply the side effects of a just-set era (the inst.era field is already
+// updated). Shared by synthSetSourceVersion and synthSetEra. Call after
+// synthInit (which sets the modern 128-sample frame); we recompute the
+// control-frame size and re-seed here.
+static void synthApplyEra(V2Synth *syn)
 {
-  // era compat (see V2Instance::srcVersion). Call after synthInit (which sets
-  // the modern 128-sample frame); we recompute the control-frame size here.
-  V2Instance &inst = ((V2Synth *)pthis)->instance;
-  inst.srcVersion = srcver;
+  V2Instance &inst = syn->instance;
   // ROOT delta (fr08-extraction/DELTA.md): the year-2000 synth ran the control
   // rate at a 256-sample frame (driver resets the frame counter to 0x100), vs
   // 128 in 2004. This single change is the root of the envelope decay/release
@@ -4487,15 +4508,32 @@ void __stdcall synthSetSourceVersion(void *pthis, int srcver)
   }
   // Matched-seed A/B (DELTA.md D6): the C1 ground truth pins rdtsc=0, so all
   // osc-noise / LFO-S&H seeds start at 0. The voices were init'd during
-  // synthInit (before srcVersion was set), so re-seed them here; keysync
+  // synthInit (before the era was set), so re-seed them here; keysync
   // noteOns re-init through the era-gated init path and seed 0 on their own.
-  V2Synth *syn = (V2Synth *)pthis;
   if (inst.old(DELTA_RDTSC_SEED))
     for (sInt v=0; v < V2Synth::POLY; v++)
     {
       for (sInt o=0; o < syVV2::NOSC; o++) syn->voicesw[v].osc[o].nseed = 0u;
       for (sInt l=0; l < syVV2::NLFO; l++) syn->voicesw[v].lfo[l].nseed = 0u;
     }
+}
+
+void __stdcall synthSetSourceVersion(void *pthis, int srcver)
+{
+  // era compat (see V2Instance::era). Shorthand: a plain format-version base
+  // with no ledger overrides.
+  V2Synth *syn = (V2Synth *)pthis;
+  syn->instance.era = Era::v(srcver);
+  synthApplyEra(syn);
+}
+
+void __stdcall synthSetEra(void *pthis, int base,
+                           unsigned int overridden, unsigned int forcedNew)
+{
+  // era compat (richer): the full Era coordinate, base + override masks.
+  V2Synth *syn = (V2Synth *)pthis;
+  syn->instance.era = Era{ base, (uint32_t)overridden, (uint32_t)forcedNew };
+  synthApplyEra(syn);
 }
 
 // determinism knob (design D6): replaces the historical rdtsc seeding. 0 =

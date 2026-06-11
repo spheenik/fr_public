@@ -167,8 +167,8 @@ void V2MPlayer::Reset()
 		// (e.g. the reverb feedback-gain precision) also runs in period mode --
 		// the 2000 Reset @0x40940b sets globals as v0. -1 = unset, leave default.
 		// (fr08-extraction/DELTA.md)
-		if (m_srcver >= 0)
-			synthSetSourceVersion(m_synth, m_srcver);
+		if (!m_era.isAuto())
+			synthSetEra(m_synth, m_era.base, m_era.overridden, m_era.forcedNew);
 		if (m_seed)
 			synthSetSeed(m_synth, m_seed);
 		synthSetGlobals(m_synth,(void*)m_base.globals);

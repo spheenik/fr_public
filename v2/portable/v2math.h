@@ -239,6 +239,23 @@ inline double sinCore(double x)
   }
 }
 
+// cos(x) = sin(x + pi/2): same reduction, quadrant shifted by one. Computed
+// directly (no pi/2 add) so it shares sinCore's determinism / accuracy.
+inline double cosCore(double x)
+{
+  int n = (int)lrint(x * kTwoOverPi);
+  double t = x - (double)n * kPio2A;
+  t -= (double)n * kPio2B;
+  t -= (double)n * kPio2C;                 // x - n*pi/2, |t| <= pi/4
+  switch ((n + 1) & 3) {
+  default:
+  case 0: return sinPoly(t);
+  case 1: return cosPoly(t);
+  case 2: return -sinPoly(t);
+  case 3: return -cosPoly(t);
+  }
+}
+
 inline double atan01(double a)             // 0 <= a <= 1
 {
   int j = (int)lrint(a * 8.0);             // 0..8
@@ -311,6 +328,10 @@ inline float atanf24(float x) { return (float)atanCore((double)x); }
 // fsin -- the year-2000 native sine (osc sine / LFO). Host fsin was
 // CPU-vendor-dependent; this fixed implementation is the portable reference.
 inline float sinf24(float x) { return (float)sinCore((double)x); }
+
+// fcos -- deterministic stand-in for the set-time x87 fcos (boost-EQ coeff);
+// libm cos is not correctly-rounded, so it differs per arch/vendor.
+inline float cosf24(float x) { return (float)cosCore((double)x); }
 
 // dist OVERDRIVE setup tail (asm .mode1, synth.asm:1831-1838):
 // gain2 = (param1/128) / atan(gain1); fpatan full precision, fdiv rounds.

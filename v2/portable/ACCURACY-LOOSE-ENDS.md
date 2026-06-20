@@ -156,12 +156,28 @@ Open lead from the 6.2 hunt: re-verify the v5→v6 mod-dest remap puts these on
 the right canonical param — mod3 dest67=boost.amount, mod4 dest65=aux2/delay-
 send, mod5 dest13=osc2.vol. No observed divergence; flagged for completeness.
 
-## 6. Cross-host / cross-arch determinism (task 8.2)
+## 6. Cross-host / cross-arch determinism (task 8.2) — CLOSED 2026-06-20
 
-The hash contract is implemented and `baselines.sha256` is checked in, but
-the equal-bits-on-a-second-host check has only been run on x86_64 this
-session. Re-run `test/check.py` on one other arch (e.g. aarch64) and record
-the result to close 8.2.
+**Status: PROVEN cross-arch.** The whole corpus renders **bit-identical on
+aarch64** to the checked-in x86_64 `baselines.sha256`. Method: cross-build a
+static `v2dump` with `aarch64-linux-gnu-g++` (same `-ffp-contract=off -O2 -std=
+c++17` policy) and run `test/check.py --dump <qemu-aarch64 wrapper>`. Result:
+14/14 OK, including the transcendental-heavy binaries (kkrieger FM, fr019,
+candytron) — same sha256 on both arches. This validates the determinism design
+end-to-end: own polynomial transcendentals (`v2math.h`) over plain IEEE doubles,
+FMA contraction off, no x87 80-bit.
+
+Caveat on QEMU: user-mode qemu emulates aarch64 *instructions* but links the
+host glibc — so it proves the player's own arithmetic is arch-independent, not a
+real ARM libm. That residual gap is now also closed at the source: the audio
+path no longer calls any *approximating* libm function. The two set-time
+`cos(boost)`/`sin(boost)` calls (`v2core.cpp:714-715`) — the last violators of
+the `v2math.h` "no approximating libm" policy — were routed through the
+deterministic `vm::cosf24`/`vm::sinf24` (new `cosCore`, 2026-06-20). All
+remaining `<math.h>` use is the IEEE correctly-rounded / exact subset (`sqrt`,
+`fabs`, `ldexp`, `frexp`, `fmod`, `trunc`, `lrint`), which is bit-identical on
+every conforming arch by definition. The cosCore change moved **zero** baselines
+(byte-identical on x86_64 for every corpus song), so it was free.
 
 ## 7. Portable v5 vs the brullwurfel v5 oracle (~0.148 residual)
 

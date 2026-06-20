@@ -263,6 +263,7 @@ static inline sInt v2_fistp(sF32 v)             { return v2portable::vm::fistp(v
 static inline sInt v2_oscfreq(sF32 pno, sF32 base) { return v2portable::vm::oscfreqi(pno, base); }
 static inline sF32 v2_overdrive_gain2(sF32 p1g, sF32 gain1) { return v2portable::vm::odGain2(p1g, gain1); }
 static inline sF32 v2_fsin(sF32 x)              { return v2portable::vm::sinf24(x); }
+static inline sF32 v2_fcos(sF32 x)              { return v2portable::vm::cosf24(x); }
 static inline sF32 v2_atan(sF32 x)              { return v2portable::vm::atanf24(x); }
 
 // 2^x and base^e: faithful x87 kernels in the validation build, libm otherwise.
@@ -711,8 +712,8 @@ struct V2Instance
 
     // low shelving EQ (asm order: (1/sr)*fc2pi*fcboostfreq)
     sF32 boost = recip * fc2pi * fcboostfreq;
-    SRfcBoostCos = cos(boost);
-    SRfcBoostSin = sin(boost);
+    SRfcBoostCos = v2_fcos(boost);   // deterministic; libm cos differs per arch
+    SRfcBoostSin = v2_fsin(boost);
   }
 };
 
